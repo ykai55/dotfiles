@@ -1,0 +1,50 @@
+let mapleader=' '
+
+"""" idea设置
+" 导航
+nnoremap gi :action GotoImplementation<cr>
+nnoremap gu :action FindUsages<cr>
+nnoremap gU :action FindUsagesInFile<cr>
+nnoremap gd :action GotoDeclaration<cr>
+nnoremap gs :action GotoSuperMethod<cr>
+
+nnoremap ]e :action GotoNextError<cr>
+nnoremap [e :action GotoPreviousError<cr>
+
+nnoremap \o :action FileStructurePopup<cr>
+nnoremap go :action FileStructurePopup<cr>
+
+"nnoremap <c-o> :action Back<cr>
+"nnoremap <c-i> :action Forward<cr>
+map <c-o> <action>(Back)
+map <c-i> <action>(Forward)
+
+nnoremap <leader>r :action RenameElement<cr>
+
+inoremap <c-j> <esc>:action CodeCompletion<cr>a
+
+"set ideajoin
+set ideamarks
+" set idearefactormode=insert
+
+"""" vim设置
+set ignorecase
+set hlsearch
+set incsearch
+
+nnoremap <esc> :nohlsearch<cr><esc>
+nnoremap <c-[> :nohlsearch<cr><esc>
+
+cnoremap <c-a> <home>
+cnoremap <c-e> <end>
+cnoremap <c-f> <right>
+cnoremap <c-b> <left>
+
+inoremap <c-a> <home>
+inoremap <c-e> <end>
+inoremap <c-f> <right>
+inoremap <c-b> <left>
+
+vnoremap = :action ReformatCode<cr><esc>
+
+Plug 'tpope/vim-surround'
