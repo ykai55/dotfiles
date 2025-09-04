@@ -1,2 +1,1 @@
-. "$HOME/.cargo/env.fish"
-source "$HOME/.cargo/env.fish"
+test -f "$HOME/.cargo/env.fish" && . "$HOME/.cargo/env.fish"
