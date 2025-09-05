@@ -96,3 +96,9 @@ if type fnm -q && status is-interactive
   fnm completions --shell fish | .
   alias nvm=fnm
 end
+
+if test -f ~/.bash_profile
+  apply_env ~/.bash_profile
+end
+
+status --is-interactive; and rbenv init - --no-rehash fish | source
