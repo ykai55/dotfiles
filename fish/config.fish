@@ -101,4 +101,6 @@ if test -f ~/.bash_profile
   apply_env ~/.bash_profile
 end
 
-status --is-interactive; and rbenv init - --no-rehash fish | source
+if type rbenv -q && status --is-interactive
+  rbenv init - --no-rehash fish | source
+end

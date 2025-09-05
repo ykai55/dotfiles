@@ -1,6 +1,6 @@
 [user]
-	name = dangyingkai
-	email = dangyingkai@bytedance.com
+	name = ykai
+	email = me@ykai.cc
 [filter "lfs"]
 	smudge = git-lfs smudge -- %f
 	process = git-lfs filter-process
@@ -22,9 +22,3 @@
   ck = checkout
 	last = log -1 HEAD --format=%H
   root = rev-parse --show-toplevel
-[trace2]
-	normalTarget = /Users/bytedance/.gitlog/log
-	normalBrief = true
-[maintenance]
-	repo = /Users/bytedance/src/Douyin/Douyin
-	repo = /Users/bytedance/src/Douyin
