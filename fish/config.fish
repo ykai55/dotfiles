@@ -60,7 +60,7 @@ set -gx ANDROID_HOME (if is_mac; echo ~/Library/Android/sdk; else; echo /opt/and
 set -gx ANDROID_SDK_ROOT (if is_mac; echo ~/Library/Android/sdk; else; echo /opt/android-sdk; end)
 set -gx PAGER 'less --mouse --wheel-lines=3'
 
-add_path '~/.local/opt/*/bin' ~/.local/bin ~/scripts ~/script /usr/local/bin
+add_path '~/.local/opt/*/bin' ~/.local/bin ~/scripts ~/script /usr/local/bin ~/bin
 add_path ~/src/emsdk/ ~/src/emsdk/upstream/emscripten/
 add_path ~/.ghcup/bin
 add_path $ANDROID_SDK_ROOT/platform-tools
