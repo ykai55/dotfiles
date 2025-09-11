@@ -22,3 +22,4 @@
   ck = checkout
 	last = log -1 HEAD --format=%H
   root = rev-parse --show-toplevel
+  skip = update-index --skip-worktree
