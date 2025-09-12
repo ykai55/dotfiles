@@ -59,6 +59,7 @@ set -gx EDITOR nvim
 set -gx ANDROID_HOME (if is_mac; echo ~/Library/Android/sdk; else; echo /opt/android-sdk; end)
 set -gx ANDROID_SDK_ROOT (if is_mac; echo ~/Library/Android/sdk; else; echo /opt/android-sdk; end)
 set -gx PAGER 'less --mouse --wheel-lines=3'
+set -gx HOMEBREW_NO_AUTO_UPDATE 1
 
 add_path '~/.local/opt/*/bin' ~/.local/bin ~/scripts ~/script /usr/local/bin ~/bin
 add_path ~/src/emsdk/ ~/src/emsdk/upstream/emscripten/
