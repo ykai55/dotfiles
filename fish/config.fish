@@ -61,6 +61,8 @@ set -gx ANDROID_SDK_ROOT (if is_mac; echo ~/Library/Android/sdk; else; echo /opt
 set -gx PAGER 'less --mouse --wheel-lines=3'
 set -gx HOMEBREW_NO_AUTO_UPDATE 1
 
+set -gx tide_git_truncation_length 40
+
 add_path '~/.local/opt/*/bin' ~/.local/bin ~/scripts ~/script /usr/local/bin ~/bin
 add_path ~/src/emsdk/ ~/src/emsdk/upstream/emscripten/
 add_path ~/.ghcup/bin
@@ -98,8 +100,8 @@ if type fnm -q && status is-interactive
   alias nvm=fnm
 end
 
-if test -f ~/.bash_profile
-  apply_env ~/.bash_profile
+if test -f ~/.bashrc
+  apply_env ~/.bashrc
 end
 
 if type rbenv -q && status --is-interactive

@@ -17,7 +17,7 @@
   diff = diff --color
 	cp = cherry-pick
 	st = status
-	br = branch
+	br = branch --show-current
 	cm = commit
   ck = checkout
 	last = log -1 HEAD --format=%H
