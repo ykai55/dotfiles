@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+
+# Cross-platform clipboard utility
+# Supports macOS (pbcopy/pbpaste), Linux X11 (xclip/xsel), Linux Wayland (wl-clipboard)
+
+set -euo pipefail
+
+# Function to detect the platform and available clipboard tools
+detect_clipboard() {
+  if command -v pbcopy >/dev/null 2>&1 && command -v pbpaste >/dev/null 2>&1; then
+    # macOS
+    CLIPBOARD_COPY="pbcopy"
+    CLIPBOARD_PASTE="pbpaste"
+    return
+  elif command -v wl-copy >/dev/null 2>&1 && command -v wl-paste >/dev/null 2>&1; then
+    # Wayland
+    CLIPBOARD_COPY="wl-copy"
+    CLIPBOARD_PASTE="wl-paste"
+    return
+  elif command -v xclip >/dev/null 2>&1; then
+    # X11 with xclip
+    CLIPBOARD_COPY="xclip -selection clipboard"
+    CLIPBOARD_PASTE="xclip -selection clipboard -o"
+    return
+  elif command -v xsel >/dev/null 2>&1; then
+    # X11 with xsel
+    CLIPBOARD_COPY="xsel --clipboard --input"
+    CLIPBOARD_PASTE="xsel --clipboard --output"
+    return
+  else
+    echo "Error: No supported clipboard tool found" >&2
+    echo "Install one of: pbcopy (macOS), xclip, xsel (X11), wl-clipboard (Wayland)" >&2
+    exit 1
+  fi
+}
+
+# Function to copy stdin to clipboard
+copy_to_clipboard() {
+  $CLIPBOARD_COPY
+}
+
+# Function to paste from clipboard to stdout
+paste_from_clipboard() {
+  $CLIPBOARD_PASTE
+}
+
+# Function to show usage
+show_usage() {
+  echo "Usage: $(basename "$0") [copy|paste]"
+  echo "  copy   - Copy stdin to clipboard (default if no arguments)"
+  echo "  paste  - Paste from clipboard to stdout"
+  echo ""
+  echo "Examples:"
+  echo "  echo 'hello' | $(basename "$0") copy"
+  echo "  $(basename "$0") paste"
+}
+
+# Main logic
+main() {
+  # Detect clipboard utilities
+  detect_clipboard
+
+  # Parse arguments
+  if [[ $# -eq 0 ]]; then
+    # Default to copy if no arguments
+    copy_to_clipboard
+  else
+    case "$1" in
+      copy|-c|--copy)
+        copy_to_clipboard
+        ;;
+      paste|-p|--paste)
+        paste_from_clipboard
+        ;;
+      help|-h|--help)
+        show_usage
+        ;;
+      *)
+        echo "Unknown command: $1"
+        show_usage
+        exit 1
+        ;;
+    esac
+  fi
+}
+
+# Run main function with all arguments
+main "$@"
