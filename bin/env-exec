@@ -1,7 +1,22 @@
 #!/bin/bash
 
-# 获取符号链接的文件名（不包含路径）
+# 获取符号链接的文件名
 CMD_NAME=$(basename "$0")
 
-# 使用env执行对应的命令
-exec /usr/bin/env "$CMD_NAME" "$@"
+# 检查是否以.proxy结尾
+if [[ ! "$CMD_NAME" =~ -proxy$ ]]; then
+  echo "错误：符号链接名必须以 '-proxy' 结尾" >&2
+  exit 1
+fi
+
+# 去除-proxy后缀获取真实命令名
+REAL_CMD="${CMD_NAME%-proxy}"
+
+# 安全验证：防止空命令
+if [ -z "$REAL_CMD" ]; then
+  echo "错误：无效的命令名" >&2
+  exit 1
+fi
+
+# 执行目标命令（通过env查找）
+exec /usr/bin/env "$REAL_CMD" "$@"
