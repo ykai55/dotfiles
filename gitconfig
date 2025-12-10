@@ -23,6 +23,7 @@
 	last = log -1 HEAD --format=%H
   root = rev-parse --show-toplevel
   skip = update-index --skip-worktree
+  show-body = show -q --format="%b"
 
 [advice]
 detachedHead = false
