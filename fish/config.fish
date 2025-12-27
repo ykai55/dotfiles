@@ -44,6 +44,7 @@ if is_mac
   add_path '/opt/homebrew/sbin'
 end
 
+## aliases
 alias ls 'ls --color'
 alias cls 'clear && echo -ne "\e[3J"'
 alias jqless 'jq --color-output | less -r'
@@ -55,6 +56,10 @@ alias nd nextd
 alias cdr 'cd (git root)'
 alias claude 'ccr code'
 
+## binds
+bind alt-backspace backward-kill-path-component
+
+## envs
 set -gx EDITOR nvim
 set -gx ANDROID_HOME (if is_mac; echo ~/Library/Android/sdk; else; echo /opt/android-sdk; end)
 set -gx ANDROID_SDK_ROOT (if is_mac; echo ~/Library/Android/sdk; else; echo /opt/android-sdk; end)
