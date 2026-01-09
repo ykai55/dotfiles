@@ -1,0 +1,21 @@
+#!/bin/bash
+set -e
+
+OUT_DIR="out/db"
+GN="buildtools/gn/gn"
+ARGS='target_os="android" target_cpu="arm64" target_exclude_patterns=["//lynx/*"] enable_unittests=true'
+
+if [ $# -gt 0 ]; then
+  # append args
+  ARGS="$ARGS $*"
+fi
+
+$GN gen "$OUT_DIR" --export-compile-commands --args="$ARGS"
+
+if [ -f "$OUT_DIR/compile_commands.json" ]; then
+  echo "Linking compile_commands.json to current directory..."
+  ln -sf "$OUT_DIR/compile_commands.json" .
+else
+  echo "Error: compile_commands.json was not generated in $OUT_DIR"
+  exit 1
+fi
