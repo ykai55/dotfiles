@@ -25,6 +25,7 @@
   skip = update-index --skip-worktree
   show-body = show -q --format="%b"
   pbr = !git pull origin $(git br)
+  fbr = !git fetch origin $(git br)
 
 [advice]
 detachedHead = false
