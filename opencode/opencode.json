@@ -7,6 +7,13 @@
     "oh-my-opencode",
     "opencode-antigravity-auth@1.3.0"
   ],
+  "mcp": {
+    "tmux": {
+      "type": "local",
+      "command": ["npx", "-y", "tmux-mcp", "--shell-type=fish"],
+      "enabled": true
+    }
+  },
   "theme": "flexoki",
   "provider": {
     "openai": {
