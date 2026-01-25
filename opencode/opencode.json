@@ -5,12 +5,16 @@
     "opencode-gemini-auth@latest",
     "opencode-openai-codex-auth",
     "oh-my-opencode",
-    "opencode-antigravity-auth@1.3.1"
   ],
   "mcp": {
     "tmux": {
       "type": "local",
-      "command": ["npx", "-y", "tmux-mcp", "--shell-type=fish"],
+      "command": [
+        "npx",
+        "-y",
+        "tmux-mcp",
+        "--shell-type=fish"
+      ],
       "enabled": true
     }
   },
@@ -152,62 +156,38 @@
     "google": {
       "name": "Google",
       "models": {
-        "antigravity-gemini-3-pro-high": {
-          "name": "Gemini 3 Pro High (Antigravity)",
-          "thinking": true,
-          "attachment": true,
-          "limit": {
-            "context": 1048576,
-            "output": 65535
-          },
-          "modalities": {
-            "input": [
-              "text",
-              "image",
-              "pdf"
-            ],
-            "output": [
-              "text"
-            ]
+        "gemini-2.5-flash": {
+          "options": {
+            "thinkingConfig": {
+              "thinkingBudget": 128,
+              "includeThoughts": true
+            }
           }
         },
-        "antigravity-gemini-3-pro-low": {
-          "name": "Gemini 3 Pro Low (Antigravity)",
-          "thinking": true,
-          "attachment": true,
-          "limit": {
-            "context": 1048576,
-            "output": 65535
-          },
-          "modalities": {
-            "input": [
-              "text",
-              "image",
-              "pdf"
-            ],
-            "output": [
-              "text"
-            ]
+        "gemini-2.5-pro": {
+          "options": {
+            "thinkingConfig": {
+              "thinkingBudget": 128,
+              "includeThoughts": true
+            }
           }
         },
-        "antigravity-gemini-3-flash": {
-          "name": "Gemini 3 Flash (Antigravity)",
-          "attachment": true,
-          "limit": {
-            "context": 1048576,
-            "output": 65536
-          },
-          "modalities": {
-            "input": [
-              "text",
-              "image",
-              "pdf"
-            ],
-            "output": [
-              "text"
-            ]
+        "gemini-3-flash-preview": {
+          "options": {
+            "thinkingConfig": {
+              "thinkingLevel": "low",
+              "includeThoughts": true
+            }
           }
-        }
+        },
+        "gemini-3-pro-preview": {
+          "options": {
+            "thinkingConfig": {
+              "thinkingLevel": "low",
+              "includeThoughts": true
+            }
+          }
+        },
       }
     }
   }

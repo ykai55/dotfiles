@@ -1,6 +1,8 @@
 {
   "$schema": "https://raw.githubusercontent.com/code-yeongyu/oh-my-opencode/master/assets/oh-my-opencode.schema.json",
-  "disabled_hooks": ["startup-toast"],
+  "disabled_hooks": [
+    "startup-toast"
+  ],
   "google_auth": false,
   "sisyphus_agent": {
     "disabled": false,
@@ -9,14 +11,14 @@
     "replace_plan": false
   },
   "agents": {
-    "Sisyphus": {
+    "sisyphus": {
       "model": "openai/gpt-5.2-codex"
     },
     "librarian": {
       "model": "openai/gpt-5.1-codex-mini"
     },
     "explore": {
-      "model": "opencode/grok-code"
+      "model": "opencode/gpt-5.1-codex-mini"
     },
     "frontend-ui-ux-engineer": {
       "model": "openai/gpt-5.2-codex"

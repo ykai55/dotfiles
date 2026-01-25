@@ -79,4 +79,10 @@ return {
       }
     end,
   },
+
+  {
+    "https://gn.googlesource.com/gn",
+    subdir = "misc/vim",
+    ft = "gn",
+  },
 }
