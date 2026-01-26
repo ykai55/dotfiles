@@ -1,0 +1,294 @@
+#!/usr/bin/env python3
+# tmux-dump
+# Structured tmux topology dump (sessions/windows/panes) with process details.
+# Output: JSON to stdout.
+#
+# Usage:
+#   tmux-dump > tmux.json
+#   tmux-dump --pretty > tmux.pretty.json
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+from typing import Any, Dict, List, Optional, Tuple
+
+
+def run_cmd(argv: List[str]) -> Tuple[int, str, str]:
+    proc = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    return proc.returncode, proc.stdout, proc.stderr
+
+
+def run_tmux(args: List[str]) -> List[str]:
+    rc, out, err = run_cmd(["tmux"] + args)
+    if rc != 0:
+        raise RuntimeError(err.strip() or f"tmux command failed: {' '.join(args)}")
+    return [line for line in out.splitlines() if line.strip()]
+
+
+def normalize_tty_for_ps(pane_tty: str) -> str:
+    if pane_tty.startswith("/dev/"):
+        return pane_tty[len("/dev/") :]
+    return pane_tty
+
+
+def ps_processes_for_tty(pane_tty: str) -> List[Dict[str, Any]]:
+    tty_short = normalize_tty_for_ps(pane_tty)
+    tty_full = pane_tty
+
+    ps_fields = ["pid=", "ppid=", "user=", "state=", "etime=", "command="]
+
+    def try_ps(tty_val: str) -> Optional[List[Dict[str, Any]]]:
+        rc, out, _ = run_cmd(["ps", "-t", tty_val] + sum([["-o", f] for f in ps_fields], []))
+        if rc != 0:
+            return None
+        procs: List[Dict[str, Any]] = []
+        for line in out.splitlines():
+            line = line.rstrip("\n")
+            if not line.strip():
+                continue
+            parts = line.strip().split(None, 5)
+            if len(parts) < 6:
+                continue
+            pid_s, ppid_s, user, state, etime, cmd = parts
+            try:
+                pid = int(pid_s)
+            except ValueError:
+                continue
+            try:
+                ppid = int(ppid_s)
+            except ValueError:
+                ppid = None
+            procs.append(
+                {
+                    "pid": pid,
+                    "ppid": ppid,
+                    "user": user,
+                    "state": state,
+                    "etime": etime,
+                    "command": cmd,
+                }
+            )
+        return procs
+
+    procs = try_ps(tty_short)
+    if procs is None:
+        procs = try_ps(tty_full)
+    return procs or []
+
+
+def parse_kv_tsv(line: str, keys: List[str]) -> Dict[str, str]:
+    parts = line.split("\t")
+    if len(parts) < len(keys):
+        parts = parts + [""] * (len(keys) - len(parts))
+    return {k: v for k, v in zip(keys, parts[: len(keys)])}
+
+
+def normalize_path(path: str) -> str:
+    if path.startswith("file://"):
+        return path[len("file://") :]
+    return path
+
+
+def tmux_dump() -> Dict[str, Any]:
+    sess_keys = [
+        "session_id",
+        "session_name",
+        "session_created",
+        "session_attached",
+        "session_windows",
+        "session_width",
+        "session_height",
+    ]
+    sess_fmt = "\t".join(
+        [
+            "#{session_id}",
+            "#{session_name}",
+            "#{session_created}",
+            "#{session_attached}",
+            "#{session_windows}",
+            "#{session_width}",
+            "#{session_height}",
+        ]
+    )
+
+    try:
+        sess_lines = run_tmux(["list-sessions", "-F", sess_fmt])
+    except RuntimeError as exc:
+        return {
+            "tmux": {
+                "ok": False,
+                "error": str(exc),
+            },
+            "sessions": [],
+        }
+
+    sessions: List[Dict[str, Any]] = []
+    for line in sess_lines:
+        raw = parse_kv_tsv(line, sess_keys)
+        sessions.append(
+            {
+                "id": raw["session_id"],
+                "name": raw["session_name"],
+                "created": int(raw["session_created"]) if raw["session_created"].isdigit() else raw["session_created"],
+                "attached": raw["session_attached"] == "1",
+                "windows_count": int(raw["session_windows"]) if raw["session_windows"].isdigit() else raw["session_windows"],
+                "size": {
+                    "width": int(raw["session_width"]) if raw["session_width"].isdigit() else raw["session_width"],
+                    "height": int(raw["session_height"]) if raw["session_height"].isdigit() else raw["session_height"],
+                },
+                "windows": [],
+            }
+        )
+
+    win_keys = [
+        "window_id",
+        "window_index",
+        "window_name",
+        "window_active",
+        "window_panes",
+        "window_layout",
+        "window_width",
+        "window_height",
+    ]
+    win_fmt = "\t".join(
+        [
+            "#{window_id}",
+            "#{window_index}",
+            "#{window_name}",
+            "#{window_active}",
+            "#{window_panes}",
+            "#{window_layout}",
+            "#{window_width}",
+            "#{window_height}",
+        ]
+    )
+
+    pane_keys = [
+        "pane_id",
+        "pane_index",
+        "pane_title",
+        "pane_active",
+        "pane_dead",
+        "pane_width",
+        "pane_height",
+        "pane_left",
+        "pane_top",
+        "pane_tty",
+        "pane_pid",
+        "pane_current_command",
+        "pane_start_command",
+        "pane_path",
+    ]
+    pane_fmt = "\t".join(
+        [
+            "#{pane_id}",
+            "#{pane_index}",
+            "#{pane_title}",
+            "#{pane_active}",
+            "#{pane_dead}",
+            "#{pane_width}",
+            "#{pane_height}",
+            "#{pane_left}",
+            "#{pane_top}",
+            "#{pane_tty}",
+            "#{pane_pid}",
+            "#{pane_current_command}",
+            "#{pane_start_command}",
+            "#{pane_path}",
+        ]
+    )
+
+    for session in sessions:
+        sname = session["name"]
+        win_lines = run_tmux(["list-windows", "-t", sname, "-F", win_fmt])
+        windows: List[Dict[str, Any]] = []
+        for line in win_lines:
+            wraw = parse_kv_tsv(line, win_keys)
+            widx = wraw["window_index"]
+            window: Dict[str, Any] = {
+                "id": wraw["window_id"],
+                "index": int(widx) if widx.isdigit() else widx,
+                "name": wraw["window_name"],
+                "active": wraw["window_active"] == "1",
+                "panes_count": int(wraw["window_panes"]) if wraw["window_panes"].isdigit() else wraw["window_panes"],
+                "layout": wraw["window_layout"],
+                "size": {
+                    "width": int(wraw["window_width"]) if wraw["window_width"].isdigit() else wraw["window_width"],
+                    "height": int(wraw["window_height"]) if wraw["window_height"].isdigit() else wraw["window_height"],
+                },
+                "panes": [],
+            }
+
+            target = f"{sname}:{wraw['window_index']}"
+            pane_lines = run_tmux(["list-panes", "-t", target, "-F", pane_fmt])
+            panes: List[Dict[str, Any]] = []
+            for pline in pane_lines:
+                praw = parse_kv_tsv(pline, pane_keys)
+                pane_tty = praw["pane_tty"]
+                pane_pid = praw["pane_pid"]
+                procs = ps_processes_for_tty(pane_tty) if pane_tty else []
+                panes.append(
+                    {
+                        "id": praw["pane_id"],
+                        "index": int(praw["pane_index"]) if praw["pane_index"].isdigit() else praw["pane_index"],
+                        "title": praw["pane_title"],
+                        "active": praw["pane_active"] == "1",
+                        "dead": praw["pane_dead"] == "1",
+                        "geometry": {
+                            "width": int(praw["pane_width"]) if praw["pane_width"].isdigit() else praw["pane_width"],
+                            "height": int(praw["pane_height"]) if praw["pane_height"].isdigit() else praw["pane_height"],
+                            "left": int(praw["pane_left"]) if praw["pane_left"].isdigit() else praw["pane_left"],
+                            "top": int(praw["pane_top"]) if praw["pane_top"].isdigit() else praw["pane_top"],
+                        },
+                        "tty": pane_tty,
+                        "pid": int(pane_pid) if pane_pid.isdigit() else pane_pid,
+                        "current_command": praw["pane_current_command"],
+                        "start_command": praw["pane_start_command"],
+                        "path": normalize_path(praw["pane_path"]),
+                        "processes": procs,
+                    }
+                )
+
+            window["panes"] = panes
+            windows.append(window)
+
+        def win_sort_key(win: Dict[str, Any]) -> Tuple[int, str]:
+            idx = win.get("index")
+            if isinstance(idx, int):
+                return (idx, "")
+            return (10**9, str(idx))
+
+        windows.sort(key=win_sort_key)
+        session["windows"] = windows
+
+    return {
+        "tmux": {
+            "ok": True,
+            "hostname": os.uname().nodename if hasattr(os, "uname") else None,
+        },
+        "sessions": sessions,
+    }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Dump tmux structure as JSON.")
+    parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON")
+    args = parser.parse_args()
+
+    data = tmux_dump()
+    if args.pretty:
+        json.dump(data, sys.stdout, indent=2, ensure_ascii=False)
+        sys.stdout.write("\n")
+    else:
+        json.dump(data, sys.stdout, separators=(",", ":"), ensure_ascii=False)
+        sys.stdout.write("\n")
+
+    return 0 if data.get("tmux", {}).get("ok") else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
