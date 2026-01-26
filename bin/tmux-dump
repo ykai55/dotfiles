@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import subprocess
 import sys
 from typing import Any, Dict, List, Optional, Tuple
@@ -29,10 +30,26 @@ def run_tmux(args: List[str]) -> List[str]:
     return [line for line in out.splitlines() if line.strip()]
 
 
+def current_session_name() -> Optional[str]:
+    rc, out, _ = run_cmd(["tmux", "display-message", "-p", "#{session_name}"])
+    if rc != 0:
+        return None
+    return out.strip() or None
+
+
 def normalize_tty_for_ps(pane_tty: str) -> str:
     if pane_tty.startswith("/dev/"):
         return pane_tty[len("/dev/") :]
     return pane_tty
+
+
+def split_command(cmd: str) -> List[str]:
+    if not cmd:
+        return []
+    try:
+        return shlex.split(cmd)
+    except ValueError:
+        return cmd.split()
 
 
 def ps_processes_for_tty(pane_tty: str) -> List[Dict[str, Any]]:
@@ -69,7 +86,7 @@ def ps_processes_for_tty(pane_tty: str) -> List[Dict[str, Any]]:
                     "user": user,
                     "state": state,
                     "etime": etime,
-                    "command": cmd,
+                    "command": split_command(cmd),
                 }
             )
         return procs
@@ -115,20 +132,22 @@ def tmux_dump() -> Dict[str, Any]:
         ]
     )
 
+    session_target: Optional[str] = None
+    if "TMUX" in os.environ:
+        session_target = current_session_name()
+
     try:
         sess_lines = run_tmux(["list-sessions", "-F", sess_fmt])
     except RuntimeError as exc:
         return {
-            "tmux": {
-                "ok": False,
-                "error": str(exc),
-            },
-            "sessions": [],
+            "error": str(exc),
         }
 
     sessions: List[Dict[str, Any]] = []
     for line in sess_lines:
         raw = parse_kv_tsv(line, sess_keys)
+        if session_target and raw.get("session_name") != session_target:
+            continue
         sessions.append(
             {
                 "id": raw["session_id"],
@@ -202,6 +221,8 @@ def tmux_dump() -> Dict[str, Any]:
         ]
     )
 
+    current_pane_id = os.environ.get("TMUX_PANE") if "TMUX" in os.environ else None
+
     for session in sessions:
         sname = session["name"]
         win_lines = run_tmux(["list-windows", "-t", sname, "-F", win_fmt])
@@ -230,10 +251,14 @@ def tmux_dump() -> Dict[str, Any]:
                 praw = parse_kv_tsv(pline, pane_keys)
                 pane_tty = praw["pane_tty"]
                 pane_pid = praw["pane_pid"]
-                procs = ps_processes_for_tty(pane_tty) if pane_tty else []
+                pane_id = praw["pane_id"]
+                if current_pane_id and pane_id == current_pane_id:
+                    procs = []
+                else:
+                    procs = ps_processes_for_tty(pane_tty) if pane_tty else []
                 panes.append(
                     {
-                        "id": praw["pane_id"],
+                        "id": pane_id,
                         "index": int(praw["pane_index"]) if praw["pane_index"].isdigit() else praw["pane_index"],
                         "title": praw["pane_title"],
                         "active": praw["pane_active"] == "1",
@@ -265,13 +290,19 @@ def tmux_dump() -> Dict[str, Any]:
         windows.sort(key=win_sort_key)
         session["windows"] = windows
 
-    return {
-        "tmux": {
-            "ok": True,
-            "hostname": os.uname().nodename if hasattr(os, "uname") else None,
-        },
-        "sessions": sessions,
-    }
+    if not sessions:
+        return {
+            "error": "no sessions found",
+        }
+
+    if session_target:
+        return sessions[0]
+
+    for session in sessions:
+        if session.get("attached"):
+            return session
+
+    return sessions[0]
 
 
 def main() -> int:
@@ -287,7 +318,7 @@ def main() -> int:
         json.dump(data, sys.stdout, separators=(",", ":"), ensure_ascii=False)
         sys.stdout.write("\n")
 
-    return 0 if data.get("tmux", {}).get("ok") else 1
+    return 0 if "error" not in data else 1
 
 
 if __name__ == "__main__":
