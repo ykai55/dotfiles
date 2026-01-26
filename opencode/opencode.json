@@ -4,7 +4,7 @@
   "plugin": [
     "opencode-gemini-auth@latest",
     "opencode-openai-codex-auth@latest",
-    "oh-my-opencode@latest",
+    // "oh-my-opencode@latest",
     "opencode-antigravity-auth@latest"
   ],
   "mcp": {
