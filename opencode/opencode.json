@@ -3,8 +3,9 @@
   "model": "openai/gpt-5.2-codex",
   "plugin": [
     "opencode-gemini-auth@latest",
-    "opencode-openai-codex-auth",
-    "oh-my-opencode",
+    "opencode-openai-codex-auth@latest",
+    "oh-my-opencode@latest",
+    "opencode-antigravity-auth@latest"
   ],
   "mcp": {
     "tmux": {
@@ -156,38 +157,137 @@
     "google": {
       "name": "Google",
       "models": {
-        "gemini-2.5-flash": {
-          "options": {
-            "thinkingConfig": {
-              "thinkingBudget": 128,
-              "includeThoughts": true
+        "antigravity-gemini-3-pro": {
+          "name": "Gemini 3 Pro (Antigravity)",
+          "limit": {
+            "context": 1048576,
+            "output": 65535
+          },
+          "modalities": {
+            "input": [
+              "text",
+              "image",
+              "pdf"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "variants": {
+            "low": {
+              "thinkingLevel": "low"
+            },
+            "high": {
+              "thinkingLevel": "high"
             }
           }
         },
-        "gemini-2.5-pro": {
-          "options": {
-            "thinkingConfig": {
-              "thinkingBudget": 128,
-              "includeThoughts": true
+        "antigravity-gemini-3-flash": {
+          "name": "Gemini 3 Flash (Antigravity)",
+          "limit": {
+            "context": 1048576,
+            "output": 65536
+          },
+          "modalities": {
+            "input": [
+              "text",
+              "image",
+              "pdf"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "variants": {
+            "minimal": {
+              "thinkingLevel": "minimal"
+            },
+            "low": {
+              "thinkingLevel": "low"
+            },
+            "medium": {
+              "thinkingLevel": "medium"
+            },
+            "high": {
+              "thinkingLevel": "high"
             }
           }
         },
-        "gemini-3-flash-preview": {
-          "options": {
-            "thinkingConfig": {
-              "thinkingLevel": "low",
-              "includeThoughts": true
+        "antigravity-claude-sonnet-4-5": {
+          "name": "Claude Sonnet 4.5 (Antigravity)",
+          "limit": {
+            "context": 200000,
+            "output": 64000
+          },
+          "modalities": {
+            "input": [
+              "text",
+              "image",
+              "pdf"
+            ],
+            "output": [
+              "text"
+            ]
+          }
+        },
+        "antigravity-claude-sonnet-4-5-thinking": {
+          "name": "Claude Sonnet 4.5 Thinking (Antigravity)",
+          "limit": {
+            "context": 200000,
+            "output": 64000
+          },
+          "modalities": {
+            "input": [
+              "text",
+              "image",
+              "pdf"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "variants": {
+            "low": {
+              "thinkingConfig": {
+                "thinkingBudget": 8192
+              }
+            },
+            "max": {
+              "thinkingConfig": {
+                "thinkingBudget": 32768
+              }
             }
           }
         },
-        "gemini-3-pro-preview": {
-          "options": {
-            "thinkingConfig": {
-              "thinkingLevel": "low",
-              "includeThoughts": true
+        "antigravity-claude-opus-4-5-thinking": {
+          "name": "Claude Opus 4.5 Thinking (Antigravity)",
+          "limit": {
+            "context": 200000,
+            "output": 64000
+          },
+          "modalities": {
+            "input": [
+              "text",
+              "image",
+              "pdf"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "variants": {
+            "low": {
+              "thinkingConfig": {
+                "thinkingBudget": 8192
+              }
+            },
+            "max": {
+              "thinkingConfig": {
+                "thinkingBudget": 32768
+              }
             }
           }
-        },
+        }
       }
     }
   }
