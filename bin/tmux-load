@@ -25,12 +25,35 @@ def run_tmux(args: List[str]) -> Tuple[int, str, str]:
     return proc.returncode, proc.stdout, proc.stderr
 
 
+PENDING_COMMANDS: List[List[str]] = []
+
+
+def tmux_queue(args: List[str]) -> None:
+    PENDING_COMMANDS.append(args)
+
+
+def tmux_flush() -> None:
+    if not PENDING_COMMANDS:
+        return
+    combined: List[str] = []
+    for idx, cmd in enumerate(PENDING_COMMANDS):
+        if idx:
+            combined.append(";")
+        combined.extend(cmd)
+    PENDING_COMMANDS.clear()
+    rc, out, err = run_tmux(combined)
+    if rc != 0:
+        raise RuntimeError(err.strip() or f"tmux failed: {' '.join(combined)}")
+
+
 def tmux_ok(args: List[str]) -> bool:
+    tmux_flush()
     rc, _, _ = run_tmux(args)
     return rc == 0
 
 
 def tmux_out(args: List[str]) -> str:
+    tmux_flush()
     rc, out, err = run_tmux(args)
     if rc != 0:
         raise RuntimeError(err.strip() or f"tmux failed: {' '.join(args)}")
@@ -42,7 +65,7 @@ def session_exists(name: str) -> bool:
 
 
 def kill_session(name: str) -> None:
-    tmux_out(["kill-session", "-t", name])
+    tmux_queue(["kill-session", "-t", name])
 
 
 def unique_session_name(base: str) -> str:
@@ -147,6 +170,10 @@ def normalize_path(path: str) -> str:
             idx = path.find("/")
             if idx != -1:
                 path = path[idx:]
+    if path and not path.startswith("/"):
+        idx = path.find("/")
+        if idx != -1:
+            path = path[idx:]
     return path
 
 
@@ -156,6 +183,18 @@ def normalize_start_command(cmd: Any) -> str:
     if isinstance(cmd, list):
         return shlex.join([str(item) for item in cmd])
     return str(cmd)
+
+
+def session_name_from_dump(data: Dict[str, Any]) -> Optional[str]:
+    if "sessions" in data and isinstance(data.get("sessions"), list):
+        sessions = data.get("sessions") or []
+        if not sessions:
+            return None
+        session = sessions[0] or {}
+        return session.get("name") or session.get("session_name")
+    if "windows" in data or "name" in data or "session_name" in data:
+        return data.get("name") or data.get("session_name")
+    return None
 
 
 def ensure_window_panes(
@@ -168,10 +207,28 @@ def ensure_window_panes(
         return
 
     panes_sorted = sorted(panes, key=lambda p: p.get("index", 0)) if sort_by_index else list(panes)
+    prev_pane: Optional[Dict[str, Any]] = panes_sorted[0]
     for pane in panes_sorted[1:]:
         path = normalize_path(pane.get("path") or "")
-        cmd = ["split-window", "-t", target, "-c", path]
-        tmux_out(cmd)
+        cmd = ["split-window", "-t", target]
+        if prev_pane:
+            prev_geom = prev_pane.get("geometry") or {}
+            geom = pane.get("geometry") or {}
+            try:
+                prev_left = int(prev_geom.get("left"))
+                prev_top = int(prev_geom.get("top"))
+                left = int(geom.get("left"))
+                top = int(geom.get("top"))
+                if top == prev_top and left != prev_left:
+                    cmd.append("-h")
+                elif left == prev_left and top != prev_top:
+                    cmd.append("-v")
+            except Exception:
+                pass
+        if path:
+            cmd.extend(["-c", path])
+        tmux_queue(cmd)
+        prev_pane = pane
 
     # Apply titles and run commands
     pane_map = list_pane_ids_by_index(target)
@@ -185,12 +242,12 @@ def ensure_window_panes(
             continue
         title = pane.get("title") or ""
         if title:
-            tmux_out(["select-pane", "-t", pane_id, "-T", title])
+            tmux_queue(["select-pane", "-t", pane_id, "-T", title])
 
         if run_commands:
             cmd = normalize_start_command(pane.get("start_command"))
             if cmd:
-                tmux_out(["send-keys", "-t", pane_id, cmd, "Enter"])
+                tmux_queue(["send-keys", "-t", pane_id, cmd, "Enter"])
 
     # Select active pane if indicated
     active_idx = None
@@ -200,9 +257,18 @@ def ensure_window_panes(
             break
     if active_idx is not None:
         try:
-            tmux_out(["select-pane", "-t", f"{target}.{int(active_idx)}"])
+            tmux_queue(["select-pane", "-t", f"{target}.{int(active_idx)}"])
         except Exception:
             pass
+    tmux_flush()
+
+
+def apply_window_options(window_id: str, window: Dict[str, Any]) -> None:
+    automatic_rename = window.get("automatic_rename")
+    if automatic_rename:
+        tmux_queue(["set-window-option", "-t", window_id, "automatic-rename", str(automatic_rename)])
+
+
 
 
 def restore_from_dump(
@@ -238,7 +304,7 @@ def restore_from_dump(
     if exists:
         if force:
             if target_is_current:
-                tmux_out(["kill-window", "-a", "-t", session_target(sname)])
+                tmux_queue(["kill-window", "-a", "-t", session_target(sname)])
                 session_empty = True
             else:
                 kill_session(sname)
@@ -285,13 +351,14 @@ def restore_from_dump(
             ).strip()
             window_id_by_index[int(win.get("index", 0))] = win_id
             ensure_window_panes(win_id, panes, run_commands, sort_by_index=False)
+            apply_window_options(win_id, win)
 
             layout = win.get("layout") or ""
             if layout:
-                tmux_out(["select-layout", "-t", win_id, layout])
+                tmux_queue(["select-layout", "-t", win_id, layout])
 
         if (reuse_current or session_empty) and original_window_id:
-            tmux_out(["kill-window", "-t", original_window_id])
+            tmux_queue(["kill-window", "-t", original_window_id])
     else:
         
         first_window = windows_sorted[0]
@@ -307,6 +374,7 @@ def restore_from_dump(
         ).strip()
         window_id_by_index[first_index] = first_win_id
         ensure_window_panes(first_win_id, first_panes, run_commands)
+        apply_window_options(first_win_id, first_window)
 
         for win in windows_sorted[1:]:
             widx = int(win.get("index", 0))
@@ -331,10 +399,11 @@ def restore_from_dump(
             ).strip()
             window_id_by_index[widx] = win_id
             ensure_window_panes(win_id, panes, run_commands)
+            apply_window_options(win_id, win)
 
             layout = win.get("layout") or ""
             if layout:
-                tmux_out(["select-layout", "-t", win_id, layout])
+                tmux_queue(["select-layout", "-t", win_id, layout])
 
     # Select active window if specified
     active_idx = None
@@ -342,13 +411,14 @@ def restore_from_dump(
         if win.get("active"):
             active_idx = win.get("index")
             break
-    if active_idx is not None and (not reuse_current):
+    if active_idx is not None:
         try:
             win_id = window_id_by_index.get(int(active_idx))
             if win_id:
-                tmux_out(["select-window", "-t", win_id])
+                tmux_queue(["select-window", "-t", win_id])
         except Exception:
             pass
+    tmux_flush()
 
 
 def main() -> int:
@@ -376,18 +446,48 @@ def main() -> int:
         return 2
 
     target_session = args.session
-    if not target_session and "TMUX" in os.environ:
-        target_session = current_session_name()
+    dump_session = session_name_from_dump(data)
+    current_session = current_session_name() if "TMUX" in os.environ else None
+    in_tmux = current_session is not None
+    if not target_session:
+        if in_tmux:
+            target_session = current_session
+        else:
+            target_session = dump_session
 
     if not target_session:
-        print("ERROR: --session is required when not inside tmux", file=sys.stderr)
+        print("ERROR: --session is required when dump has no session name and not inside tmux", file=sys.stderr)
         return 2
+
+    if not in_tmux and not args.session and dump_session:
+        if session_exists(dump_session):
+            target_session = unique_session_name(dump_session)
+
+    if (
+        not args.session
+        and current_session
+        and dump_session
+        and target_session == current_session
+        and dump_session != current_session
+    ):
+        new_name = dump_session
+        if session_exists(new_name):
+            new_name = unique_session_name(new_name)
+        tmux_out(["rename-session", "-t", current_session, new_name])
+        target_session = new_name
+        current_session = new_name
 
     try:
         restore_from_dump(data, args.force, args.append, args.run_commands, target_session)
     except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
+
+    if in_tmux:
+        if current_session != target_session:
+            tmux_out(["switch-client", "-t", target_session])
+    else:
+        tmux_out(["attach-session", "-t", target_session])
 
     return 0
 

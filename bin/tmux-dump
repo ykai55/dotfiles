@@ -106,11 +106,15 @@ def parse_kv_tsv(line: str, keys: List[str]) -> Dict[str, str]:
 
 def normalize_path(path: str) -> str:
     if path.startswith("file://"):
-        return path[len("file://") :]
+        path = path[len("file://") :]
+    if path and not path.startswith("/"):
+        idx = path.find("/")
+        if idx != -1:
+            path = path[idx:]
     return path
 
 
-def tmux_dump() -> Dict[str, Any]:
+def tmux_dump(target_session: Optional[str] = None) -> Dict[str, Any]:
     sess_keys = [
         "session_id",
         "session_name",
@@ -132,8 +136,8 @@ def tmux_dump() -> Dict[str, Any]:
         ]
     )
 
-    session_target: Optional[str] = None
-    if "TMUX" in os.environ:
+    session_target: Optional[str] = target_session
+    if session_target is None and "TMUX" in os.environ:
         session_target = current_session_name()
 
     try:
@@ -230,11 +234,19 @@ def tmux_dump() -> Dict[str, Any]:
         for line in win_lines:
             wraw = parse_kv_tsv(line, win_keys)
             widx = wraw["window_index"]
+            automatic_rename = ""
+            try:
+                automatic_rename = run_tmux(
+                    ["show-options", "-w", "-t", f"{sname}:{widx}", "-v", "automatic-rename"]
+                )[0].strip()
+            except Exception:
+                automatic_rename = ""
             window: Dict[str, Any] = {
                 "id": wraw["window_id"],
                 "index": int(widx) if widx.isdigit() else widx,
                 "name": wraw["window_name"],
                 "active": wraw["window_active"] == "1",
+                "automatic_rename": automatic_rename,
                 "panes_count": int(wraw["window_panes"]) if wraw["window_panes"].isdigit() else wraw["window_panes"],
                 "layout": wraw["window_layout"],
                 "size": {
@@ -278,6 +290,7 @@ def tmux_dump() -> Dict[str, Any]:
                     }
                 )
 
+
             window["panes"] = panes
             windows.append(window)
 
@@ -289,6 +302,21 @@ def tmux_dump() -> Dict[str, Any]:
 
         windows.sort(key=win_sort_key)
         session["windows"] = windows
+        session_path = ""
+        try:
+            probe = run_tmux(
+                ["new-window", "-d", "-P", "-t", sname, "-F", "#{window_id}\t#{pane_current_path}"]
+            )[0].strip()
+            parts = probe.split("\t", 1)
+            if len(parts) == 2:
+                win_id, probe_path = parts
+                session_path = normalize_path(probe_path.strip())
+                if win_id:
+                    run_tmux(["kill-window", "-t", win_id])
+        except Exception:
+            session_path = ""
+        if session_path:
+            session["path"] = session_path
 
     if not sessions:
         return {
@@ -308,9 +336,10 @@ def tmux_dump() -> Dict[str, Any]:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Dump tmux structure as JSON.")
     parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON")
+    parser.add_argument("--session", help="Target tmux session name")
     args = parser.parse_args()
 
-    data = tmux_dump()
+    data = tmux_dump(args.session)
     if args.pretty:
         json.dump(data, sys.stdout, indent=2, ensure_ascii=False)
         sys.stdout.write("\n")

@@ -15,6 +15,7 @@ Lint
 Tests (Python)
 - Run all tests (unittest):
   - `python bin/tests/test_tmux_load.py`
+  - `python bin/tests/test_tmux_dump.py`
 - Run a single test (unittest):
   - `python -m unittest bin/tests/test_tmux_load.py TmuxLoadWindowRestoreTests.test_restore_new_session_creates_all_windows`
   - If that fails due to module path, run the file and temporarily narrow the
@@ -23,7 +24,7 @@ Tests (Python)
 ## Repository Layout
 
 - `bin/`: executable scripts (bash, Python, perl). Most tooling lives here.
-- `bin/tests/`: unittest coverage for `tmux-load`.
+- `bin/tests/`: unittest coverage for `tmux-load` and `tmux-dump`.
 - `fish/`, `nvim/`, `tmux/`: shell/editor/terminal configs.
 - `kitty.conf`, `gitconfig`: app configs.
 
@@ -31,9 +32,12 @@ Tests (Python)
 
 tmux-dump
 - Purpose: dump tmux topology as JSON to stdout.
-- Usage: `tmux-dump > tmux.json` or `tmux-dump --pretty > tmux.pretty.json`.
+- Usage: `tmux-dump > tmux.json`, `tmux-dump --pretty > tmux.pretty.json`,
+  `tmux-dump --session name > tmux.json`.
 - Behavior: when inside tmux, dumps current session; otherwise dumps attached
   session or first session.
+- Session path: uses a temporary background window probe to capture
+  `pane_current_path` for the session.
 - Output: session -> windows -> panes -> processes.
 - Notable fields: `name`, `windows[].name`, `windows[].panes[].path`,
   `windows[].panes[].start_command`, `windows[].panes[].current_command`,
@@ -49,9 +53,12 @@ tmux-load
   - `tmux-load --run-commands path/to/tmux.json`
 - Behavior:
   - Restores windows, panes, titles, layouts, and working directories.
-  - Default target is current tmux session; outside tmux requires `--session`.
+  - Default target is current tmux session; outside tmux uses dump session name
+    and creates a unique new session if that name exists.
   - Use `-f` to clear target session, `-a` to append.
   - `--run-commands` executes pane `start_command`.
+  - After restore, switches/attaches to the target session when not restoring
+    in place.
 - Input: supports single-session object or legacy `{ "sessions": [...] }`.
 - Note: `start_command` may be string or list; list is joined into shell line.
 
@@ -81,7 +88,7 @@ Python (tmux-dump, tmux-load)
   - Use `subprocess.run([...], stdout=PIPE, stderr=PIPE, text=True)`.
   - Keep helper wrappers (`run_tmux`, `tmux_out`) to centralize error handling.
 - Data handling:
-  - Normalize paths (strip `file://`) when consuming tmux output.
+  - Normalize paths (strip `file://` and host prefixes) when consuming tmux output.
   - Preserve output schema; do not rename keys unless updating both scripts and
     tests.
 
