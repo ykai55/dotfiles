@@ -28,43 +28,6 @@ Tests (Python)
 - `fish/`, `nvim/`, `tmux/`: shell/editor/terminal configs.
 - `kitty.conf`, `gitconfig`: app configs.
 
-## Script Inventory (bin/)
-
-tmux-dump
-- Purpose: dump tmux topology as JSON to stdout.
-- Usage: `tmux-dump > tmux.json`, `tmux-dump --pretty > tmux.pretty.json`,
-  `tmux-dump --session name > tmux.json`.
-- Behavior: when inside tmux, dumps current session; otherwise dumps attached
-  session or first session.
-- Session path: uses a temporary background window probe to capture
-  `pane_current_path` for the session.
-- Output: session -> windows -> panes -> processes.
-- Notable fields: `name`, `windows[].name`, `windows[].panes[].path`,
-  `windows[].panes[].start_command`, `windows[].panes[].current_command`,
-  `windows[].panes[].processes[].command` (array of tokens).
-
-tmux-load
-- Purpose: restore tmux topology from a tmux-dump JSON file.
-- Usage:
-  - `tmux-load path/to/tmux.json`
-  - `tmux-load --session name path/to/tmux.json`
-  - `tmux-load -f path/to/tmux.json`
-  - `tmux-load -a path/to/tmux.json`
-  - `tmux-load --run-commands path/to/tmux.json`
-- Behavior:
-  - Restores windows, panes, titles, layouts, and working directories.
-  - Default target is current tmux session; outside tmux uses dump session name
-    and creates a unique new session if that name exists.
-  - Use `-f` to clear target session, `-a` to append.
-  - `--run-commands` executes pane `start_command`.
-  - After restore, switches/attaches to the target session when not restoring
-    in place.
-- Input: supports single-session object or legacy `{ "sessions": [...] }`.
-- Note: `start_command` may be string or list; list is joined into shell line.
-
-Important cross-script note
-- When changing tmux dump/load behavior, keep `tmux-dump` and `tmux-load`
-  aligned and update tests in `bin/tests/test_tmux_load.py`.
 
 ## Code Style Guidelines
 

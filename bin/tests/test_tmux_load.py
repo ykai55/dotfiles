@@ -56,25 +56,40 @@ class TmuxLoadWindowRestoreTests(unittest.TestCase):
             mock.patch.object(self.tmux_load, "ensure_window_panes", side_effect=ensure_window_panes), \
             mock.patch.object(self.tmux_load, "unique_session_name", side_effect=lambda name: name), \
             mock.patch.object(self.tmux_load, "session_exists", return_value=False):
-            self.tmux_load.restore_from_dump(data, force=False, append=False, run_commands=False, target_session="sess")
+            self.tmux_load.restore_from_dump(
+                data,
+                force=False,
+                append=False,
+                run_commands=False,
+                target_session="sess",
+                base_dir="",
+                fallback_dir="/",
+            )
 
         new_session_calls = [c for c in calls if c and c[0] == "new-session"]
         new_window_calls = [c for c in calls if c and c[0] == "new-window"]
         self.assertEqual(len(new_session_calls), 1)
-        self.assertEqual(len(new_window_calls), 2)
+        self.assertEqual(len(new_window_calls), 3)
         self.assertEqual(len(ensure_calls), 3)
         self.assertIn("-n", new_session_calls[0])
-        self.assertIn("w1", new_session_calls[0])
+        self.assertIn("__tmux_load__", new_session_calls[0])
         self.assertIn("-c", new_session_calls[0])
         self.assertIn("/", new_session_calls[0])
         self.assertIn("-n", new_window_calls[0])
-        self.assertIn("w2", new_window_calls[0])
+        self.assertIn("w1", new_window_calls[0])
         self.assertIn("-c", new_window_calls[0])
         self.assertIn("/", new_window_calls[0])
         self.assertIn("-n", new_window_calls[1])
-        self.assertIn("w3", new_window_calls[1])
+        self.assertIn("w2", new_window_calls[1])
         self.assertIn("-c", new_window_calls[1])
         self.assertIn("/", new_window_calls[1])
+        self.assertIn("-n", new_window_calls[2])
+        self.assertIn("w3", new_window_calls[2])
+        self.assertIn("-c", new_window_calls[2])
+        self.assertIn("/", new_window_calls[2])
+        kill_window_calls = [c for c in calls if c and c[0] == "kill-window"]
+        self.assertEqual(len(kill_window_calls), 1)
+        self.assertIn("@1", kill_window_calls[0])
 
     def test_restore_applies_window_automatic_rename(self):
         data = {
@@ -90,17 +105,27 @@ class TmuxLoadWindowRestoreTests(unittest.TestCase):
             calls.append(args)
             if args and args[0] == "new-session":
                 return "@1"
+            if args and args[0] == "new-window":
+                return "@2"
             return ""
 
         with mock.patch.object(self.tmux_load, "tmux_out", side_effect=tmux_out), \
             mock.patch.object(self.tmux_load, "tmux_queue", side_effect=lambda args: queue_calls.append(args)), \
             mock.patch.object(self.tmux_load, "tmux_flush"), \
             mock.patch.object(self.tmux_load, "session_exists", return_value=False):
-            self.tmux_load.restore_from_dump(data, force=False, append=False, run_commands=False, target_session="sess")
+            self.tmux_load.restore_from_dump(
+                data,
+                force=False,
+                append=False,
+                run_commands=False,
+                target_session="sess",
+                base_dir="",
+                fallback_dir="/",
+            )
 
         set_calls = [c for c in queue_calls if c and c[0] == "set-window-option"]
         self.assertEqual(len(set_calls), 1)
-        self.assertEqual(set_calls[0], ["set-window-option", "-t", "@1", "automatic-rename", "on"])
+        self.assertEqual(set_calls[0], ["set-window-option", "-t", "@2", "automatic-rename", "on"])
 
     def test_restore_skips_empty_automatic_rename(self):
         data = {
@@ -116,16 +141,62 @@ class TmuxLoadWindowRestoreTests(unittest.TestCase):
             calls.append(args)
             if args and args[0] == "new-session":
                 return "@1"
+            if args and args[0] == "new-window":
+                return "@2"
             return ""
 
         with mock.patch.object(self.tmux_load, "tmux_out", side_effect=tmux_out), \
             mock.patch.object(self.tmux_load, "tmux_queue", side_effect=lambda args: queue_calls.append(args)), \
             mock.patch.object(self.tmux_load, "tmux_flush"), \
             mock.patch.object(self.tmux_load, "session_exists", return_value=False):
-            self.tmux_load.restore_from_dump(data, force=False, append=False, run_commands=False, target_session="sess")
+            self.tmux_load.restore_from_dump(
+                data,
+                force=False,
+                append=False,
+                run_commands=False,
+                target_session="sess",
+                base_dir="",
+                fallback_dir="/",
+            )
 
         set_calls = [c for c in queue_calls if c and c[0] == "set-window-option"]
         self.assertEqual(len(set_calls), 0)
+
+    def test_restore_applies_zoomed_window(self):
+        data = {
+            "name": "sess",
+            "windows": [
+                {"index": 0, "name": "w1", "zoomed": True, "panes": [{"index": 0, "path": "/"}]},
+            ],
+        }
+        calls = []
+        queue_calls = []
+
+        def tmux_out(args):
+            calls.append(args)
+            if args and args[0] == "new-session":
+                return "@1"
+            if args and args[0] == "new-window":
+                return "@2"
+            return ""
+
+        with mock.patch.object(self.tmux_load, "tmux_out", side_effect=tmux_out), \
+            mock.patch.object(self.tmux_load, "tmux_queue", side_effect=lambda args: queue_calls.append(args)), \
+            mock.patch.object(self.tmux_load, "tmux_flush"), \
+            mock.patch.object(self.tmux_load, "session_exists", return_value=False):
+            self.tmux_load.restore_from_dump(
+                data,
+                force=False,
+                append=False,
+                run_commands=False,
+                target_session="sess",
+                base_dir="",
+                fallback_dir="/",
+            )
+
+        resize_calls = [c for c in queue_calls if c and c[0] == "resize-pane"]
+        self.assertEqual(len(resize_calls), 1)
+        self.assertEqual(resize_calls[0], ["resize-pane", "-Z", "-t", "@2"])
 
     def test_ensure_window_panes_sets_titles_and_runs_commands(self):
         panes = [
@@ -192,7 +263,15 @@ class TmuxLoadWindowRestoreTests(unittest.TestCase):
             mock.patch.object(self.tmux_load, "is_empty_session", return_value=True), \
             mock.patch.object(self.tmux_load, "current_session_name", return_value="cur"), \
             mock.patch.object(self.tmux_load, "session_exists", return_value=True):
-            self.tmux_load.restore_from_dump(data, force=False, append=False, run_commands=False, target_session="cur")
+            self.tmux_load.restore_from_dump(
+                data,
+                force=False,
+                append=False,
+                run_commands=False,
+                target_session="cur",
+                base_dir="",
+                fallback_dir="/",
+            )
 
         new_session_calls = [c for c in calls if c and c[0] == "new-session"]
         new_window_calls = [c for c in calls if c and c[0] == "new-window"]
@@ -265,7 +344,15 @@ class TmuxLoadWindowRestoreTests(unittest.TestCase):
             mock.patch.object(self.tmux_load, "is_empty_session", return_value=True), \
             mock.patch.object(self.tmux_load, "current_session_name", return_value="cur"), \
             mock.patch.object(self.tmux_load, "session_exists", return_value=True):
-            self.tmux_load.restore_from_dump(data, force=False, append=False, run_commands=False, target_session="cur")
+            self.tmux_load.restore_from_dump(
+                data,
+                force=False,
+                append=False,
+                run_commands=False,
+                target_session="cur",
+                base_dir="",
+                fallback_dir="/",
+            )
 
         new_window_calls = [c for c in calls if c and c[0] == "new-window"]
         kill_window_calls = [c for c in queue_calls if c and c[0] == "kill-window"]
@@ -281,6 +368,53 @@ class TmuxLoadWindowRestoreTests(unittest.TestCase):
         self.assertIn("w2", new_window_calls[1])
         self.assertIn("-c", new_window_calls[1])
         self.assertIn("/", new_window_calls[1])
+
+    def test_restore_new_session_uses_base_dir_only_for_first_window(self):
+        data = {
+            "name": "sess",
+            "windows": [
+                {"index": 0, "name": "w1", "panes": [{"index": 0, "path": "/fromdump1"}]},
+                {"index": 1, "name": "w2", "panes": [{"index": 0, "path": "/fromdump2"}]},
+            ],
+        }
+        calls = []
+        queue_calls = []
+
+        def tmux_out(args):
+            calls.append(args)
+            if args and args[0] in {"new-session", "new-window"}:
+                return "@1"
+            return ""
+
+        with mock.patch.object(self.tmux_load, "tmux_out", side_effect=tmux_out), \
+            mock.patch.object(self.tmux_load, "tmux_queue", side_effect=lambda args: queue_calls.append(args)), \
+            mock.patch.object(self.tmux_load, "tmux_flush"), \
+            mock.patch.object(self.tmux_load, "ensure_window_panes"), \
+            mock.patch.object(self.tmux_load, "apply_window_options"), \
+            mock.patch.object(self.tmux_load, "session_exists", return_value=False):
+            self.tmux_load.restore_from_dump(
+                data,
+                force=False,
+                append=False,
+                run_commands=False,
+                target_session="sess",
+                base_dir="/base",
+                fallback_dir="/cwd",
+            )
+
+        new_session_calls = [c for c in calls if c and c[0] == "new-session"]
+        new_window_calls = [c for c in calls if c and c[0] == "new-window"]
+        self.assertEqual(len(new_session_calls), 1)
+        self.assertEqual(len(new_window_calls), 2)
+        self.assertIn("-c", new_session_calls[0])
+        self.assertIn("/base", new_session_calls[0])
+        self.assertIn("-c", new_window_calls[0])
+        self.assertIn("/fromdump1", new_window_calls[0])
+        self.assertIn("-c", new_window_calls[1])
+        self.assertIn("/fromdump2", new_window_calls[1])
+        kill_window_calls = [c for c in queue_calls if c and c[0] == "kill-window"]
+        self.assertEqual(len(kill_window_calls), 1)
+        self.assertIn("@1", kill_window_calls[0])
 
     def test_numeric_session_target_uses_colon_suffix(self):
         data = {
@@ -306,7 +440,15 @@ class TmuxLoadWindowRestoreTests(unittest.TestCase):
 
         with mock.patch.object(self.tmux_load, "tmux_out", side_effect=tmux_out), \
             mock.patch.object(self.tmux_load, "session_exists", return_value=False):
-            self.tmux_load.restore_from_dump(data, force=False, append=False, run_commands=False, target_session="123")
+            self.tmux_load.restore_from_dump(
+                data,
+                force=False,
+                append=False,
+                run_commands=False,
+                target_session="123",
+                base_dir="",
+                fallback_dir="/",
+            )
 
         new_window_calls = [c for c in calls if c and c[0] == "new-window"]
         self.assertIn("123:", new_window_calls[0])
@@ -328,6 +470,8 @@ class TmuxLoadWindowRestoreTests(unittest.TestCase):
                     append=False,
                     run_commands=False,
                     target_session="sess",
+                    base_dir="",
+                    fallback_dir="/",
                 )
         self.assertIn("not empty", str(ctx.exception))
 
@@ -361,6 +505,8 @@ class TmuxLoadWindowRestoreTests(unittest.TestCase):
                 append=False,
                 run_commands=False,
                 target_session="sess",
+                base_dir="",
+                fallback_dir="/",
             )
 
         clear_calls = [c for c in queue_calls if c and c[0] == "kill-window"]
@@ -394,6 +540,8 @@ class TmuxLoadWindowRestoreTests(unittest.TestCase):
                 append=True,
                 run_commands=False,
                 target_session="sess",
+                base_dir="",
+                fallback_dir="/",
             )
 
         kill_calls = [c for c in queue_calls if c and c[0] == "kill-session"]

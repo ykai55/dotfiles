@@ -7,6 +7,7 @@
 #   tmux-load --session name path/to/tmux.json
 #   tmux-load -f path/to/tmux.json
 #   tmux-load -a path/to/tmux.json
+#   tmux-load -c path/to/tmux.json
 #   tmux-load --run-commands path/to/tmux.json
 
 from __future__ import annotations
@@ -20,7 +21,29 @@ import sys
 from typing import Any, Dict, List, Optional, Tuple
 
 
+DEBUG_LOG_INITIALIZED = False
+
+
+def ensure_debug_log() -> None:
+    global DEBUG_LOG_INITIALIZED
+    if DEBUG_LOG_INITIALIZED:
+        return
+    DEBUG_LOG_INITIALIZED = True
+    try:
+        with open("tmux_helper_debug.log", "w", encoding="utf-8") as f:
+            f.write("")
+    except Exception:
+        pass
+
+
 def run_tmux(args: List[str]) -> Tuple[int, str, str]:
+    if os.environ.get("TMUX_HELPER_DEBUG") == "1":
+        try:
+            ensure_debug_log()
+            with open("tmux_helper_debug.log", "a", encoding="utf-8") as f:
+                f.write("tmux " + " ".join(args) + "\n")
+        except Exception:
+            pass
     proc = subprocess.run(["tmux"] + args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     return proc.returncode, proc.stdout, proc.stderr
 
@@ -277,6 +300,8 @@ def restore_from_dump(
     append: bool,
     run_commands: bool,
     target_session: Optional[str],
+    base_dir: str,
+    fallback_dir: str,
 ) -> None:
     if "sessions" in data and isinstance(data.get("sessions"), list):
         sessions = data.get("sessions") or []
@@ -335,20 +360,19 @@ def restore_from_dump(
             wpath = ""
             if panes:
                 wpath = normalize_path(panes[0].get("path") or "")
-            win_id = tmux_out(
-                [
-                    "new-window",
-                    "-P",
-                    "-t",
-                    session_target(sname),
-                    "-n",
-                    wname,
-                    "-c",
-                    wpath,
-                    "-F",
-                    "#{window_id}",
-                ]
-            ).strip()
+            window_dir = wpath
+            cmd = [
+                "new-window",
+                "-P",
+                "-t",
+                session_target(sname),
+                "-n",
+                wname,
+            ]
+            if window_dir:
+                cmd.extend(["-c", window_dir])
+            cmd.extend(["-F", "#{window_id}"])
+            win_id = tmux_out(cmd).strip()
             window_id_by_index[int(win.get("index", 0))] = win_id
             ensure_window_panes(win_id, panes, run_commands, sort_by_index=False)
             apply_window_options(win_id, win)
@@ -357,46 +381,39 @@ def restore_from_dump(
             if layout:
                 tmux_queue(["select-layout", "-t", win_id, layout])
 
+            if win.get("zoomed"):
+                tmux_queue(["resize-pane", "-Z", "-t", win_id])
+
         if (reuse_current or session_empty) and original_window_id:
             tmux_queue(["kill-window", "-t", original_window_id])
     else:
-        
-        first_window = windows_sorted[0]
-        first_name = first_window.get("name") or ""
-        first_panes = first_window.get("panes") or []
-        first_path = ""
-        if first_panes:
-            first_path = normalize_path(first_panes[0].get("path") or "")
-        first_index = int(first_window.get("index", 0))
+        session_dir = base_dir or fallback_dir
+        cmd = ["new-session", "-d", "-s", sname, "-n", "__tmux_load__"]
+        if session_dir:
+            cmd.extend(["-c", session_dir])
+        cmd.extend(["-P", "-F", "#{window_id}"])
+        placeholder_id = tmux_out(cmd).strip()
 
-        first_win_id = tmux_out(
-            ["new-session", "-d", "-s", sname, "-n", first_name, "-c", first_path, "-P", "-F", "#{window_id}"]
-        ).strip()
-        window_id_by_index[first_index] = first_win_id
-        ensure_window_panes(first_win_id, first_panes, run_commands)
-        apply_window_options(first_win_id, first_window)
-
-        for win in windows_sorted[1:]:
+        for win in windows_sorted:
             widx = int(win.get("index", 0))
             wname = win.get("name") or ""
             panes = win.get("panes") or []
             wpath = ""
             if panes:
                 wpath = normalize_path(panes[0].get("path") or "")
-            win_id = tmux_out(
-                [
-                    "new-window",
-                    "-P",
-                    "-t",
-                    session_target(sname),
-                    "-n",
-                    wname,
-                    "-c",
-                    wpath,
-                    "-F",
-                    "#{window_id}",
-                ]
-            ).strip()
+            window_dir = wpath
+            cmd = [
+                "new-window",
+                "-P",
+                "-t",
+                session_target(sname),
+                "-n",
+                wname,
+            ]
+            if window_dir:
+                cmd.extend(["-c", window_dir])
+            cmd.extend(["-F", "#{window_id}"])
+            win_id = tmux_out(cmd).strip()
             window_id_by_index[widx] = win_id
             ensure_window_panes(win_id, panes, run_commands)
             apply_window_options(win_id, win)
@@ -404,6 +421,12 @@ def restore_from_dump(
             layout = win.get("layout") or ""
             if layout:
                 tmux_queue(["select-layout", "-t", win_id, layout])
+
+            if win.get("zoomed"):
+                tmux_queue(["resize-pane", "-Z", "-t", win_id])
+
+        if placeholder_id:
+            tmux_queue(["kill-window", "-t", placeholder_id])
 
     # Select active window if specified
     active_idx = None
@@ -425,6 +448,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Restore tmux from tmux-dump JSON.")
     parser.add_argument("dump_file", help="Path to tmux-dump JSON file")
     parser.add_argument("--session", help="Target tmux session name")
+    parser.add_argument("-c", "--directory", help="Base directory for new sessions/windows")
     parser.add_argument("-f", "--force", action="store_true", help="Clear target session before restore")
     parser.add_argument("-a", "--append", action="store_true", help="Append windows to target session")
     parser.add_argument(
@@ -477,8 +501,19 @@ def main() -> int:
         target_session = new_name
         current_session = new_name
 
+    if args.directory and in_tmux and current_session and target_session == current_session:
+        print("ERROR: -c cannot be used when restoring in the current session", file=sys.stderr)
+        return 2
+
+    if in_tmux and current_session and target_session == current_session:
+        base_dir = ""
+        fallback_dir = ""
+    else:
+        base_dir = os.path.abspath(os.path.expanduser(args.directory)) if args.directory else ""
+        fallback_dir = os.path.abspath(os.path.expanduser(os.getcwd()))
+
     try:
-        restore_from_dump(data, args.force, args.append, args.run_commands, target_session)
+        restore_from_dump(data, args.force, args.append, args.run_commands, target_session, base_dir, fallback_dir)
     except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1

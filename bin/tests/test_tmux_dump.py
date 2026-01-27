@@ -1,6 +1,8 @@
 import importlib.machinery
 import importlib.util
+import json
 import pathlib
+import tempfile
 import unittest
 from unittest import mock
 
@@ -29,8 +31,8 @@ class TmuxDumpTests(unittest.TestCase):
                 return ["$1\tmain\t100\t1\t1\t80\t24"]
             if args[:3] == ["list-windows", "-t", "main"]:
                 return [
-                    "@1\t0\tw0\t0\t1\tlayout\t80\t24",
-                    "@2\t1\tw1\t1\t1\tlayout\t80\t24",
+                    "@1\t0\tw0\t0\t1\tlayout\t0\t80\t24",
+                    "@2\t1\tw1\t1\t1\tlayout\t1\t80\t24",
                 ]
             if args[:3] == ["list-panes", "-t", "main:0"]:
                 return ["%1\t0\ttitle\t1\t0\t80\t24\t0\t0\t\t123\tbash\t\t/a"]
@@ -38,10 +40,6 @@ class TmuxDumpTests(unittest.TestCase):
                 return ["%2\t0\ttitle\t1\t0\t80\t24\t0\t0\t\t123\tbash\t\t/b"]
             if args[:5] == ["show-options", "-w", "-t", "main:0", "-v"]:
                 return ["on"]
-            if args[:4] == ["new-window", "-d", "-P", "-t"]:
-                return ["@probe\t/sessions"]
-            if args[:2] == ["kill-window", "-t"]:
-                return [""]
             raise RuntimeError("unexpected args")
 
         with mock.patch.object(self.tmux_dump, "run_tmux", side_effect=run_tmux), \
@@ -50,22 +48,19 @@ class TmuxDumpTests(unittest.TestCase):
 
         window = data["windows"][0]
         self.assertEqual(window["automatic_rename"], "on")
-        self.assertEqual(data["path"], "/sessions")
+        self.assertFalse(window["zoomed"])
+        self.assertTrue(data["windows"][1]["zoomed"])
 
     def test_dump_handles_missing_automatic_rename(self):
         def run_tmux(args):
             if args[:2] == ["list-sessions", "-F"]:
                 return ["$1\tmain\t100\t1\t1\t80\t24"]
             if args[:3] == ["list-windows", "-t", "main"]:
-                return ["@1\t0\tw1\t1\t1\tlayout\t80\t24"]
+                return ["@1\t0\tw1\t1\t1\tlayout\t0\t80\t24"]
             if args[:3] == ["list-panes", "-t", "main:0"]:
                 return ["%1\t0\ttitle\t1\t0\t80\t24\t0\t0\t\t123\tbash\t\t/"]
             if args[:5] == ["show-options", "-w", "-t", "main:0", "-v"]:
                 raise RuntimeError("no option")
-            if args[:4] == ["new-window", "-d", "-P", "-t"]:
-                return ["@probe\t/home"]
-            if args[:2] == ["kill-window", "-t"]:
-                return [""]
             raise RuntimeError("unexpected args")
 
         with mock.patch.object(self.tmux_dump, "run_tmux", side_effect=run_tmux), \
@@ -74,7 +69,6 @@ class TmuxDumpTests(unittest.TestCase):
 
         window = data["windows"][0]
         self.assertEqual(window["automatic_rename"], "")
-        self.assertEqual(data["path"], "/home")
 
     def test_dump_filters_current_session_in_tmux(self):
         def run_tmux(args):
@@ -84,15 +78,11 @@ class TmuxDumpTests(unittest.TestCase):
                     "$2\tother\t100\t0\t1\t80\t24",
                 ]
             if args[:3] == ["list-windows", "-t", "main"]:
-                return ["@1\t0\tw1\t1\t1\tlayout\t80\t24"]
+                return ["@1\t0\tw1\t1\t1\tlayout\t0\t80\t24"]
             if args[:3] == ["list-panes", "-t", "main:0"]:
                 return ["%1\t0\ttitle\t1\t0\t80\t24\t0\t0\t\t123\tbash\t\t/"]
             if args[:5] == ["show-options", "-w", "-t", "main:0", "-v"]:
                 return ["off"]
-            if args[:4] == ["new-window", "-d", "-P", "-t"]:
-                return ["@probe\t/main"]
-            if args[:2] == ["kill-window", "-t"]:
-                return [""]
             raise RuntimeError("unexpected args")
 
         with mock.patch.object(self.tmux_dump, "run_tmux", side_effect=run_tmux), \
@@ -111,9 +101,9 @@ class TmuxDumpTests(unittest.TestCase):
                     "$2\tother\t100\t1\t1\t80\t24",
                 ]
             if args[:3] == ["list-windows", "-t", "other"]:
-                return ["@1\t0\tw1\t1\t1\tlayout\t80\t24"]
+                return ["@1\t0\tw1\t1\t1\tlayout\t0\t80\t24"]
             if args[:3] == ["list-windows", "-t", "main"]:
-                return ["@2\t0\tw2\t0\t1\tlayout\t80\t24"]
+                return ["@2\t0\tw2\t0\t1\tlayout\t0\t80\t24"]
             if args[:3] == ["list-panes", "-t", "other:0"]:
                 return ["%1\t0\ttitle\t1\t0\t80\t24\t0\t0\t\t123\tbash\t\t/"]
             if args[:3] == ["list-panes", "-t", "main:0"]:
@@ -122,14 +112,6 @@ class TmuxDumpTests(unittest.TestCase):
                 return ["off"]
             if args[:5] == ["show-options", "-w", "-t", "main:0", "-v"]:
                 return ["off"]
-            if args[:4] == ["new-window", "-d", "-P", "-t"]:
-                target = args[4]
-                if target == "other":
-                    return ["@probe\t/other"]
-                if target == "main":
-                    return ["@probe\t/main"]
-            if args[:2] == ["kill-window", "-t"]:
-                return [""]
             raise RuntimeError("unexpected args")
 
         with mock.patch.object(self.tmux_dump, "run_tmux", side_effect=run_tmux), \
@@ -147,15 +129,11 @@ class TmuxDumpTests(unittest.TestCase):
                     "$2\thost\t100\t1\t1\t80\t24",
                 ]
             if args[:3] == ["list-windows", "-t", "host"]:
-                return ["@1\t0\tw1\t1\t1\tlayout\t80\t24"]
+                return ["@1\t0\tw1\t1\t1\tlayout\t0\t80\t24"]
             if args[:3] == ["list-panes", "-t", "host:0"]:
                 return ["%1\t0\ttitle\t1\t0\t80\t24\t0\t0\t\t123\tbash\t\t/"]
             if args[:5] == ["show-options", "-w", "-t", "host:0", "-v"]:
                 return ["off"]
-            if args[:4] == ["new-window", "-d", "-P", "-t"]:
-                return ["@probe\t/host"]
-            if args[:2] == ["kill-window", "-t"]:
-                return [""]
             raise RuntimeError("unexpected args")
 
         with mock.patch.object(self.tmux_dump, "run_tmux", side_effect=run_tmux), \
@@ -163,7 +141,6 @@ class TmuxDumpTests(unittest.TestCase):
             data = self.tmux_dump.tmux_dump("host")
 
         self.assertEqual(data["name"], "host")
-        self.assertEqual(data["path"], "/host")
 
     def test_normalize_path_strips_file_scheme(self):
         self.assertEqual(self.tmux_dump.normalize_path("file:///tmp"), "/tmp")
@@ -180,6 +157,42 @@ class TmuxDumpTests(unittest.TestCase):
     def test_parse_kv_tsv_pads_missing(self):
         parsed = self.tmux_dump.parse_kv_tsv("a\tb", ["k1", "k2", "k3"])
         self.assertEqual(parsed, {"k1": "a", "k2": "b", "k3": ""})
+
+    def test_main_writes_output_file(self):
+        data = {"name": "sess", "windows": []}
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_path = pathlib.Path(tmpdir) / "out.json"
+            argv = ["tmux-dump", str(out_path)]
+            with mock.patch.object(self.tmux_dump, "tmux_dump", return_value=data), \
+                mock.patch.object(self.tmux_dump.sys, "argv", argv):
+                rc = self.tmux_dump.main()
+
+            self.assertEqual(rc, 0)
+            with open(out_path, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+            self.assertEqual(loaded, data)
+
+    def test_main_writes_compact_output(self):
+        data = {"name": "sess", "windows": []}
+        expected = json.dumps(data, separators=(",", ":"), ensure_ascii=False)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_path = pathlib.Path(tmpdir) / "out.json"
+            argv = ["tmux-dump", "--no-format", str(out_path)]
+            with mock.patch.object(self.tmux_dump, "tmux_dump", return_value=data), \
+                mock.patch.object(self.tmux_dump.sys, "argv", argv):
+                rc = self.tmux_dump.main()
+
+            self.assertEqual(rc, 0)
+            with open(out_path, "r", encoding="utf-8") as f:
+                raw = f.read().strip()
+        self.assertEqual(raw, expected)
+
+    def test_main_requires_output_file(self):
+        argv = ["tmux-dump"]
+        with mock.patch.object(self.tmux_dump.sys, "argv", argv):
+            with self.assertRaises(SystemExit) as ctx:
+                self.tmux_dump.main()
+        self.assertEqual(ctx.exception.code, 2)
 
 
 if __name__ == "__main__":
