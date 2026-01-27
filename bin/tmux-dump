@@ -347,11 +347,7 @@ def tmux_dump(target_session: Optional[str] = None) -> Dict[str, Any]:
 
 
 def main() -> int:
-    class QuietArgumentParser(argparse.ArgumentParser):
-        def error(self, message: str) -> None:
-            raise SystemExit(2)
-
-    parser = QuietArgumentParser(description="Dump tmux structure as JSON.")
+    parser = argparse.ArgumentParser(description="Dump tmux structure as JSON.")
     parser.add_argument("output_file", help="Path to write tmux-dump JSON")
     parser.add_argument("--no-format", action="store_true", help="Write compact JSON without indentation")
     parser.add_argument("-s", "--session", help="Target tmux session name")

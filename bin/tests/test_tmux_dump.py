@@ -1,5 +1,6 @@
 import importlib.machinery
 import importlib.util
+import io
 import json
 import pathlib
 import tempfile
@@ -189,7 +190,8 @@ class TmuxDumpTests(unittest.TestCase):
 
     def test_main_requires_output_file(self):
         argv = ["tmux-dump"]
-        with mock.patch.object(self.tmux_dump.sys, "argv", argv):
+        with mock.patch.object(self.tmux_dump.sys, "argv", argv), \
+            mock.patch.object(self.tmux_dump.sys, "stderr", io.StringIO()):
             with self.assertRaises(SystemExit) as ctx:
                 self.tmux_dump.main()
         self.assertEqual(ctx.exception.code, 2)
