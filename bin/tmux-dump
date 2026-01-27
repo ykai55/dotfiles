@@ -7,6 +7,7 @@
 #   tmux-dump path/to/tmux.json
 #   tmux-dump --no-format path/to/tmux.json
 #   tmux-dump --session name path/to/tmux.json
+#   tmux-dump -s name path/to/tmux.json
 
 from __future__ import annotations
 
@@ -346,11 +347,19 @@ def tmux_dump(target_session: Optional[str] = None) -> Dict[str, Any]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Dump tmux structure as JSON.")
+    class QuietArgumentParser(argparse.ArgumentParser):
+        def error(self, message: str) -> None:
+            raise SystemExit(2)
+
+    parser = QuietArgumentParser(description="Dump tmux structure as JSON.")
     parser.add_argument("output_file", help="Path to write tmux-dump JSON")
     parser.add_argument("--no-format", action="store_true", help="Write compact JSON without indentation")
-    parser.add_argument("--session", help="Target tmux session name")
+    parser.add_argument("-s", "--session", help="Target tmux session name")
     args = parser.parse_args()
+
+    if "TMUX" not in os.environ and not args.session:
+        print("ERROR: --session is required when not inside tmux", file=sys.stderr)
+        return 2
 
     data = tmux_dump(args.session)
     try:

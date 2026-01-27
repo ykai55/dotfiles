@@ -5,6 +5,7 @@
 # Usage:
 #   tmux-load path/to/tmux.json
 #   tmux-load --session name path/to/tmux.json
+#   tmux-load -s name path/to/tmux.json
 #   tmux-load -f path/to/tmux.json
 #   tmux-load -a path/to/tmux.json
 #   tmux-load -c path/to/tmux.json
@@ -447,7 +448,7 @@ def restore_from_dump(
 def main() -> int:
     parser = argparse.ArgumentParser(description="Restore tmux from tmux-dump JSON.")
     parser.add_argument("dump_file", help="Path to tmux-dump JSON file")
-    parser.add_argument("--session", help="Target tmux session name")
+    parser.add_argument("-s", "--session", help="Target tmux session name")
     parser.add_argument("-c", "--directory", help="Base directory for new sessions/windows")
     parser.add_argument("-f", "--force", action="store_true", help="Clear target session before restore")
     parser.add_argument("-a", "--append", action="store_true", help="Append windows to target session")
