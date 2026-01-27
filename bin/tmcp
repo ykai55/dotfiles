@@ -1,4 +1,4 @@
 #!/usr/bin/env bash
 
 # Copy tmux buffer to system clipboard using cross-platform clipboard utility
-tmux show-buffer | $(dirname "$0")/clipboard copy
+tmux show-buffer | $(dirname "$0")/clip copy
