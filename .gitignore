@@ -2,3 +2,4 @@ fish/*.tmp*
 fish/fish_variables*
 tmux/tmux/plugins/tpm_log.txt
 __pycache__/
+.coverage
