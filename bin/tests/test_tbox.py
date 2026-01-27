@@ -40,6 +40,12 @@ class TboxTests(unittest.TestCase):
         args = run_mock.call_args[0][0]
         self.assertEqual(args, ["tmux-load", "/tmp/dump.json"])
 
+    def test_cmd_select_requires_entries(self):
+        with mock.patch.object(self.tbox, "load_saved_sessions", return_value=[]), \
+            mock.patch.object(self.tbox, "data_dir", return_value="/tmp"):
+            rc = self.tbox.cmd_select()
+        self.assertEqual(rc, 1)
+
     def test_cmd_push_writes_dump_file(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             def run_cmd(argv):
@@ -62,6 +68,32 @@ class TboxTests(unittest.TestCase):
                 data = json.load(f)
             self.assertEqual(data.get("name"), "work")
 
+    def test_cmd_push_requires_session_outside_tmux(self):
+        with mock.patch.object(self.tbox, "current_session_name", return_value=None):
+            rc = self.tbox.cmd_push(None)
+        self.assertEqual(rc, 2)
+
+    def test_cmd_push_reuses_existing_entry_path(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            existing = os.path.join(tmpdir, "existing.json")
+            entry = {"name": "work", "path": existing, "mtime": 0.0, "windows_count": 0}
+
+            def run_cmd(argv):
+                tmp_path = argv[-1]
+                with open(tmp_path, "w", encoding="utf-8") as f:
+                    json.dump({"name": "work", "windows": []}, f)
+                return 0, "", ""
+
+            with mock.patch.object(self.tbox, "data_dir", return_value=tmpdir), \
+                mock.patch.object(self.tbox, "current_session_name", return_value="work"), \
+                mock.patch.object(self.tbox, "load_saved_sessions", return_value=[entry]), \
+                mock.patch.object(self.tbox, "tool_path", return_value="tmux-dump"), \
+                mock.patch.object(self.tbox, "run_cmd", side_effect=run_cmd):
+                rc = self.tbox.cmd_push(None)
+
+            self.assertEqual(rc, 0)
+            self.assertTrue(os.path.exists(existing))
+
     def test_cmd_drop_removes_selected_entry(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             path = os.path.join(tmpdir, "sess.json")
@@ -75,6 +107,11 @@ class TboxTests(unittest.TestCase):
 
             self.assertEqual(rc, 0)
             self.assertFalse(os.path.exists(path))
+
+    def test_cmd_drop_requires_entries(self):
+        with mock.patch.object(self.tbox, "load_saved_sessions", return_value=[]):
+            rc = self.tbox.cmd_drop()
+        self.assertEqual(rc, 1)
 
     def test_load_saved_sessions_orders_by_mtime(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -92,6 +129,90 @@ class TboxTests(unittest.TestCase):
             self.assertEqual([e["name"] for e in entries], ["b", "a"])
             self.assertEqual(entries[0]["windows_count"], 2)
             self.assertEqual(entries[1]["windows_count"], 1)
+
+    def test_session_name_and_windows_count_helpers(self):
+        data = {"name": "sess", "windows": [{"index": 0}]}
+        self.assertEqual(self.tbox.session_name_from_dump(data), "sess")
+        self.assertEqual(self.tbox.windows_count_from_dump(data), 1)
+
+        data2 = {"sessions": [{"name": "main", "windows": [{"index": 0}, {"index": 1}]}]}
+        self.assertEqual(self.tbox.session_name_from_dump(data2), "main")
+        self.assertEqual(self.tbox.windows_count_from_dump(data2), 2)
+
+    def test_safe_filename_is_stable_and_sanitized(self):
+        name = "weird/name"
+        fname = self.tbox.safe_filename(name)
+        self.assertTrue(fname.endswith(".json"))
+        self.assertNotIn("/", fname)
+        self.assertEqual(fname, self.tbox.safe_filename(name))
+
+    def test_find_entry_by_name(self):
+        entries = [{"name": "a"}, {"name": "b"}]
+        self.assertIsNotNone(self.tbox.find_entry_by_name(entries, "b"))
+        self.assertIsNone(self.tbox.find_entry_by_name(entries, "c"))
+
+    def test_choose_entry_falls_back_to_prompt(self):
+        entries = [
+            {"name": "one", "path": "/tmp/one.json", "mtime": 0.0, "windows_count": 1},
+            {"name": "two", "path": "/tmp/two.json", "mtime": 0.0, "windows_count": 2},
+        ]
+        with mock.patch.object(self.tbox.shutil, "which", return_value=None), \
+            mock.patch("builtins.input", return_value="2"):
+            selected = self.tbox.choose_entry(entries, "Select")
+        self.assertEqual(selected["name"], "two")
+
+    def test_choose_entry_invalid_selection(self):
+        entries = [{"name": "one", "path": "/tmp/one.json", "mtime": 0.0, "windows_count": 1}]
+        with mock.patch.object(self.tbox.shutil, "which", return_value=None), \
+            mock.patch("builtins.input", return_value="x"):
+            selected = self.tbox.choose_entry(entries, "Select")
+        self.assertIsNone(selected)
+
+    def test_data_dir_prefers_env(self):
+        with mock.patch.dict(os.environ, {"TBOX_DIR": "/tmp/tbox"}, clear=True):
+            self.assertEqual(self.tbox.data_dir(), "/tmp/tbox")
+
+    def test_tool_path_prefers_local_executable(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            local = os.path.join(tmpdir, "tmux-load")
+            with open(local, "w", encoding="utf-8") as f:
+                f.write("#!/usr/bin/env bash\n")
+            os.chmod(local, 0o755)
+            with mock.patch.object(self.tbox, "__file__", os.path.join(tmpdir, "tbox")):
+                self.assertEqual(self.tbox.tool_path("tmux-load"), local)
+
+    def test_run_cmd_captures_output(self):
+        rc, out, err = self.tbox.run_cmd(["/bin/echo", "hi"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.strip(), "hi")
+        self.assertEqual(err, "")
+
+    def test_data_dir_falls_back_to_xdg(self):
+        with mock.patch.dict(os.environ, {"XDG_DATA_HOME": "/tmp/xdg"}, clear=True):
+            self.assertEqual(self.tbox.data_dir(), "/tmp/xdg/tmux-box")
+
+    def test_current_session_name_returns_none_on_failure(self):
+        with mock.patch.object(self.tbox, "run_cmd", return_value=(1, "", "err")):
+            self.assertIsNone(self.tbox.current_session_name())
+
+    def test_choose_entry_uses_selector(self):
+        entries = [{"name": "one", "path": "/tmp/one.json", "mtime": 0.0, "windows_count": 1}]
+        fake_proc = mock.Mock(returncode=0, stdout="one\t1w\t\t/tmp/one.json\n")
+        with mock.patch.object(self.tbox.shutil, "which", side_effect=["/usr/bin/fzf", None]), \
+            mock.patch.object(self.tbox.subprocess, "run", return_value=fake_proc):
+            selected = self.tbox.choose_entry(entries, "Select")
+        self.assertEqual(selected["path"], "/tmp/one.json")
+
+    def test_cmd_push_reports_tmux_dump_error(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with mock.patch.object(self.tbox, "data_dir", return_value=tmpdir), \
+                mock.patch.object(self.tbox, "current_session_name", return_value="work"), \
+                mock.patch.object(self.tbox, "load_saved_sessions", return_value=[]), \
+                mock.patch.object(self.tbox, "tool_path", return_value="tmux-dump"), \
+                mock.patch.object(self.tbox, "run_cmd", return_value=(1, "", "boom")):
+                rc = self.tbox.cmd_push(None)
+
+            self.assertEqual(rc, 1)
 
 
 if __name__ == "__main__":
