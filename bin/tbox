@@ -1,0 +1,270 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import datetime
+import hashlib
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+from typing import Any, Dict, List, Optional, Tuple
+
+
+def run_cmd(argv: List[str]) -> Tuple[int, str, str]:
+    proc = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    return proc.returncode, proc.stdout, proc.stderr
+
+
+def tool_path(name: str) -> str:
+    local = os.path.join(os.path.dirname(__file__), name)
+    if os.path.isfile(local) and os.access(local, os.X_OK):
+        return local
+    return name
+
+
+def data_dir() -> str:
+    env_dir = os.environ.get("TBOX_DIR")
+    if env_dir:
+        return os.path.abspath(os.path.expanduser(env_dir))
+    base = os.environ.get("XDG_DATA_HOME")
+    if not base:
+        base = os.path.expanduser("~/.local/share")
+    return os.path.join(base, "tmux-box")
+
+
+def current_session_name() -> Optional[str]:
+    rc, out, _ = run_cmd(["tmux", "display-message", "-p", "#{session_name}"])
+    if rc != 0:
+        return None
+    name = out.strip()
+    return name or None
+
+
+def session_name_from_dump(data: Dict[str, Any]) -> Optional[str]:
+    if "sessions" in data and isinstance(data.get("sessions"), list):
+        sessions = data.get("sessions") or []
+        if not sessions:
+            return None
+        session = sessions[0] or {}
+        return session.get("name") or session.get("session_name")
+    if "windows" in data or "name" in data or "session_name" in data:
+        return data.get("name") or data.get("session_name")
+    return None
+
+
+def windows_count_from_dump(data: Dict[str, Any]) -> Optional[int]:
+    if "sessions" in data and isinstance(data.get("sessions"), list):
+        sessions = data.get("sessions") or []
+        if not sessions:
+            return None
+        session = sessions[0] or {}
+        windows = session.get("windows") or []
+        if isinstance(windows, list):
+            return len(windows)
+        return None
+    windows = data.get("windows") or []
+    if isinstance(windows, list):
+        return len(windows)
+    return None
+
+
+def safe_filename(session_name: str) -> str:
+    clean = "".join(ch if (ch.isalnum() or ch in "._-") else "_" for ch in session_name)
+    if not clean:
+        clean = "session"
+    digest = hashlib.sha1(session_name.encode("utf-8")).hexdigest()[:8]
+    return f"{clean}-{digest}.json"
+
+
+def load_saved_sessions(store_dir: str) -> List[Dict[str, Any]]:
+    if not os.path.isdir(store_dir):
+        return []
+    entries: List[Dict[str, Any]] = []
+    for name in os.listdir(store_dir):
+        if not name.endswith(".json"):
+            continue
+        path = os.path.join(store_dir, name)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as exc:
+            print(f"WARN: failed to read {path}: {exc}", file=sys.stderr)
+            continue
+        session_name = session_name_from_dump(data) or name
+        windows_count = windows_count_from_dump(data)
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            mtime = 0.0
+        entries.append(
+            {
+                "name": str(session_name),
+                "path": path,
+                "mtime": mtime,
+                "windows_count": windows_count,
+            }
+        )
+    entries.sort(key=lambda e: e.get("mtime", 0.0), reverse=True)
+    return entries
+
+
+def find_entry_by_name(entries: List[Dict[str, Any]], name: str) -> Optional[Dict[str, Any]]:
+    for entry in entries:
+        if entry.get("name") == name:
+            return entry
+    return None
+
+
+def format_mtime(ts: float) -> str:
+    if not ts:
+        return ""
+    return datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
+
+
+def choose_entry(entries: List[Dict[str, Any]], prompt: str) -> Optional[Dict[str, Any]]:
+    if not entries:
+        return None
+
+    fzf = shutil.which("fzf")
+    sk = shutil.which("sk")
+    selector = fzf or sk
+    entry_map = {e["path"]: e for e in entries}
+
+    lines: List[str] = []
+    for entry in entries:
+        name = str(entry.get("name", "")).replace("\t", " ")
+        windows = entry.get("windows_count")
+        windows_label = f"{windows}w" if windows is not None else ""
+        mtime = format_mtime(entry.get("mtime", 0.0))
+        lines.append(f"{name}\t{windows_label}\t{mtime}\t{entry['path']}")
+
+    if selector:
+        cmd = [selector, "--prompt", f"{prompt}: ", "--with-nth", "1,2,3", "--delimiter", "\t"]
+        proc = subprocess.run(
+            cmd,
+            input="\n".join(lines) + "\n",
+            text=True,
+            stdout=subprocess.PIPE,
+        )
+        if proc.returncode != 0:
+            return None
+        selected = proc.stdout.strip()
+        if not selected:
+            return None
+        path = selected.split("\t")[-1].strip()
+        return entry_map.get(path)
+
+    for idx, entry in enumerate(entries, start=1):
+        windows = entry.get("windows_count")
+        windows_label = f"{windows}w" if windows is not None else "?w"
+        mtime = format_mtime(entry.get("mtime", 0.0))
+        print(f"{idx}) {entry['name']}  [{windows_label}]  {mtime}")
+
+    selection = input(f"{prompt} (number): ").strip()
+    if not selection:
+        return None
+    try:
+        idx = int(selection)
+    except ValueError:
+        return None
+    if idx < 1 or idx > len(entries):
+        return None
+    return entries[idx - 1]
+
+
+def cmd_push(session: Optional[str]) -> int:
+    target = session or current_session_name()
+    if not target:
+        print("ERROR: --session is required when not inside tmux", file=sys.stderr)
+        return 2
+
+    store = data_dir()
+    os.makedirs(store, exist_ok=True)
+
+    entries = load_saved_sessions(store)
+    existing = find_entry_by_name(entries, target)
+    dest_path = existing["path"] if existing else os.path.join(store, safe_filename(target))
+
+    tmp_fd, tmp_path = tempfile.mkstemp(prefix=".tbox-", suffix=".json", dir=store)
+    os.close(tmp_fd)
+
+    cmd = [tool_path("tmux-dump"), "--session", target, tmp_path]
+    rc, _, err = run_cmd(cmd)
+    if rc != 0:
+        if err:
+            print(err.strip(), file=sys.stderr)
+        else:
+            print("ERROR: tmux-dump failed", file=sys.stderr)
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        return 1
+
+    os.replace(tmp_path, dest_path)
+    print(f"Saved session '{target}' to {dest_path}")
+    return 0
+
+
+def cmd_select() -> int:
+    store = data_dir()
+    entries = load_saved_sessions(store)
+    if not entries:
+        print("ERROR: no stored sessions", file=sys.stderr)
+        return 1
+
+    entry = choose_entry(entries, "Select session")
+    if not entry:
+        return 1
+
+    cmd = [tool_path("tmux-load"), entry["path"]]
+    return subprocess.run(cmd).returncode
+
+
+def cmd_drop() -> int:
+    store = data_dir()
+    entries = load_saved_sessions(store)
+    if not entries:
+        print("ERROR: no stored sessions", file=sys.stderr)
+        return 1
+
+    entry = choose_entry(entries, "Drop session")
+    if not entry:
+        return 1
+
+    try:
+        os.remove(entry["path"])
+    except OSError as exc:
+        print(f"ERROR: failed to remove {entry['path']}: {exc}", file=sys.stderr)
+        return 1
+    print(f"Removed {entry['path']}")
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="tmux session persistence manager")
+    subparsers = parser.add_subparsers(dest="command")
+
+    push_parser = subparsers.add_parser("push", help="Save current tmux session")
+    push_parser.add_argument("--session", help="Target tmux session name")
+
+    subparsers.add_parser("select", help="Select and restore a stored session")
+    subparsers.add_parser("drop", help="Select and drop a stored session")
+
+    args = parser.parse_args()
+    if args.command == "push":
+        return cmd_push(args.session)
+    if args.command == "select":
+        return cmd_select()
+    if args.command == "drop":
+        return cmd_drop()
+
+    parser.print_help()
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
