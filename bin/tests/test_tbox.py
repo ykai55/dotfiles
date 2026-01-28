@@ -3,9 +3,15 @@ import importlib.machinery
 import json
 import os
 import pathlib
+import sys
 import tempfile
 import unittest
 from unittest import mock
+
+TESTS_DIR = pathlib.Path(__file__).resolve().parent
+if str(TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(TESTS_DIR))
+from test_utils import CapturingTestCase
 
 
 def load_tbox_module():
@@ -22,8 +28,9 @@ def load_tbox_module():
     return module
 
 
-class TboxTests(unittest.TestCase):
+class TboxTests(CapturingTestCase):
     def setUp(self):
+        super().setUp()
         self.tbox = load_tbox_module()
 
     def test_cmd_select_uses_tmux_load_without_session(self):
@@ -46,7 +53,7 @@ class TboxTests(unittest.TestCase):
             rc = self.tbox.cmd_select()
         self.assertEqual(rc, 1)
 
-    def test_cmd_push_writes_dump_file(self):
+    def test_cmd_save_writes_dump_file(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             def run_cmd(argv):
                 tmp_path = argv[-1]
@@ -58,8 +65,9 @@ class TboxTests(unittest.TestCase):
                 mock.patch.object(self.tbox, "current_session_name", return_value="work"), \
                 mock.patch.object(self.tbox, "load_saved_sessions", return_value=[]), \
                 mock.patch.object(self.tbox, "tool_path", return_value="tmux-dump"), \
-                mock.patch.object(self.tbox, "run_cmd", side_effect=run_cmd):
-                rc = self.tbox.cmd_push(None)
+                mock.patch.object(self.tbox, "run_cmd", side_effect=run_cmd), \
+                mock.patch("builtins.print") as print_mock:
+                rc = self.tbox.cmd_save(None)
 
             self.assertEqual(rc, 0)
             expected = os.path.join(tmpdir, self.tbox.safe_filename("work"))
@@ -67,13 +75,15 @@ class TboxTests(unittest.TestCase):
             with open(expected, "r", encoding="utf-8") as f:
                 data = json.load(f)
             self.assertEqual(data.get("name"), "work")
+            print_mock.assert_called_with("Saved session 'work'")
 
-    def test_cmd_push_requires_session_outside_tmux(self):
-        with mock.patch.object(self.tbox, "current_session_name", return_value=None):
-            rc = self.tbox.cmd_push(None)
+    def test_cmd_save_requires_session_outside_tmux(self):
+        with mock.patch.dict(os.environ, {"TMUX": ""}, clear=True), \
+            mock.patch.object(self.tbox, "current_session_name", return_value=None):
+            rc = self.tbox.cmd_save(None)
         self.assertEqual(rc, 2)
 
-    def test_cmd_push_reuses_existing_entry_path(self):
+    def test_cmd_save_reuses_existing_entry_path(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             existing = os.path.join(tmpdir, "existing.json")
             entry = {"name": "work", "path": existing, "mtime": 0.0, "windows_count": 0}
@@ -88,13 +98,15 @@ class TboxTests(unittest.TestCase):
                 mock.patch.object(self.tbox, "current_session_name", return_value="work"), \
                 mock.patch.object(self.tbox, "load_saved_sessions", return_value=[entry]), \
                 mock.patch.object(self.tbox, "tool_path", return_value="tmux-dump"), \
-                mock.patch.object(self.tbox, "run_cmd", side_effect=run_cmd):
-                rc = self.tbox.cmd_push(None)
+                mock.patch.object(self.tbox, "run_cmd", side_effect=run_cmd), \
+                mock.patch("builtins.print") as print_mock:
+                rc = self.tbox.cmd_save(None)
 
             self.assertEqual(rc, 0)
             self.assertTrue(os.path.exists(existing))
+            print_mock.assert_called_with("Saved session 'work'")
 
-    def test_cmd_drop_removes_selected_entry(self):
+    def test_cmd_drop_removes_named_entry(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             path = os.path.join(tmpdir, "sess.json")
             with open(path, "w", encoding="utf-8") as f:
@@ -102,16 +114,77 @@ class TboxTests(unittest.TestCase):
             entry = {"name": "sess", "path": path, "mtime": 0.0, "windows_count": 0}
 
             with mock.patch.object(self.tbox, "load_saved_sessions", return_value=[entry]), \
-                mock.patch.object(self.tbox, "choose_entry", return_value=entry):
-                rc = self.tbox.cmd_drop()
+                mock.patch("builtins.print") as print_mock:
+                rc = self.tbox.cmd_drop("sess")
 
             self.assertEqual(rc, 0)
             self.assertFalse(os.path.exists(path))
+            print_mock.assert_called_with("Removed session 'sess'")
 
     def test_cmd_drop_requires_entries(self):
         with mock.patch.object(self.tbox, "load_saved_sessions", return_value=[]):
-            rc = self.tbox.cmd_drop()
+            rc = self.tbox.cmd_drop("sess")
         self.assertEqual(rc, 1)
+
+    def test_cmd_drop_requires_name(self):
+        with mock.patch.dict(os.environ, {"TMUX": ""}, clear=True), \
+            mock.patch.object(self.tbox, "current_session_name", return_value=None):
+            rc = self.tbox.cmd_drop(None)
+        self.assertEqual(rc, 2)
+
+    def test_cmd_drop_uses_current_session(self):
+        entry = {"name": "sess", "path": "/tmp/sess.json", "mtime": 0.0, "windows_count": 0}
+        with mock.patch.dict(os.environ, {"TMUX": "1"}, clear=True), \
+            mock.patch.object(self.tbox, "current_session_name", return_value="sess"), \
+            mock.patch.object(self.tbox, "load_saved_sessions", return_value=[entry]), \
+            mock.patch.object(self.tbox.os, "remove") as remove_mock, \
+            mock.patch("builtins.print") as print_mock:
+            rc = self.tbox.cmd_drop(None)
+
+        self.assertEqual(rc, 0)
+        remove_mock.assert_called_once_with("/tmp/sess.json")
+        print_mock.assert_called_with("Removed session 'sess'")
+
+    def test_cmd_drop_handles_missing_entry(self):
+        entry = {"name": "sess", "path": "/tmp/sess.json", "mtime": 0.0, "windows_count": 0}
+        with mock.patch.object(self.tbox, "load_saved_sessions", return_value=[entry]):
+            rc = self.tbox.cmd_drop("other")
+        self.assertEqual(rc, 1)
+
+    def test_cmd_list_reports_empty(self):
+        with mock.patch.object(self.tbox, "load_saved_sessions", return_value=[]), \
+            mock.patch.object(self.tbox, "data_dir", return_value="/tmp"), \
+            mock.patch("builtins.print") as print_mock:
+            rc = self.tbox.cmd_list(False)
+
+        self.assertEqual(rc, 1)
+        print_mock.assert_called_with("No stored sessions")
+
+    def test_cmd_list_prints_entries(self):
+        entries = [
+            {"name": "a", "path": "/tmp/a.json", "mtime": 0.0, "windows_count": 1},
+            {"name": "b", "path": "/tmp/b.json", "mtime": 0.0, "windows_count": None},
+        ]
+        with mock.patch.object(self.tbox, "load_saved_sessions", return_value=entries), \
+            mock.patch.object(self.tbox, "data_dir", return_value="/tmp"), \
+            mock.patch("builtins.print") as print_mock:
+            rc = self.tbox.cmd_list(False)
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(print_mock.call_count, 2)
+        printed = [call.args[0] for call in print_mock.call_args_list]
+        self.assertTrue(all("/tmp/" not in line for line in printed))
+
+    def test_cmd_list_verbose_includes_path(self):
+        entries = [{"name": "a", "path": "/tmp/a.json", "mtime": 0.0, "windows_count": 1}]
+        with mock.patch.object(self.tbox, "load_saved_sessions", return_value=entries), \
+            mock.patch.object(self.tbox, "data_dir", return_value="/tmp"), \
+            mock.patch("builtins.print") as print_mock:
+            rc = self.tbox.cmd_list(True)
+
+        self.assertEqual(rc, 0)
+        printed = print_mock.call_args[0][0]
+        self.assertIn("/tmp/a.json", printed)
 
     def test_load_saved_sessions_orders_by_mtime(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -203,16 +276,17 @@ class TboxTests(unittest.TestCase):
             selected = self.tbox.choose_entry(entries, "Select")
         self.assertEqual(selected["path"], "/tmp/one.json")
 
-    def test_cmd_push_reports_tmux_dump_error(self):
+    def test_cmd_save_reports_tmux_dump_error(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             with mock.patch.object(self.tbox, "data_dir", return_value=tmpdir), \
                 mock.patch.object(self.tbox, "current_session_name", return_value="work"), \
                 mock.patch.object(self.tbox, "load_saved_sessions", return_value=[]), \
                 mock.patch.object(self.tbox, "tool_path", return_value="tmux-dump"), \
                 mock.patch.object(self.tbox, "run_cmd", return_value=(1, "", "boom")):
-                rc = self.tbox.cmd_push(None)
+                rc = self.tbox.cmd_save(None)
 
             self.assertEqual(rc, 1)
+
 
 
 if __name__ == "__main__":

@@ -3,9 +3,15 @@ import importlib.util
 import io
 import json
 import pathlib
+import sys
 import tempfile
 import unittest
 from unittest import mock
+
+TESTS_DIR = pathlib.Path(__file__).resolve().parent
+if str(TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(TESTS_DIR))
+from test_utils import CapturingTestCase
 
 
 def load_tmux_dump_module():
@@ -22,8 +28,9 @@ def load_tmux_dump_module():
     return module
 
 
-class TmuxDumpTests(unittest.TestCase):
+class TmuxDumpTests(CapturingTestCase):
     def setUp(self):
+        super().setUp()
         self.tmux_dump = load_tmux_dump_module()
 
     def test_dump_includes_automatic_rename(self):

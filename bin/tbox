@@ -133,13 +133,23 @@ def choose_entry(entries: List[Dict[str, Any]], prompt: str) -> Optional[Dict[st
     selector = fzf or sk
     entry_map = {e["path"]: e for e in entries}
 
+    name_width = max(len(str(entry.get("name", ""))) for entry in entries)
+    windows_width = max(
+        len(f"{entry.get('windows_count')}w") if entry.get("windows_count") is not None else 2
+        for entry in entries
+    )
+    mtime_width = max(len(format_mtime(entry.get("mtime", 0.0))) for entry in entries)
+
     lines: List[str] = []
     for entry in entries:
-        name = str(entry.get("name", "")).replace("\t", " ")
+        raw_name = str(entry.get("name", "")).replace("\t", " ")
+        name = raw_name.ljust(name_width)
         windows = entry.get("windows_count")
         windows_label = f"{windows}w" if windows is not None else ""
+        windows_pad = windows_label.ljust(windows_width)
         mtime = format_mtime(entry.get("mtime", 0.0))
-        lines.append(f"{name}\t{windows_label}\t{mtime}\t{entry['path']}")
+        mtime_pad = mtime.ljust(mtime_width)
+        lines.append(f"{name}\t{windows_pad}\t{mtime_pad}\t{entry['path']}")
 
     if selector:
         cmd = [selector, "--prompt", f"{prompt}: ", "--with-nth", "1,2,3", "--delimiter", "\t"]
@@ -160,8 +170,10 @@ def choose_entry(entries: List[Dict[str, Any]], prompt: str) -> Optional[Dict[st
     for idx, entry in enumerate(entries, start=1):
         windows = entry.get("windows_count")
         windows_label = f"{windows}w" if windows is not None else "?w"
-        mtime = format_mtime(entry.get("mtime", 0.0))
-        print(f"{idx}) {entry['name']}  [{windows_label}]  {mtime}")
+        name = str(entry.get("name", "")).ljust(name_width)
+        windows_pad = windows_label.ljust(windows_width)
+        mtime = format_mtime(entry.get("mtime", 0.0)).ljust(mtime_width)
+        print(f"{idx}) {name}  {windows_pad}  {mtime}".rstrip())
 
     selection = input(f"{prompt} (number): ").strip()
     if not selection:
@@ -175,10 +187,15 @@ def choose_entry(entries: List[Dict[str, Any]], prompt: str) -> Optional[Dict[st
     return entries[idx - 1]
 
 
-def cmd_push(session: Optional[str]) -> int:
-    target = session or current_session_name()
+def cmd_save(name: Optional[str]) -> int:
+    target = name
     if not target:
-        print("ERROR: --session is required when not inside tmux", file=sys.stderr)
+        if not os.environ.get("TMUX"):
+            print("ERROR: name is required when not inside tmux", file=sys.stderr)
+            return 2
+        target = current_session_name()
+    if not target:
+        print("ERROR: name is required when not inside tmux", file=sys.stderr)
         return 2
 
     store = data_dir()
@@ -205,7 +222,7 @@ def cmd_push(session: Optional[str]) -> int:
         return 1
 
     os.replace(tmp_path, dest_path)
-    print(f"Saved session '{target}' to {dest_path}")
+    print(f"Saved session '{target}'")
     return 0
 
 
@@ -224,15 +241,25 @@ def cmd_select() -> int:
     return subprocess.run(cmd).returncode
 
 
-def cmd_drop() -> int:
+def cmd_drop(name: Optional[str]) -> int:
+    if not name:
+        if not os.environ.get("TMUX"):
+            print("ERROR: name is required when not inside tmux", file=sys.stderr)
+            return 2
+        name = current_session_name()
+    if not name:
+        print("ERROR: name is required when not inside tmux", file=sys.stderr)
+        return 2
+
     store = data_dir()
     entries = load_saved_sessions(store)
     if not entries:
         print("ERROR: no stored sessions", file=sys.stderr)
         return 1
 
-    entry = choose_entry(entries, "Drop session")
+    entry = find_entry_by_name(entries, name)
     if not entry:
+        print(f"ERROR: no stored session named '{name}'", file=sys.stderr)
         return 1
 
     try:
@@ -240,7 +267,35 @@ def cmd_drop() -> int:
     except OSError as exc:
         print(f"ERROR: failed to remove {entry['path']}: {exc}", file=sys.stderr)
         return 1
-    print(f"Removed {entry['path']}")
+    print(f"Removed session '{name}'")
+    return 0
+
+
+def cmd_list(verbose: bool) -> int:
+    store = data_dir()
+    entries = load_saved_sessions(store)
+    if not entries:
+        print("No stored sessions")
+        return 1
+
+    name_width = max(len(str(entry.get("name", ""))) for entry in entries)
+    windows_width = max(
+        len(f"{entry.get('windows_count')}w") if entry.get("windows_count") is not None else 2
+        for entry in entries
+    )
+    mtime_width = max(len(format_mtime(entry.get("mtime", 0.0))) for entry in entries)
+
+    for entry in entries:
+        windows = entry.get("windows_count")
+        windows_label = f"{windows}w" if windows is not None else "?w"
+        mtime = format_mtime(entry.get("mtime", 0.0))
+        name = str(entry.get("name", "")).ljust(name_width)
+        windows_pad = windows_label.ljust(windows_width)
+        mtime_pad = mtime.ljust(mtime_width)
+        line = f"{name}  {windows_pad}  {mtime_pad}".rstrip()
+        if verbose:
+            line = f"{line}  {entry['path']}"
+        print(line)
     return 0
 
 
@@ -248,19 +303,24 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="tmux session persistence manager")
     subparsers = parser.add_subparsers(dest="command")
 
-    push_parser = subparsers.add_parser("push", help="Save current tmux session")
-    push_parser.add_argument("--session", help="Target tmux session name")
+    save_parser = subparsers.add_parser("save", help="Save current tmux session")
+    save_parser.add_argument("name", nargs="?", help="Target tmux session name")
 
     subparsers.add_parser("select", help="Select and restore a stored session")
-    subparsers.add_parser("drop", help="Select and drop a stored session")
+    drop_parser = subparsers.add_parser("drop", help="Drop a stored session")
+    drop_parser.add_argument("name", nargs="?", help="Stored session name")
+    list_parser = subparsers.add_parser("list", help="List stored sessions")
+    list_parser.add_argument("-v", "--verbose", action="store_true", help="Show dump file path")
 
     args = parser.parse_args()
-    if args.command == "push":
-        return cmd_push(args.session)
+    if args.command == "save":
+        return cmd_save(args.name)
     if args.command == "select":
         return cmd_select()
     if args.command == "drop":
-        return cmd_drop()
+        return cmd_drop(args.name)
+    if args.command == "list":
+        return cmd_list(args.verbose)
 
     parser.print_help()
     return 2

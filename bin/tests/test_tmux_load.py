@@ -2,9 +2,15 @@ import importlib.machinery
 import importlib.util
 import json
 import pathlib
+import sys
 import tempfile
 import unittest
 from unittest import mock
+
+TESTS_DIR = pathlib.Path(__file__).resolve().parent
+if str(TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(TESTS_DIR))
+from test_utils import CapturingTestCase
 
 
 def load_tmux_load_module():
@@ -21,8 +27,9 @@ def load_tmux_load_module():
     return module
 
 
-class TmuxLoadWindowRestoreTests(unittest.TestCase):
+class TmuxLoadWindowRestoreTests(CapturingTestCase):
     def setUp(self):
+        super().setUp()
         self.tmux_load = load_tmux_load_module()
 
     def test_restore_new_session_creates_all_windows(self):

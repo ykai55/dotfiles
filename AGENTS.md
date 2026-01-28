@@ -13,9 +13,11 @@ Lint
 - Keep shell and Python changes consistent with existing style.
 
 Tests (Python)
+- After any code change, run the relevant unittest(s).
 - Run all tests (unittest):
   - `python bin/tests/test_tmux_load.py`
   - `python bin/tests/test_tmux_dump.py`
+  - `python bin/tests/test_tbox.py`
 - Run a single test (unittest):
   - `python -m unittest bin/tests/test_tmux_load.py TmuxLoadWindowRestoreTests.test_restore_new_session_creates_all_windows`
   - If that fails due to module path, run the file and temporarily narrow the
