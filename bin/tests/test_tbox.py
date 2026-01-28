@@ -40,17 +40,30 @@ class TboxTests(CapturingTestCase):
             mock.patch.object(self.tbox, "tool_path", return_value="tmux-load"), \
             mock.patch.object(self.tbox.subprocess, "run") as run_mock:
             run_mock.return_value = mock.Mock(returncode=0)
-            rc = self.tbox.cmd_select()
+            rc = self.tbox.cmd_select(True)
 
         self.assertEqual(rc, 0)
         run_mock.assert_called_once()
         args = run_mock.call_args[0][0]
         self.assertEqual(args, ["tmux-load", "/tmp/dump.json"])
 
+    def test_cmd_select_can_disable_commands(self):
+        entry = {"name": "work", "path": "/tmp/dump.json", "mtime": 0.0, "windows_count": 2}
+        with mock.patch.object(self.tbox, "load_saved_sessions", return_value=[entry]), \
+            mock.patch.object(self.tbox, "choose_entry", return_value=entry), \
+            mock.patch.object(self.tbox, "tool_path", return_value="tmux-load"), \
+            mock.patch.object(self.tbox.subprocess, "run") as run_mock:
+            run_mock.return_value = mock.Mock(returncode=0)
+            rc = self.tbox.cmd_select(False)
+
+        self.assertEqual(rc, 0)
+        args = run_mock.call_args[0][0]
+        self.assertEqual(args, ["tmux-load", "/tmp/dump.json", "--no-run-commands"])
+
     def test_cmd_select_requires_entries(self):
         with mock.patch.object(self.tbox, "load_saved_sessions", return_value=[]), \
             mock.patch.object(self.tbox, "data_dir", return_value="/tmp"):
-            rc = self.tbox.cmd_select()
+            rc = self.tbox.cmd_select(True)
         self.assertEqual(rc, 1)
 
     def test_cmd_save_writes_dump_file(self):

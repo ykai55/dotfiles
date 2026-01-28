@@ -91,6 +91,12 @@ Config files (fish, nvim, tmux, kitty)
 - `bin/tests/test_tmux_load.py` uses `unittest` and `unittest.mock`.
 - Keep tests fast and isolated; mock tmux calls instead of running tmux.
 
+## tmux Tools Notes
+
+- `tmux-load` runs pane commands by default; use `--no-run-commands` to skip.
+- Pane commands are derived from `processes` in the dump, not tmux start/current command fields.
+- `tmux-dump` schema reference: `tmux-dump.d.ts`.
+
 ## Cursor / Copilot Rules
 
 - No `.cursor/rules/`, `.cursorrules`, or `.github/copilot-instructions.md`

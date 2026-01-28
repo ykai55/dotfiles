@@ -76,7 +76,7 @@ def split_command(cmd: str) -> List[str]:
         return cmd.split()
 
 
-def ps_processes_for_tty(pane_tty: str) -> List[Dict[str, Any]]:
+def ps_processes_for_tty(pane_tty: str, exclude_pids: Optional[set] = None) -> List[Dict[str, Any]]:
     tty_short = normalize_tty_for_ps(pane_tty)
     tty_full = pane_tty
 
@@ -87,6 +87,7 @@ def ps_processes_for_tty(pane_tty: str) -> List[Dict[str, Any]]:
         if rc != 0:
             return None
         procs: List[Dict[str, Any]] = []
+        parents: Dict[int, Optional[int]] = {}
         for line in out.splitlines():
             line = line.rstrip("\n")
             if not line.strip():
@@ -103,6 +104,7 @@ def ps_processes_for_tty(pane_tty: str) -> List[Dict[str, Any]]:
                 ppid = int(ppid_s)
             except ValueError:
                 ppid = None
+            parents[pid] = ppid
             procs.append(
                 {
                     "pid": pid,
@@ -113,7 +115,24 @@ def ps_processes_for_tty(pane_tty: str) -> List[Dict[str, Any]]:
                     "command": split_command(cmd),
                 }
             )
-        return procs
+        if not exclude_pids:
+            return procs
+
+        def is_descendant(pid: int) -> bool:
+            cur = pid
+            seen: set[int] = set()
+            while True:
+                if cur in exclude_pids:
+                    return True
+                if cur in seen:
+                    return False
+                seen.add(cur)
+                parent = parents.get(cur)
+                if parent is None:
+                    return False
+                cur = parent
+
+        return [p for p in procs if not is_descendant(p.get("pid"))]
 
     procs = try_ps(tty_short)
     if procs is None:
@@ -228,8 +247,6 @@ def tmux_dump(target_session: Optional[str] = None) -> Dict[str, Any]:
         "pane_top",
         "pane_tty",
         "pane_pid",
-        "pane_current_command",
-        "pane_start_command",
         "pane_path",
     ]
     pane_fmt = "\t".join(
@@ -245,13 +262,12 @@ def tmux_dump(target_session: Optional[str] = None) -> Dict[str, Any]:
             "#{pane_top}",
             "#{pane_tty}",
             "#{pane_pid}",
-            "#{pane_current_command}",
-            "#{pane_start_command}",
             "#{pane_path}",
         ]
     )
 
     current_pane_id = os.environ.get("TMUX_PANE") if "TMUX" in os.environ else None
+    current_pid = os.getpid()
 
     for session in sessions:
         sname = session["name"]
@@ -291,10 +307,8 @@ def tmux_dump(target_session: Optional[str] = None) -> Dict[str, Any]:
                 pane_tty = praw["pane_tty"]
                 pane_pid = praw["pane_pid"]
                 pane_id = praw["pane_id"]
-                if current_pane_id and pane_id == current_pane_id:
-                    procs = []
-                else:
-                    procs = ps_processes_for_tty(pane_tty) if pane_tty else []
+                exclude = {current_pid} if current_pane_id and pane_id == current_pane_id else set()
+                procs = ps_processes_for_tty(pane_tty, exclude_pids=exclude) if pane_tty else []
                 panes.append(
                     {
                         "id": pane_id,
@@ -310,8 +324,6 @@ def tmux_dump(target_session: Optional[str] = None) -> Dict[str, Any]:
                         },
                         "tty": pane_tty,
                         "pid": int(pane_pid) if pane_pid.isdigit() else pane_pid,
-                        "current_command": praw["pane_current_command"],
-                        "start_command": praw["pane_start_command"],
                         "path": normalize_path(praw["pane_path"]),
                         "processes": procs,
                     }

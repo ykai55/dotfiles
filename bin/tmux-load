@@ -9,7 +9,7 @@
 #   tmux-load -f path/to/tmux.json
 #   tmux-load -a path/to/tmux.json
 #   tmux-load -c path/to/tmux.json
-#   tmux-load --run-commands path/to/tmux.json
+#   tmux-load --no-run-commands path/to/tmux.json
 
 from __future__ import annotations
 
@@ -209,6 +209,50 @@ def normalize_start_command(cmd: Any) -> str:
     return str(cmd)
 
 
+def command_argv_from_value(cmd: Any) -> List[str]:
+    if cmd is None:
+        return []
+    if isinstance(cmd, list):
+        return [str(item) for item in cmd]
+    if isinstance(cmd, str):
+        try:
+            return shlex.split(cmd)
+        except ValueError:
+            return cmd.split()
+    return []
+
+
+def run_plan_from_processes(processes: Any) -> Tuple[List[str], str]:
+    # Run plan from pane processes (only when --run-commands):
+    # - No processes: run nothing.
+    # - One process:
+    #   - shell: run nothing (avoid launching a second shell).
+    #   - non-shell: run directly via tmux new-window/split-window -- <cmd>.
+    # - Two+ processes:
+    #   - first is shell: start shell, then send-keys the second command.
+    #   - first is non-shell: run the first command directly.
+    if not isinstance(processes, list) or not processes:
+        return ([], "")
+    first = processes[0] if isinstance(processes[0], dict) else {}
+    first_cmd = first.get("command") if isinstance(first, dict) else None
+    first_cmd_list = first_cmd if isinstance(first_cmd, list) else []
+    if not first_cmd_list:
+        return ([], "")
+    first_bin = os.path.basename(str(first_cmd_list[0]))
+    shells = {"sh", "bash", "zsh", "fish", "nu", "tcsh", "csh", "ksh"}
+    if len(processes) == 1:
+        if first_bin in shells:
+            return ([], "")
+        return (command_argv_from_value(first_cmd_list), "")
+    if first_bin in shells:
+        if len(processes) > 1 and isinstance(processes[1], dict):
+            second_cmd = processes[1].get("command")
+            if isinstance(second_cmd, list) and second_cmd:
+                return ([], normalize_start_command(second_cmd))
+        return ([], "")
+    return (command_argv_from_value(first_cmd_list), "")
+
+
 def session_name_from_dump(data: Dict[str, Any]) -> Optional[str]:
     if "sessions" in data and isinstance(data.get("sessions"), list):
         sessions = data.get("sessions") or []
@@ -231,6 +275,14 @@ def ensure_window_panes(
         return
 
     panes_sorted = sorted(panes, key=lambda p: p.get("index", 0)) if sort_by_index else list(panes)
+    run_plan_by_index: Dict[int, Tuple[List[str], str]] = {}
+    if run_commands:
+        for pane in panes_sorted:
+            try:
+                idx = int(pane.get("index", 0))
+            except Exception:
+                continue
+            run_plan_by_index[idx] = run_plan_from_processes(pane.get("processes"))
     prev_pane: Optional[Dict[str, Any]] = panes_sorted[0]
     for pane in panes_sorted[1:]:
         path = normalize_path(pane.get("path") or "")
@@ -251,6 +303,16 @@ def ensure_window_panes(
                 pass
         if path:
             cmd.extend(["-c", path])
+        if run_commands:
+            try:
+                pane_idx = int(pane.get("index", 0))
+            except Exception:
+                pane_idx = None
+            if pane_idx is not None:
+                cmd_argv, _ = run_plan_by_index.get(pane_idx, ([], ""))
+                if cmd_argv:
+                    cmd.append("--")
+                    cmd.extend(cmd_argv)
         tmux_queue(cmd)
         prev_pane = pane
 
@@ -269,9 +331,10 @@ def ensure_window_panes(
             tmux_queue(["select-pane", "-t", pane_id, "-T", title])
 
         if run_commands:
-            cmd = normalize_start_command(pane.get("start_command"))
-            if cmd:
-                tmux_queue(["send-keys", "-t", pane_id, cmd, "Enter"])
+            cmd_argv, shell_cmd = run_plan_by_index.get(idx, ([], ""))
+            if shell_cmd and not cmd_argv:
+                tmux_queue(["send-keys", "-t", pane_id, "-l", shell_cmd])
+                tmux_queue(["send-keys", "-t", pane_id, "Enter"])
 
     # Select active pane if indicated
     active_idx = None
@@ -281,9 +344,11 @@ def ensure_window_panes(
             break
     if active_idx is not None:
         try:
-            tmux_queue(["select-pane", "-t", f"{target}.{int(active_idx)}"])
+            pane_id = pane_map.get(int(active_idx))
         except Exception:
-            pass
+            pane_id = None
+        if pane_id:
+            tmux_queue(["select-pane", "-t", pane_id])
     tmux_flush()
 
 
@@ -362,6 +427,10 @@ def restore_from_dump(
             if panes:
                 wpath = normalize_path(panes[0].get("path") or "")
             window_dir = wpath
+            cmd_argv: List[str] = []
+            shell_cmd = ""
+            if run_commands and panes:
+                cmd_argv, shell_cmd = run_plan_from_processes(panes[0].get("processes"))
             cmd = [
                 "new-window",
                 "-P",
@@ -373,10 +442,19 @@ def restore_from_dump(
             if window_dir:
                 cmd.extend(["-c", window_dir])
             cmd.extend(["-F", "#{window_id}"])
+            if cmd_argv:
+                cmd.append("--")
+                cmd.extend(cmd_argv)
             win_id = tmux_out(cmd).strip()
             window_id_by_index[int(win.get("index", 0))] = win_id
             ensure_window_panes(win_id, panes, run_commands, sort_by_index=False)
             apply_window_options(win_id, win)
+            if run_commands and shell_cmd:
+                pane_map = list_pane_ids_by_index(win_id)
+                pane_id = pane_map.get(0)
+                if pane_id:
+                    tmux_queue(["send-keys", "-t", pane_id, "-l", shell_cmd])
+                    tmux_queue(["send-keys", "-t", pane_id, "Enter"])
 
             layout = win.get("layout") or ""
             if layout:
@@ -403,6 +481,10 @@ def restore_from_dump(
             if panes:
                 wpath = normalize_path(panes[0].get("path") or "")
             window_dir = wpath
+            cmd_argv: List[str] = []
+            shell_cmd = ""
+            if run_commands and panes:
+                cmd_argv, shell_cmd = run_plan_from_processes(panes[0].get("processes"))
             cmd = [
                 "new-window",
                 "-P",
@@ -414,10 +496,19 @@ def restore_from_dump(
             if window_dir:
                 cmd.extend(["-c", window_dir])
             cmd.extend(["-F", "#{window_id}"])
+            if cmd_argv:
+                cmd.append("--")
+                cmd.extend(cmd_argv)
             win_id = tmux_out(cmd).strip()
             window_id_by_index[widx] = win_id
             ensure_window_panes(win_id, panes, run_commands)
             apply_window_options(win_id, win)
+            if run_commands and shell_cmd:
+                pane_map = list_pane_ids_by_index(win_id)
+                pane_id = pane_map.get(0)
+                if pane_id:
+                    tmux_queue(["send-keys", "-t", pane_id, "-l", shell_cmd])
+                    tmux_queue(["send-keys", "-t", pane_id, "Enter"])
 
             layout = win.get("layout") or ""
             if layout:
@@ -453,10 +544,12 @@ def main() -> int:
     parser.add_argument("-f", "--force", action="store_true", help="Clear target session before restore")
     parser.add_argument("-a", "--append", action="store_true", help="Append windows to target session")
     parser.add_argument(
-        "--run-commands",
-        action="store_true",
-        help="Run pane start_command during restore",
+        "--no-run-commands",
+        action="store_false",
+        dest="run_commands",
+        help="Do not run pane commands during restore",
     )
+    parser.set_defaults(run_commands=True)
     args = parser.parse_args()
 
     try:

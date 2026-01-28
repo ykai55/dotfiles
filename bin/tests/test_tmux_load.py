@@ -207,8 +207,8 @@ class TmuxLoadWindowRestoreTests(CapturingTestCase):
 
     def test_ensure_window_panes_sets_titles_and_runs_commands(self):
         panes = [
-            {"index": 0, "title": "t0", "start_command": ["echo", "hi"], "path": "/"},
-            {"index": 1, "title": "t1", "start_command": "ls", "path": "/"},
+            {"index": 0, "title": "t0", "path": "/", "processes": [{"command": ["fish"]}, {"command": ["nvim", "Cargo.toml"]}]},
+            {"index": 1, "title": "t1", "path": "/", "processes": [{"command": ["fish"]}, {"command": ["ls"]}]},
         ]
         calls = []
 
@@ -219,8 +219,13 @@ class TmuxLoadWindowRestoreTests(CapturingTestCase):
 
         self.assertIn(["select-pane", "-t", "%1", "-T", "t0"], calls)
         self.assertIn(["select-pane", "-t", "%2", "-T", "t1"], calls)
-        self.assertIn(["send-keys", "-t", "%1", "echo hi", "Enter"], calls)
-        self.assertIn(["send-keys", "-t", "%2", "ls", "Enter"], calls)
+        split_calls = [c for c in calls if c and c[0] == "split-window"]
+        self.assertEqual(len(split_calls), 1)
+        self.assertNotIn("--", split_calls[0])
+        self.assertIn(["send-keys", "-t", "%1", "-l", "nvim Cargo.toml"], calls)
+        self.assertIn(["send-keys", "-t", "%1", "Enter"], calls)
+        self.assertIn(["send-keys", "-t", "%2", "-l", "ls"], calls)
+        self.assertIn(["send-keys", "-t", "%2", "Enter"], calls)
 
     def test_ensure_window_panes_selects_active_pane(self):
         panes = [
@@ -234,7 +239,7 @@ class TmuxLoadWindowRestoreTests(CapturingTestCase):
             mock.patch.object(self.tmux_load, "list_pane_ids_by_index", return_value={0: "%1", 1: "%2"}):
             self.tmux_load.ensure_window_panes("@1", panes, run_commands=False)
 
-        self.assertIn(["select-pane", "-t", "@1.1"], calls)
+        self.assertIn(["select-pane", "-t", "%2"], calls)
 
     def test_restore_reuse_current_appends_all_windows(self):
         data = {
@@ -375,6 +380,54 @@ class TmuxLoadWindowRestoreTests(CapturingTestCase):
         self.assertIn("w2", new_window_calls[1])
         self.assertIn("-c", new_window_calls[1])
         self.assertIn("/", new_window_calls[1])
+
+    def test_new_window_format_before_command(self):
+        data = {
+            "name": "sess",
+            "windows": [
+                {
+                    "index": 0,
+                    "name": "w1",
+                    "panes": [
+                        {
+                            "index": 0,
+                            "path": "/",
+                            "processes": [{"command": ["nvim", "README.md"]}],
+                        }
+                    ],
+                }
+            ],
+        }
+        calls = []
+
+        def tmux_out(args):
+            calls.append(args)
+            if args and args[0] in {"new-session", "new-window"}:
+                return "@1"
+            return ""
+
+        with mock.patch.object(self.tmux_load, "tmux_out", side_effect=tmux_out), \
+            mock.patch.object(self.tmux_load, "tmux_queue", side_effect=lambda args: calls.append(args)), \
+            mock.patch.object(self.tmux_load, "tmux_flush"), \
+            mock.patch.object(self.tmux_load, "ensure_window_panes"), \
+            mock.patch.object(self.tmux_load, "apply_window_options"), \
+            mock.patch.object(self.tmux_load, "session_exists", return_value=False):
+            self.tmux_load.restore_from_dump(
+                data,
+                force=False,
+                append=False,
+                run_commands=True,
+                target_session="sess",
+                base_dir="",
+                fallback_dir="/",
+            )
+
+        new_window_calls = [c for c in calls if c and c[0] == "new-window"]
+        self.assertEqual(len(new_window_calls), 1)
+        cmd = new_window_calls[0]
+        self.assertIn("-F", cmd)
+        self.assertIn("--", cmd)
+        self.assertLess(cmd.index("-F"), cmd.index("--"))
 
     def test_restore_new_session_uses_base_dir_only_for_first_window(self):
         data = {
@@ -755,6 +808,26 @@ class TmuxLoadHelpersTests(unittest.TestCase):
         self.assertEqual(self.tmux_load.normalize_start_command(None), "")
         self.assertEqual(self.tmux_load.normalize_start_command(["echo", "hi"]), "echo hi")
         self.assertEqual(self.tmux_load.normalize_start_command("ls"), "ls")
+
+    def test_command_from_processes_prefers_child_of_shell(self):
+        processes = [
+            {"command": ["/bin/bash"]},
+            {"command": ["nvim", "Cargo.toml"]},
+        ]
+        self.assertEqual(self.tmux_load.run_plan_from_processes(processes), ([], "nvim Cargo.toml"))
+
+    def test_command_from_processes_falls_back_to_shell(self):
+        processes = [
+            {"command": ["fish"]},
+        ]
+        self.assertEqual(self.tmux_load.run_plan_from_processes(processes), ([], ""))
+
+    def test_command_from_processes_uses_first_non_shell(self):
+        processes = [
+            {"command": ["vim", "README.md"]},
+            {"command": ["sleep", "1"]},
+        ]
+        self.assertEqual(self.tmux_load.run_plan_from_processes(processes), (["vim", "README.md"], ""))
 
     def test_normalize_path_strips_file_scheme(self):
         self.assertEqual(self.tmux_load.normalize_path("file:///tmp"), "/tmp")

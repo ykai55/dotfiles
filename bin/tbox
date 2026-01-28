@@ -226,7 +226,7 @@ def cmd_save(name: Optional[str]) -> int:
     return 0
 
 
-def cmd_select() -> int:
+def cmd_select(run_commands: bool) -> int:
     store = data_dir()
     entries = load_saved_sessions(store)
     if not entries:
@@ -238,6 +238,8 @@ def cmd_select() -> int:
         return 1
 
     cmd = [tool_path("tmux-load"), entry["path"]]
+    if not run_commands:
+        cmd.append("--no-run-commands")
     return subprocess.run(cmd).returncode
 
 
@@ -306,7 +308,14 @@ def main() -> int:
     save_parser = subparsers.add_parser("save", help="Save current tmux session")
     save_parser.add_argument("name", nargs="?", help="Target tmux session name")
 
-    subparsers.add_parser("select", help="Select and restore a stored session")
+    select_parser = subparsers.add_parser("select", help="Select and restore a stored session")
+    select_parser.add_argument(
+        "--no-run-commands",
+        action="store_false",
+        dest="run_commands",
+        help="Do not run pane commands during restore",
+    )
+    select_parser.set_defaults(run_commands=True)
     drop_parser = subparsers.add_parser("drop", help="Drop a stored session")
     drop_parser.add_argument("name", nargs="?", help="Stored session name")
     list_parser = subparsers.add_parser("list", help="List stored sessions")
@@ -316,7 +325,7 @@ def main() -> int:
     if args.command == "save":
         return cmd_save(args.name)
     if args.command == "select":
-        return cmd_select()
+        return cmd_select(args.run_commands)
     if args.command == "drop":
         return cmd_drop(args.name)
     if args.command == "list":

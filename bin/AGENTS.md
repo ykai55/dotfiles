@@ -28,13 +28,11 @@ Important fields
 - name
 - windows[].name
 - windows[].panes[].path
-- windows[].panes[].start_command
-- windows[].panes[].current_command
 - windows[].panes[].processes[].command (array of tokens)
 
 Notes
 - processes[].command is an array of strings (tokenized via shell-like splitting).
-- start_command reflects tmux pane start command as dumped by tmux.
+- processes[].command reflects the command tokens as reported by ps.
 
 ## tmux-load
 
@@ -47,7 +45,7 @@ Usage
 - tmux-load -f path/to/tmux.json
 - tmux-load -a path/to/tmux.json
 - tmux-load -c /path/to/dir path/to/tmux.json
-- tmux-load --run-commands path/to/tmux.json
+- tmux-load --no-run-commands path/to/tmux.json
 
 Behavior
 - Restores windows, panes, titles, layouts, and working directories into a target session.
@@ -57,7 +55,8 @@ Behavior
 - -f clears the target session before restore.
 - -a appends windows to the target session.
 - -c sets the base directory for new sessions, overriding dump paths for the first window only.
-- --run-commands executes pane start_command.
+- By default, pane commands are restored based on processes.
+- --no-run-commands skips starting any pane commands.
 
 Restore combinations
 - Inside tmux + restoring into current session (in-place): does not change directory, -c is rejected.
@@ -68,10 +67,9 @@ Restore combinations
 
 Input expectations
 - Dump can be a single session object (current output) or legacy {"sessions": [...]}.
-- windows[].panes[].start_command may be a string or an array.
-  - Arrays are joined into a shell command line before execution.
 
 Notes
-- start_command is executed by sending keys to the pane or by respawning the pane
-  with the command attached (first pane).
+- Pane commands are derived from processes, preferring a direct tmux command when
+  the first process is not a shell; when the first process is a shell and there is
+  a second process, the second command is sent to the shell.
 - -c cannot be used when restoring in the current session.
