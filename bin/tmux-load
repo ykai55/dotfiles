@@ -581,6 +581,7 @@ def main() -> int:
         if session_exists(dump_session):
             target_session = unique_session_name(dump_session)
 
+    pending_rename = None
     if (
         not args.session
         and current_session
@@ -591,9 +592,7 @@ def main() -> int:
         new_name = dump_session
         if session_exists(new_name):
             new_name = unique_session_name(new_name)
-        tmux_out(["rename-session", "-t", current_session, new_name])
-        target_session = new_name
-        current_session = new_name
+        pending_rename = new_name
 
     if args.directory and in_tmux and current_session and target_session == current_session:
         print("ERROR: -c cannot be used when restoring in the current session", file=sys.stderr)
@@ -611,6 +610,11 @@ def main() -> int:
     except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
+
+    if pending_rename and current_session:
+        tmux_out(["rename-session", "-t", current_session, pending_rename])
+        target_session = pending_rename
+        current_session = pending_rename
 
     if in_tmux:
         if current_session != target_session:

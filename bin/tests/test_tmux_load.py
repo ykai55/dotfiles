@@ -697,7 +697,7 @@ class TmuxLoadMainTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn(["rename-session", "-t", "cur", "dump"], tmux_calls)
         self.assertEqual(len(restore_calls), 1)
-        self.assertEqual(restore_calls[0][0][4], "dump")
+        self.assertEqual(restore_calls[0][0][4], "cur")
         self.assertNotIn(["switch-client", "-t", "dump"], tmux_calls)
 
     def test_main_in_tmux_renames_with_unique_name(self):
@@ -726,7 +726,7 @@ class TmuxLoadMainTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn(["rename-session", "-t", "cur", "dump(1)"], tmux_calls)
         self.assertEqual(len(restore_calls), 1)
-        self.assertEqual(restore_calls[0][0][4], "dump(1)")
+        self.assertEqual(restore_calls[0][0][4], "cur")
         self.assertNotIn(["switch-client", "-t", "dump(1)"], tmux_calls)
 
     def test_main_in_tmux_without_dump_name_uses_current_session(self):

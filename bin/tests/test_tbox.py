@@ -40,7 +40,7 @@ class TboxTests(CapturingTestCase):
             mock.patch.object(self.tbox, "tool_path", return_value="tmux-load"), \
             mock.patch.object(self.tbox.subprocess, "run") as run_mock:
             run_mock.return_value = mock.Mock(returncode=0)
-            rc = self.tbox.cmd_select(True)
+            rc = self.tbox.cmd_select(True, False)
 
         self.assertEqual(rc, 0)
         run_mock.assert_called_once()
@@ -54,16 +54,32 @@ class TboxTests(CapturingTestCase):
             mock.patch.object(self.tbox, "tool_path", return_value="tmux-load"), \
             mock.patch.object(self.tbox.subprocess, "run") as run_mock:
             run_mock.return_value = mock.Mock(returncode=0)
-            rc = self.tbox.cmd_select(False)
+            rc = self.tbox.cmd_select(False, False)
 
         self.assertEqual(rc, 0)
         args = run_mock.call_args[0][0]
         self.assertEqual(args, ["tmux-load", "/tmp/dump.json", "--no-run-commands"])
 
+    def test_cmd_select_new_session_uses_unique_name(self):
+        entry = {"name": "work", "path": "/tmp/dump.json", "mtime": 0.0, "windows_count": 2}
+        dump_data = {"name": "work", "windows": []}
+        with mock.patch.object(self.tbox, "load_saved_sessions", return_value=[entry]), \
+            mock.patch.object(self.tbox, "choose_entry", return_value=entry), \
+            mock.patch.object(self.tbox, "tool_path", return_value="tmux-load"), \
+            mock.patch.object(self.tbox, "unique_session_name", return_value="work(1)"), \
+            mock.patch("builtins.open", mock.mock_open(read_data=json.dumps(dump_data))), \
+            mock.patch.object(self.tbox.subprocess, "run") as run_mock:
+            run_mock.return_value = mock.Mock(returncode=0)
+            rc = self.tbox.cmd_select(True, True)
+
+        self.assertEqual(rc, 0)
+        args = run_mock.call_args[0][0]
+        self.assertEqual(args, ["tmux-load", "/tmp/dump.json", "--session", "work(1)"])
+
     def test_cmd_select_requires_entries(self):
         with mock.patch.object(self.tbox, "load_saved_sessions", return_value=[]), \
             mock.patch.object(self.tbox, "data_dir", return_value="/tmp"):
-            rc = self.tbox.cmd_select(True)
+            rc = self.tbox.cmd_select(True, False)
         self.assertEqual(rc, 1)
 
     def test_cmd_save_writes_dump_file(self):

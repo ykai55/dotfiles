@@ -118,6 +118,22 @@ def find_entry_by_name(entries: List[Dict[str, Any]], name: str) -> Optional[Dic
     return None
 
 
+def tmux_has_session(name: str) -> bool:
+    rc, _, _ = run_cmd(["tmux", "has-session", "-t", name])
+    return rc == 0
+
+
+def unique_session_name(base: str) -> str:
+    if not tmux_has_session(base):
+        return base
+    idx = 1
+    while True:
+        candidate = f"{base}({idx})"
+        if not tmux_has_session(candidate):
+            return candidate
+        idx += 1
+
+
 def format_mtime(ts: float) -> str:
     if not ts:
         return ""
@@ -226,7 +242,7 @@ def cmd_save(name: Optional[str]) -> int:
     return 0
 
 
-def cmd_select(run_commands: bool) -> int:
+def cmd_select(run_commands: bool, new_session: bool) -> int:
     store = data_dir()
     entries = load_saved_sessions(store)
     if not entries:
@@ -238,6 +254,16 @@ def cmd_select(run_commands: bool) -> int:
         return 1
 
     cmd = [tool_path("tmux-load"), entry["path"]]
+    if new_session:
+        try:
+            with open(entry["path"], "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as exc:
+            print(f"ERROR: failed to read dump file: {exc}", file=sys.stderr)
+            return 1
+        base_name = session_name_from_dump(data) or entry.get("name") or "session"
+        target = unique_session_name(str(base_name))
+        cmd.extend(["--session", target])
     if not run_commands:
         cmd.append("--no-run-commands")
     return subprocess.run(cmd).returncode
@@ -315,7 +341,12 @@ def main() -> int:
         dest="run_commands",
         help="Do not run pane commands during restore",
     )
-    select_parser.set_defaults(run_commands=True)
+    select_parser.add_argument(
+        "--new",
+        action="store_true",
+        help="Restore into a new tmux session",
+    )
+    select_parser.set_defaults(run_commands=True, new=False)
     drop_parser = subparsers.add_parser("drop", help="Drop a stored session")
     drop_parser.add_argument("name", nargs="?", help="Stored session name")
     list_parser = subparsers.add_parser("list", help="List stored sessions")
@@ -325,7 +356,7 @@ def main() -> int:
     if args.command == "save":
         return cmd_save(args.name)
     if args.command == "select":
-        return cmd_select(args.run_commands)
+        return cmd_select(args.run_commands, args.new)
     if args.command == "drop":
         return cmd_drop(args.name)
     if args.command == "list":

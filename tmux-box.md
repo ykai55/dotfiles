@@ -19,10 +19,12 @@ tbox save <session-name>
 
 ```
 tbox select
+tbox select --new
 ```
 
 - 使用交互式选择器选择要恢复的会话。
 - 优先使用 fzf/sk；若不可用则回退到数字输入。
+- `--new` 会在新会话中恢复（自动选择未占用的会话名）。
 
 ### 删除会话
 
