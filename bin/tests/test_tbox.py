@@ -327,6 +327,21 @@ class TboxTests(CapturingTestCase):
             selected = self.tbox.choose_entry(entries, "Select")
         self.assertEqual(selected["path"], "/tmp/one.json")
 
+    def test_choose_entry_includes_preview(self):
+        entries = [{"name": "one", "path": "/tmp/one.json", "mtime": 0.0, "windows_count": 1}]
+        fake_proc = mock.Mock(returncode=0, stdout="one\t1w\t\t/tmp/one.json\n")
+        with mock.patch.object(self.tbox.shutil, "which", side_effect=["/usr/bin/fzf", None]), \
+            mock.patch.object(self.tbox, "tool_path", return_value="tbox"), \
+            mock.patch.object(self.tbox.subprocess, "run", return_value=fake_proc) as run_mock:
+            selected = self.tbox.choose_entry(entries, "Select")
+
+        self.assertEqual(selected["path"], "/tmp/one.json")
+        args = run_mock.call_args[0][0]
+        self.assertIn("--preview", args)
+        self.assertIn("tbox preview", " ".join(args))
+        self.assertIn("--preview-window", args)
+        self.assertIn("up,50%", args)
+
     def test_cmd_save_reports_tmux_dump_error(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             with mock.patch.dict(os.environ, {"TMUX": "1"}, clear=True), \
@@ -338,6 +353,35 @@ class TboxTests(CapturingTestCase):
                 rc = self.tbox.cmd_save(None)
 
             self.assertEqual(rc, 1)
+
+    def test_cmd_preview_formats_dump(self):
+        dump = {
+            "name": "sess",
+            "windows": [
+                {
+                    "index": 0,
+                    "name": "w0",
+                    "panes": [
+                        {"index": 0, "title": "vim", "path": "/tmp"},
+                        {"index": 1, "path": "/home/kai"},
+                    ],
+                }
+            ],
+        }
+        entry = {"name": "sess", "path": "/tmp/dump.json", "mtime": 0.0, "windows_count": 1}
+        with mock.patch.object(self.tbox, "load_saved_sessions", return_value=[entry]), \
+            mock.patch.object(self.tbox, "data_dir", return_value="/tmp"), \
+            mock.patch("builtins.open", mock.mock_open(read_data=json.dumps(dump))), \
+            mock.patch("builtins.print") as print_mock:
+            rc = self.tbox.cmd_preview("sess")
+
+        self.assertEqual(rc, 0)
+        printed = "\n".join(call.args[0] for call in print_mock.call_args_list)
+        self.assertIn("Session: sess", printed)
+        self.assertIn("Windows: 1", printed)
+        self.assertIn("- [0] w0 (2 panes)", printed)
+        self.assertIn("- 0: vim", printed)
+        self.assertIn("- 1: /home/kai", printed)
 
 
 

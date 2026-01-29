@@ -165,10 +165,23 @@ def choose_entry(entries: List[Dict[str, Any]], prompt: str) -> Optional[Dict[st
         windows_pad = windows_label.ljust(windows_width)
         mtime = format_mtime(entry.get("mtime", 0.0))
         mtime_pad = mtime.ljust(mtime_width)
-        lines.append(f"{name}\t{windows_pad}\t{mtime_pad}\t{entry['path']}")
+        lines.append(f"{name}\t{windows_pad}\t{mtime_pad}\t{raw_name}\t{entry['path']}")
 
     if selector:
-        cmd = [selector, "--prompt", f"{prompt}: ", "--with-nth", "1,2,3", "--delimiter", "\t"]
+        preview_cmd = f"{tool_path('tbox')} preview " + "{4}"
+        cmd = [
+            selector,
+            "--prompt",
+            f"{prompt}: ",
+            "--with-nth",
+            "1,2,3",
+            "--delimiter",
+            "\t",
+            "--preview",
+            preview_cmd,
+            "--preview-window",
+            "up,50%",
+        ]
         proc = subprocess.run(
             cmd,
             input="\n".join(lines) + "\n",
@@ -333,6 +346,49 @@ def cmd_list(verbose: bool) -> int:
     return 0
 
 
+def cmd_preview(name: str) -> int:
+    store = data_dir()
+    entries = load_saved_sessions(store)
+    entry = find_entry_by_name(entries, name)
+    if not entry:
+        print(f"Preview error: no stored session named '{name}'")
+        return 0
+
+    try:
+        with open(entry["path"], "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as exc:
+        print(f"Preview error: {exc}")
+        return 0
+
+    sess = {}
+    if isinstance(data, dict):
+        sessions = data.get("sessions")
+        if isinstance(sessions, list) and sessions:
+            sess = sessions[0] or {}
+        else:
+            sess = data
+
+    name = sess.get("name") or sess.get("session_name") or entry.get("name") or name
+    wins = sess.get("windows") or []
+    print(f"Session: {name}")
+    print(f"Windows: {len(wins)}")
+    for win in wins:
+        idx = win.get("index", "")
+        wname = win.get("name", "")
+        panes = win.get("panes") or []
+        print(f"- [{idx}] {wname} ({len(panes)} panes)")
+        for pane in panes:
+            pidx = pane.get("index", "")
+            title = pane.get("title") or ""
+            path_val = pane.get("path") or ""
+            if title:
+                print(f"  - {pidx}: {title}")
+            elif path_val:
+                print(f"  - {pidx}: {path_val}")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="tmux session persistence manager")
     subparsers = parser.add_subparsers(dest="command")
@@ -359,6 +415,8 @@ def main() -> int:
     drop_parser.add_argument("name", nargs="?", help="Stored session name")
     list_parser = subparsers.add_parser("list", help="List stored sessions")
     list_parser.add_argument("-v", "--verbose", action="store_true", help="Show dump file path")
+    preview_parser = subparsers.add_parser("preview", help="Preview a stored session")
+    preview_parser.add_argument("name", help="Stored session name")
 
     args = parser.parse_args()
     if args.command == "save":
@@ -369,6 +427,8 @@ def main() -> int:
         return cmd_drop(args.name)
     if args.command == "list":
         return cmd_list(args.verbose)
+    if args.command == "preview":
+        return cmd_preview(args.name)
 
     parser.print_help()
     return 2
