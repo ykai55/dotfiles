@@ -349,6 +349,7 @@ def main() -> int:
         help="Do not run pane commands during restore",
     )
     select_parser.add_argument(
+        "-n",
         "--new",
         action="store_true",
         help="Restore into a new tmux session",

@@ -403,7 +403,9 @@ def restore_from_dump(
         else:
             session_empty = is_empty_session(sname, allow_current_pane=target_is_current)
             if not append and not session_empty:
-                raise RuntimeError("target session is not empty (use -f to clear or -a to append)")
+                raise RuntimeError(
+                    f"target session '{sname}' is not empty (use -f to clear or -a to append)"
+                )
 
     if not exists:
         sname = unique_session_name(sname)

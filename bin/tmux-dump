@@ -104,6 +104,8 @@ def ps_processes_for_tty(pane_tty: str, exclude_pids: Optional[set] = None) -> L
                 ppid = int(ppid_s)
             except ValueError:
                 ppid = None
+            if state == "Z":
+                continue
             parents[pid] = ppid
             procs.append(
                 {
