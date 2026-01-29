@@ -365,10 +365,6 @@ def main() -> int:
     parser.add_argument("-s", "--session", help="Target tmux session name")
     args = parser.parse_args()
 
-    if "TMUX" not in os.environ and not args.session:
-        print("ERROR: --session is required when not inside tmux", file=sys.stderr)
-        return 2
-
     data = tmux_dump(args.session)
     try:
         with open(args.output_file, "w", encoding="utf-8") as f:

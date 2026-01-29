@@ -381,8 +381,8 @@ def restore_from_dump(
     if not sname:
         raise RuntimeError("missing target session name")
 
-    in_tmux = "TMUX" in os.environ
-    current_session = current_session_name() if in_tmux else None
+    current_session = current_session_name()
+    in_tmux = current_session is not None
     target_is_current = bool(current_session and sname == current_session)
 
     windows = session.get("windows") or []
