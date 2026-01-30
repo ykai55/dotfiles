@@ -19,11 +19,13 @@ tbox save <session-name>
 
 ```
 tbox select
+tbox select <session-name>
 tbox select --new
 tbox select -n
 ```
 
 - 使用交互式选择器选择要恢复的会话。
+- 传入 name 时跳过交互选择，直接恢复对应会话。
 - 优先使用 fzf/sk；若不可用则回退到数字输入。
 - `--new/-n` 会在新会话中恢复（自动选择未占用的会话名）。
 
