@@ -54,3 +54,10 @@ tbox list -v
 
 - 默认：`~/.local/share/tmux-box`
 - 可通过 `TBOX_DIR` 覆盖存储目录。
+
+## 选择器配置
+
+- 默认优先使用 fzf/sk。
+- 可通过 `TBOX_SELECTOR` 控制选择器：
+  - `fzf` / `sk`: 强制使用该选择器（找不到时回退到输入）。
+  - `none` / `prompt` / `builtin`: 强制使用输入模式。

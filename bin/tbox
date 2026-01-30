@@ -140,6 +140,22 @@ def format_mtime(ts: float) -> str:
     return datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
 
 
+def select_selector() -> Optional[str]:
+    selector = os.environ.get("TBOX_SELECTOR")
+    if not selector:
+        return shutil.which("fzf") or shutil.which("sk")
+    selector = selector.strip()
+    if selector in {"none", "prompt", "builtin"}:
+        return None
+    if selector in {"fzf", "sk"}:
+        path = shutil.which(selector)
+        if not path:
+            print(f"WARN: TBOX_SELECTOR={selector} not found, using prompt", file=sys.stderr)
+        return path
+    print(f"WARN: unsupported TBOX_SELECTOR={selector}, using prompt", file=sys.stderr)
+    return None
+
+
 def format_entry_lines(
     entries: List[Dict[str, Any]],
 ) -> Tuple[List[str], Dict[str, Any], int, int, int]:
@@ -169,9 +185,7 @@ def choose_entry(entries: List[Dict[str, Any]], prompt: str) -> Optional[Dict[st
     if not entries:
         return None
 
-    fzf = shutil.which("fzf")
-    sk = shutil.which("sk")
-    selector = fzf or sk
+    selector = select_selector()
     lines, entry_map, name_width, windows_width, mtime_width = format_entry_lines(entries)
 
     if selector:
@@ -230,9 +244,7 @@ def choose_entry_action(
     if not entries:
         return None, ""
 
-    fzf = shutil.which("fzf")
-    sk = shutil.which("sk")
-    selector = fzf or sk
+    selector = select_selector()
     lines, entry_map, name_width, windows_width, mtime_width = format_entry_lines(entries)
 
     if selector:

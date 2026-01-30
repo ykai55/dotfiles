@@ -327,6 +327,13 @@ class TboxTests(CapturingTestCase):
             selected = self.tbox.choose_entry(entries, "Select")
         self.assertEqual(selected["path"], "/tmp/one.json")
 
+    def test_choose_entry_respects_selector_env(self):
+        entries = [{"name": "one", "path": "/tmp/one.json", "mtime": 0.0, "windows_count": 1}]
+        with mock.patch.dict(os.environ, {"TBOX_SELECTOR": "none"}, clear=True), \
+            mock.patch("builtins.input", return_value="1"):
+            selected = self.tbox.choose_entry(entries, "Select")
+        self.assertEqual(selected["path"], "/tmp/one.json")
+
     def test_choose_entry_includes_preview(self):
         entries = [{"name": "one", "path": "/tmp/one.json", "mtime": 0.0, "windows_count": 1}]
         fake_proc = mock.Mock(returncode=0, stdout="one\t1w\t\t/tmp/one.json\n")
@@ -414,6 +421,14 @@ class TboxTests(CapturingTestCase):
             selected, action = self.tbox.choose_entry_action(entries, "Select")
         self.assertEqual(selected["path"], "/tmp/one.json")
         self.assertEqual(action, "drop")
+
+    def test_choose_entry_action_respects_selector_env(self):
+        entries = [{"name": "one", "path": "/tmp/one.json", "mtime": 0.0, "windows_count": 1}]
+        with mock.patch.dict(os.environ, {"TBOX_SELECTOR": "prompt"}, clear=True), \
+            mock.patch("builtins.input", side_effect=["1", "r"]):
+            selected, action = self.tbox.choose_entry_action(entries, "Select")
+        self.assertEqual(selected["path"], "/tmp/one.json")
+        self.assertEqual(action, "restore")
 
 
 
