@@ -140,15 +140,10 @@ def format_mtime(ts: float) -> str:
     return datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
 
 
-def choose_entry(entries: List[Dict[str, Any]], prompt: str) -> Optional[Dict[str, Any]]:
-    if not entries:
-        return None
-
-    fzf = shutil.which("fzf")
-    sk = shutil.which("sk")
-    selector = fzf or sk
+def format_entry_lines(
+    entries: List[Dict[str, Any]],
+) -> Tuple[List[str], Dict[str, Any], int, int, int]:
     entry_map = {e["path"]: e for e in entries}
-
     name_width = max(len(str(entry.get("name", ""))) for entry in entries)
     windows_width = max(
         len(f"{entry.get('windows_count')}w") if entry.get("windows_count") is not None else 2
@@ -166,6 +161,18 @@ def choose_entry(entries: List[Dict[str, Any]], prompt: str) -> Optional[Dict[st
         mtime = format_mtime(entry.get("mtime", 0.0))
         mtime_pad = mtime.ljust(mtime_width)
         lines.append(f"{name}\t{windows_pad}\t{mtime_pad}\t{raw_name}\t{entry['path']}")
+
+    return lines, entry_map, name_width, windows_width, mtime_width
+
+
+def choose_entry(entries: List[Dict[str, Any]], prompt: str) -> Optional[Dict[str, Any]]:
+    if not entries:
+        return None
+
+    fzf = shutil.which("fzf")
+    sk = shutil.which("sk")
+    selector = fzf or sk
+    lines, entry_map, name_width, windows_width, mtime_width = format_entry_lines(entries)
 
     if selector:
         preview_cmd = f"{tool_path('tbox')} preview " + "{4}"
@@ -214,6 +221,83 @@ def choose_entry(entries: List[Dict[str, Any]], prompt: str) -> Optional[Dict[st
     if idx < 1 or idx > len(entries):
         return None
     return entries[idx - 1]
+
+
+def choose_entry_action(
+    entries: List[Dict[str, Any]],
+    prompt: str,
+) -> Tuple[Optional[Dict[str, Any]], str]:
+    if not entries:
+        return None, ""
+
+    fzf = shutil.which("fzf")
+    sk = shutil.which("sk")
+    selector = fzf or sk
+    lines, entry_map, name_width, windows_width, mtime_width = format_entry_lines(entries)
+
+    if selector:
+        preview_cmd = f"{tool_path('tbox')} preview " + "{4}"
+        cmd = [
+            selector,
+            "--prompt",
+            f"{prompt}: ",
+            "--header",
+            "enter=restore, ctrl-d=drop",
+            "--expect",
+            "ctrl-d,ctrl-r",
+            "--with-nth",
+            "1,2,3",
+            "--delimiter",
+            "\t",
+            "--preview",
+            preview_cmd,
+            "--preview-window",
+            "up,50%",
+        ]
+        proc = subprocess.run(
+            cmd,
+            input="\n".join(lines) + "\n",
+            text=True,
+            stdout=subprocess.PIPE,
+        )
+        if proc.returncode != 0:
+            return None, ""
+        out_lines = [line for line in proc.stdout.splitlines() if line.strip()]
+        if not out_lines:
+            return None, ""
+        key = ""
+        selected = out_lines[0]
+        if len(out_lines) > 1:
+            key = out_lines[0].strip()
+            selected = out_lines[1].strip()
+        if not selected:
+            return None, ""
+        path = selected.split("\t")[-1].strip()
+        action = "drop" if key == "ctrl-d" else "restore"
+        return entry_map.get(path), action
+
+    for idx, entry in enumerate(entries, start=1):
+        windows = entry.get("windows_count")
+        windows_label = f"{windows}w" if windows is not None else "?w"
+        name = str(entry.get("name", "")).ljust(name_width)
+        windows_pad = windows_label.ljust(windows_width)
+        mtime = format_mtime(entry.get("mtime", 0.0)).ljust(mtime_width)
+        print(f"{idx}) {name}  {windows_pad}  {mtime}".rstrip())
+
+    selection = input(f"{prompt} (number): ").strip()
+    if not selection:
+        return None, ""
+    try:
+        idx = int(selection)
+    except ValueError:
+        return None, ""
+    if idx < 1 or idx > len(entries):
+        return None, ""
+    entry = entries[idx - 1]
+    action = input("Action ([r]estore/[d]rop, default r): ").strip().lower()
+    if action.startswith("d"):
+        return entry, "drop"
+    return entry, "restore"
 
 
 def cmd_save(name: Optional[str]) -> int:
@@ -268,7 +352,9 @@ def cmd_select(run_commands: bool, new_session: bool, name: Optional[str]) -> in
             print(f"ERROR: no stored session named '{name}'", file=sys.stderr)
             return 1
     else:
-        entry = choose_entry(entries, "Select session")
+        entry, action = choose_entry_action(entries, "Select session")
+        if action == "drop" and entry:
+            return cmd_drop(entry.get("name"))
     if not entry:
         return 1
 

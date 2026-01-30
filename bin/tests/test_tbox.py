@@ -36,7 +36,7 @@ class TboxTests(CapturingTestCase):
     def test_cmd_select_uses_tmux_load_without_session(self):
         entry = {"name": "work", "path": "/tmp/dump.json", "mtime": 0.0, "windows_count": 2}
         with mock.patch.object(self.tbox, "load_saved_sessions", return_value=[entry]), \
-            mock.patch.object(self.tbox, "choose_entry", return_value=entry), \
+            mock.patch.object(self.tbox, "choose_entry_action", return_value=(entry, "restore")), \
             mock.patch.object(self.tbox, "tool_path", return_value="tmux-load"), \
             mock.patch.object(self.tbox.subprocess, "run") as run_mock:
             run_mock.return_value = mock.Mock(returncode=0)
@@ -50,7 +50,7 @@ class TboxTests(CapturingTestCase):
     def test_cmd_select_can_disable_commands(self):
         entry = {"name": "work", "path": "/tmp/dump.json", "mtime": 0.0, "windows_count": 2}
         with mock.patch.object(self.tbox, "load_saved_sessions", return_value=[entry]), \
-            mock.patch.object(self.tbox, "choose_entry", return_value=entry), \
+            mock.patch.object(self.tbox, "choose_entry_action", return_value=(entry, "restore")), \
             mock.patch.object(self.tbox, "tool_path", return_value="tmux-load"), \
             mock.patch.object(self.tbox.subprocess, "run") as run_mock:
             run_mock.return_value = mock.Mock(returncode=0)
@@ -64,7 +64,7 @@ class TboxTests(CapturingTestCase):
         entry = {"name": "work", "path": "/tmp/dump.json", "mtime": 0.0, "windows_count": 2}
         dump_data = {"name": "work", "windows": []}
         with mock.patch.object(self.tbox, "load_saved_sessions", return_value=[entry]), \
-            mock.patch.object(self.tbox, "choose_entry", return_value=entry), \
+            mock.patch.object(self.tbox, "choose_entry_action", return_value=(entry, "restore")), \
             mock.patch.object(self.tbox, "tool_path", return_value="tmux-load"), \
             mock.patch.object(self.tbox, "unique_session_name", return_value="work(1)"), \
             mock.patch("builtins.open", mock.mock_open(read_data=json.dumps(dump_data))), \
@@ -382,6 +382,38 @@ class TboxTests(CapturingTestCase):
         self.assertIn("- [0] w0 (2 panes)", printed)
         self.assertIn("- 0: vim", printed)
         self.assertIn("- 1: /home/kai", printed)
+
+    def test_cmd_select_drop_action_calls_drop(self):
+        entry = {"name": "work", "path": "/tmp/dump.json", "mtime": 0.0, "windows_count": 2}
+        with mock.patch.object(self.tbox, "load_saved_sessions", return_value=[entry]), \
+            mock.patch.object(self.tbox, "choose_entry_action", return_value=(entry, "drop")), \
+            mock.patch.object(self.tbox, "cmd_drop", return_value=0) as drop_mock, \
+            mock.patch.object(self.tbox.subprocess, "run") as run_mock:
+            rc = self.tbox.cmd_select(True, False, None)
+
+        self.assertEqual(rc, 0)
+        drop_mock.assert_called_once_with("work")
+        run_mock.assert_not_called()
+
+    def test_choose_entry_action_falls_back_to_prompt(self):
+        entries = [
+            {"name": "one", "path": "/tmp/one.json", "mtime": 0.0, "windows_count": 1},
+            {"name": "two", "path": "/tmp/two.json", "mtime": 0.0, "windows_count": 2},
+        ]
+        with mock.patch.object(self.tbox.shutil, "which", return_value=None), \
+            mock.patch("builtins.input", side_effect=["2", "d"]):
+            selected, action = self.tbox.choose_entry_action(entries, "Select")
+        self.assertEqual(selected["name"], "two")
+        self.assertEqual(action, "drop")
+
+    def test_choose_entry_action_uses_selector(self):
+        entries = [{"name": "one", "path": "/tmp/one.json", "mtime": 0.0, "windows_count": 1}]
+        fake_proc = mock.Mock(returncode=0, stdout="ctrl-d\none\t1w\t\t/tmp/one.json\n")
+        with mock.patch.object(self.tbox.shutil, "which", side_effect=["/usr/bin/fzf", None]), \
+            mock.patch.object(self.tbox.subprocess, "run", return_value=fake_proc):
+            selected, action = self.tbox.choose_entry_action(entries, "Select")
+        self.assertEqual(selected["path"], "/tmp/one.json")
+        self.assertEqual(action, "drop")
 
 
 

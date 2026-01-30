@@ -45,7 +45,6 @@ if is_mac
 end
 
 ## aliases
-alias ls 'ls --color'
 alias cls 'clear && echo -ne "\e[3J"'
 alias jqless 'jq --color-output | less -r'
 alias less 'less --mouse --wheel-lines=3'
