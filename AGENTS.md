@@ -29,6 +29,7 @@ Tests (Python)
 - `bin/tests/`: unittest coverage for `tmux-load` and `tmux-dump`.
 - `fish/`, `nvim/`, `tmux/`: shell/editor/terminal configs.
 - `kitty.conf`, `gitconfig`: app configs.
+- `tmux-box.md`: tbox usage and workflow documentation.
 
 
 ## Code Style Guidelines
@@ -96,6 +97,7 @@ Config files (fish, nvim, tmux, kitty)
 - `tmux-load` runs pane commands by default; use `--no-run-commands` to skip.
 - Pane commands are derived from `processes` in the dump, not tmux start/current command fields.
 - `tmux-dump` schema reference: `tmux-dump.d.ts`.
+- When changing tbox commands, update `tmux-box.md`.
 
 ## Cursor / Copilot Rules
 

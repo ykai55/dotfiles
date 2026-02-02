@@ -152,6 +152,16 @@ tbox preview <session-name>
 
 读取该 session 的存档并打印简要结构（windows/panes）。
 
+### 检查：`tbox inspect [name]`
+
+```bash
+tbox inspect
+tbox inspect <session-name>
+```
+
+- 输出存档目录（Store）以及对应 JSON 的完整内容。
+- 不传 `name` 时会依次打印所有存档；传入 `name` 时只打印单个存档。
+
 ### 生成 tmux 配置：`tbox tmux-snippet`
 
 ```bash
