@@ -76,6 +76,40 @@ class TboxTests(CapturingTestCase):
         self.assertEqual(rc, 0)
         print_mock.assert_called_with("No archive for session: work")
 
+    def test_inspect_prints_store_and_content(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            payload = {"name": "work", "windows": []}
+            path = os.path.join(tmpdir, self.core.safe_filename("work"))
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(payload, f)
+            with mock.patch.dict(os.environ, {"TBOX_DIR": tmpdir}, clear=True):
+                rc = self.core.cmd_inspect("work")
+            self.assertEqual(rc, 0)
+            out = self._stdout_buffer.getvalue()
+            self.assertIn(f"Store: {tmpdir}", out)
+            self.assertIn("Session: work", out)
+            self.assertIn(f"Archive: {path}", out)
+            self.assertIn('"name": "work"', out)
+            self.assertIn('"windows": []', out)
+
+    def test_inspect_without_name_lists_archives(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            payloads = [
+                {"name": "work", "windows": []},
+                {"name": "play", "windows": []},
+            ]
+            for payload in payloads:
+                path = os.path.join(tmpdir, self.core.safe_filename(payload["name"]))
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(payload, f)
+            with mock.patch.dict(os.environ, {"TBOX_DIR": tmpdir}, clear=True):
+                rc = self.core.cmd_inspect(None)
+            self.assertEqual(rc, 0)
+            out = self._stdout_buffer.getvalue()
+            self.assertIn(f"Store: {tmpdir}", out)
+            self.assertIn("Session: work", out)
+            self.assertIn("Session: play", out)
+
     def test_save_writes_dump_file(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             def fake_run_cmd(argv):

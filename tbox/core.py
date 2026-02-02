@@ -564,6 +564,45 @@ def cmd_preview(name: str) -> int:
     return 0
 
 
+def print_archive_inspect(entry: Entry) -> int:
+    if not entry.archive_path:
+        print(f"ERROR: no archive for session '{entry.name}'", file=sys.stderr)
+        return 1
+    path = str(entry.archive_path)
+    print(f"Session: {entry.name}")
+    print(f"Archive: {path}")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as exc:
+        print(f"ERROR: failed to read {path}: {exc}", file=sys.stderr)
+        return 1
+    print("Content:")
+    print(json.dumps(data, indent=2, sort_keys=True))
+    return 0
+
+
+def cmd_inspect(name: Optional[str]) -> int:
+    store = data_dir()
+    print(f"Store: {store}")
+    entries = load_saved_sessions(store)
+    if name:
+        entry = find_entry_by_name(entries, name)
+        if not entry:
+            print(f"ERROR: no archive for session '{name}'", file=sys.stderr)
+            return 1
+        return print_archive_inspect(entry)
+    if not entries:
+        print("No archives")
+        return 1
+    rc = 0
+    for idx, entry in enumerate(entries):
+        if idx:
+            print("")
+        rc = max(rc, print_archive_inspect(entry))
+    return rc
+
+
 def cmd_select(run_commands: bool, new_session: bool, name: Optional[str]) -> int:
     store = data_dir()
     archived = load_saved_sessions(store)

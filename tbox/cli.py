@@ -49,6 +49,11 @@ def build_parser() -> argparse.ArgumentParser:
     preview_parser = subparsers.add_parser("preview", help="Preview an archived session")
     preview_parser.add_argument("name", help="Session name")
 
+    inspect_parser = subparsers.add_parser(
+        "inspect", help="Inspect archive directory and JSON contents"
+    )
+    inspect_parser.add_argument("name", nargs="?", help="Session name")
+
     snippet_parser = subparsers.add_parser("tmux-snippet", help="Print a tmux.conf snippet")
     snippet_parser.add_argument(
         "--throttle-seconds",
@@ -81,6 +86,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         return core.cmd_list(args.verbose, args.all)
     if args.command == "preview":
         return core.cmd_preview(args.name)
+    if args.command == "inspect":
+        return core.cmd_inspect(args.name)
     if args.command == "tmux-snippet":
         return core.cmd_tmux_snippet(args.throttle_seconds, args.tbox_command)
     parser.print_help()
