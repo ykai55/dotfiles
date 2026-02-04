@@ -221,6 +221,12 @@ tbox tmux-snippet --tbox-command tbox
 - `tbox select` 对 live session 永远优先切换，不会覆盖正在运行的会话。
 - `tmux popup` 需要较新的 tmux 版本；如果你的 tmux 不支持 popup，可以改成绑定直接跑 `tbox select`（不弹窗）。
 
+TODO: session rename 与 archive 迁移
+
+- 目前 `session-renamed` hook 触发 autosave 时，tbox 只能看到“新名字”，通常拿不到 old name，因此会按新名字生成/写入一个新的 archive（旧名字的 archive 不会被自动重命名/迁移）。
+- tmux 的 `session_id` 在 rename 时稳定，但在 dump/load 过程中不会被“恢复”（load 会创建新的 session 对象，id 会变化），所以不能直接用 `session_id` 作为跨重启的持久 identity。
+- 如果要实现“rename = 重命名/迁移同一份存档”并跨重启生效，需要一个 tbox 自己维护的持久标识（例如写入 tmux option 并在 dump/load 中携带，或额外的 sidecar 元数据）。
+
 ## 开发与测试
 
 ```bash
