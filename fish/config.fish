@@ -54,7 +54,7 @@ alias pd prevd
 alias nd nextd
 alias cdr 'cd (git root)'
 alias claude 'ccr code'
-alias ocode 'opencode'
+alias ocode 'opencode --port'
 
 ## binds
 bind alt-backspace backward-kill-path-component
