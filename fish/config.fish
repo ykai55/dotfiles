@@ -57,6 +57,7 @@ alias claude 'ccr code'
 alias ocode 'opencode --port'
 
 ## binds
+bind ctrl-w backward-kill-word
 bind alt-backspace backward-kill-path-component
 
 ## envs
