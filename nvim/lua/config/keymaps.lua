@@ -18,3 +18,5 @@ vim.keymap.set("c", "<m-f>", "<c-right>")
 vim.keymap.set("c", "<m-b>", "<c-left>")
 vim.keymap.set("c", "<m-right>", "<c-right>")
 vim.keymap.set("c", "<m-left>", "<c-left>")
+
+vim.keymap.set("n", "<leader>gb", "<cmd>Gitsigns blame<cr>", { desc = "Gitsigns Blame" })
