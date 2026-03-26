@@ -1,0 +1,102 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import glob
+import os
+import subprocess
+import sys
+from typing import List, Optional, Sequence, Tuple
+
+
+DEFAULT_PATTERNS = ["~/src/template-assembler*"]
+
+
+def run_git(repo_path: str, args: Sequence[str]) -> Tuple[int, str, str]:
+    proc = subprocess.run(
+        ["git", "-C", repo_path, *args],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    return proc.returncode, proc.stdout, proc.stderr
+
+
+def expand_patterns(patterns: Sequence[str]) -> List[str]:
+    matches: List[str] = []
+    seen: set[str] = set()
+    for pattern in patterns:
+        expanded = os.path.expanduser(pattern)
+        for path in sorted(glob.glob(expanded)):
+            if not os.path.isdir(path):
+                continue
+            full_path = os.path.abspath(path)
+            if full_path in seen:
+                continue
+            seen.add(full_path)
+            matches.append(full_path)
+    return matches
+
+
+def format_path(path: str) -> str:
+    home = os.path.expanduser("~")
+    if path == home:
+        return "~"
+    if path.startswith(home + os.sep):
+        return "~" + path[len(home) :]
+    return path
+
+
+def branch_for_repo(repo_path: str) -> Optional[str]:
+    rc, out, _ = run_git(repo_path, ["rev-parse", "--is-inside-work-tree"])
+    if rc != 0 or out.strip() != "true":
+        return None
+
+    rc, out, _ = run_git(repo_path, ["symbolic-ref", "--quiet", "--short", "HEAD"])
+    branch = out.strip()
+    if rc == 0 and branch:
+        return branch
+
+    rc, out, _ = run_git(repo_path, ["rev-parse", "--short", "HEAD"])
+    revision = out.strip()
+    if rc == 0 and revision:
+        return f"(detached {revision})"
+
+    return "(unknown)"
+
+
+def list_repos(patterns: Sequence[str]) -> int:
+    repo_paths = expand_patterns(patterns)
+    if not repo_paths:
+        print(f"No directories matched: {', '.join(patterns)}", file=sys.stderr)
+        return 1
+
+    for repo_path in repo_paths:
+        branch = branch_for_repo(repo_path)
+        if branch is None:
+            print(f"{format_path(repo_path)}\t(not a git repo)")
+            continue
+        print(f"{format_path(repo_path)}\t{branch}")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="List git branches for matching directories.",
+    )
+    parser.add_argument(
+        "patterns",
+        nargs="*",
+        default=DEFAULT_PATTERNS,
+        help="Directory globs to scan. Defaults to ~/src/template-assembler*",
+    )
+    return parser
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+    return list_repos(args.patterns)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
