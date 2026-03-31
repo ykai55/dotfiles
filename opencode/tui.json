@@ -3,10 +3,10 @@
   "keybinds": {
     "messages_page_up": "pageup,ctrl+u",
     "messages_page_down": "pagedown,ctrl+d",
-    "command_list": "ctrl+/,<leader>x",
+    "command_list": "ctrl+/,<leader>/",
     "history_previous": "ctrl+p",
     "history_next": "ctrl+n",
     "app_exit": "ctrl+d,<leader>q",
-    "session_interrupt": "ctrl+c,escape",
+    "session_interrupt": "ctrl+c",
   }
 }
