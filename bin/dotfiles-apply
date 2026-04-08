@@ -1,0 +1,421 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import fnmatch
+import json
+import os
+import shutil
+import sys
+from dataclasses import dataclass, field
+from typing import Sequence
+
+
+DEFAULT_MANIFEST = "dotfiles-map.json"
+
+
+@dataclass
+class Mapping:
+    name: str
+    source: str
+    target: str
+    mode: str = "symlink"
+    exclude: list[str] = field(default_factory=list)
+    optional: bool = False
+    platforms: list[str] = field(default_factory=list)
+
+
+@dataclass
+class Stats:
+    linked: int = 0
+    backed_up: int = 0
+    removed: int = 0
+    skipped: int = 0
+    errors: int = 0
+
+
+def repo_root() -> str:
+    script_path = os.path.realpath(__file__)
+    return os.path.abspath(os.path.join(os.path.dirname(script_path), os.pardir))
+
+
+def home_dotfiles_path() -> str:
+    return os.path.abspath(os.path.expanduser("~/dotfiles"))
+
+
+def current_platform() -> str:
+    if sys.platform.startswith("darwin"):
+        return "macos"
+    if sys.platform.startswith("linux"):
+        return "linux"
+    return sys.platform
+
+
+def expand_target(path: str) -> str:
+    expanded = os.path.expandvars(os.path.expanduser(path))
+    return os.path.abspath(expanded)
+
+
+def load_manifest(path: str) -> list[Mapping]:
+    with open(path, "r", encoding="utf-8") as f:
+        raw = json.load(f)
+
+    if not isinstance(raw, dict):
+        raise RuntimeError("Manifest root must be a JSON object")
+
+    mappings = raw.get("mappings")
+    if not isinstance(mappings, list):
+        raise RuntimeError("Manifest must contain a 'mappings' array")
+
+    loaded: list[Mapping] = []
+    for index, item in enumerate(mappings, start=1):
+        if not isinstance(item, dict):
+            raise RuntimeError(f"Mapping #{index} must be an object")
+        source = item.get("source")
+        target = item.get("target")
+        if not isinstance(source, str) or not source:
+            raise RuntimeError(f"Mapping #{index} is missing a valid 'source'")
+        if not isinstance(target, str) or not target:
+            raise RuntimeError(f"Mapping #{index} is missing a valid 'target'")
+        mode = item.get("mode", "symlink")
+        if mode not in {"symlink", "link_children"}:
+            raise RuntimeError(
+                f"Mapping #{index} has unsupported mode '{mode}'"
+            )
+        exclude = item.get("exclude", [])
+        platforms = item.get("platforms", [])
+        optional = item.get("optional", False)
+        if not isinstance(exclude, list) or not all(isinstance(v, str) for v in exclude):
+            raise RuntimeError(f"Mapping #{index} has invalid 'exclude' patterns")
+        if not isinstance(platforms, list) or not all(
+            isinstance(v, str) for v in platforms
+        ):
+            raise RuntimeError(f"Mapping #{index} has invalid 'platforms'")
+        if not isinstance(optional, bool):
+            raise RuntimeError(f"Mapping #{index} has invalid 'optional' value")
+        name = item.get("name", source)
+        if not isinstance(name, str) or not name:
+            raise RuntimeError(f"Mapping #{index} has invalid 'name'")
+        loaded.append(
+            Mapping(
+                name=name,
+                source=source,
+                target=target,
+                mode=mode,
+                exclude=exclude,
+                optional=optional,
+                platforms=platforms,
+            )
+        )
+    return loaded
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Apply dotfiles mappings from a JSON manifest.",
+    )
+    parser.add_argument(
+        "--manifest",
+        default=os.path.join(repo_root(), DEFAULT_MANIFEST),
+        help="Path to the JSON manifest. Defaults to dotfiles-map.json in the repo root.",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print planned changes without modifying the filesystem.",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Back up conflicting paths and replace them with managed symlinks.",
+    )
+    parser.add_argument(
+        "--prune",
+        action="store_true",
+        help="Remove stale managed child links for link_children mappings.",
+    )
+    parser.add_argument(
+        "--include-optional",
+        action="store_true",
+        help="Apply mappings marked as optional in the manifest.",
+    )
+    return parser
+
+
+def print_info(message: str) -> None:
+    print(message)
+
+
+def print_warning(message: str) -> None:
+    print(message, file=sys.stderr)
+
+
+def path_exists(path: str) -> bool:
+    return os.path.lexists(path)
+
+
+def next_backup_path(path: str) -> str:
+    candidate = path + ".bak"
+    index = 1
+    while path_exists(candidate):
+        candidate = f"{path}.bak.{index}"
+        index += 1
+    return candidate
+
+
+def same_symlink_target(path: str, source: str) -> bool:
+    return os.path.islink(path) and os.path.realpath(path) == os.path.realpath(source)
+
+
+def ensure_parent_dir(path: str, dry_run: bool) -> None:
+    parent = os.path.dirname(path)
+    if not parent or os.path.isdir(parent):
+        return
+    if path_exists(parent):
+        raise RuntimeError(f"Parent path exists but is not a directory: {parent}")
+    print_info(f"[mkdir] {parent}")
+    if not dry_run:
+        os.makedirs(parent, exist_ok=True)
+
+
+def remove_path(path: str, dry_run: bool, stats: Stats) -> None:
+    print_info(f"[remove] {path}")
+    if not dry_run:
+        if os.path.islink(path) or os.path.isfile(path):
+            os.remove(path)
+        else:
+            shutil.rmtree(path)
+    stats.removed += 1
+
+
+def backup_path(path: str, dry_run: bool, stats: Stats) -> str:
+    backup = next_backup_path(path)
+    print_info(f"[backup] {path} -> {backup}")
+    if not dry_run:
+        os.rename(path, backup)
+    stats.backed_up += 1
+    return backup
+
+
+def ensure_home_dotfiles_link(
+    actual_repo_root: str,
+    force: bool,
+    dry_run: bool,
+    stats: Stats,
+) -> bool:
+    compat_path = home_dotfiles_path()
+    actual_real = os.path.realpath(actual_repo_root)
+    if os.path.realpath(compat_path) == actual_real:
+        return True
+    if not path_exists(compat_path):
+        ensure_parent_dir(compat_path, dry_run)
+        print_info(f"[link] {compat_path} -> {actual_repo_root}")
+        if not dry_run:
+            os.symlink(actual_repo_root, compat_path)
+        stats.linked += 1
+        return True
+    if not force:
+        print_warning(
+            f"[error] {compat_path} already exists and does not point to {actual_repo_root}"
+        )
+        stats.errors += 1
+        return False
+    backup_path(compat_path, dry_run, stats)
+    print_info(f"[link] {compat_path} -> {actual_repo_root}")
+    if not dry_run:
+        os.symlink(actual_repo_root, compat_path)
+    stats.linked += 1
+    return True
+
+
+def should_include_mapping(mapping: Mapping, include_optional: bool) -> bool:
+    if mapping.optional and not include_optional:
+        return False
+    if mapping.platforms and current_platform() not in mapping.platforms:
+        return False
+    return True
+
+
+def ensure_symlink(
+    source: str,
+    target: str,
+    force: bool,
+    dry_run: bool,
+    stats: Stats,
+) -> None:
+    if same_symlink_target(target, source):
+        print_info(f"[ok] {target}")
+        return
+
+    if path_exists(target):
+        if not force:
+            print_warning(f"[skip] {target} exists and is not managed")
+            stats.skipped += 1
+            return
+        backup_path(target, dry_run, stats)
+
+    ensure_parent_dir(target, dry_run)
+    print_info(f"[link] {target} -> {source}")
+    if not dry_run:
+        os.symlink(source, target)
+    stats.linked += 1
+
+
+def ensure_target_directory(
+    target_dir: str,
+    force: bool,
+    dry_run: bool,
+    stats: Stats,
+) -> bool:
+    if os.path.isdir(target_dir) and not os.path.islink(target_dir):
+        return True
+    if not path_exists(target_dir):
+        print_info(f"[mkdir] {target_dir}")
+        if not dry_run:
+            os.makedirs(target_dir, exist_ok=True)
+        return True
+    if not force:
+        print_warning(f"[skip] {target_dir} exists and cannot host child links")
+        stats.skipped += 1
+        return False
+    backup_path(target_dir, dry_run, stats)
+    print_info(f"[mkdir] {target_dir}")
+    if not dry_run:
+        os.makedirs(target_dir, exist_ok=True)
+    return True
+
+
+def is_excluded(name: str, patterns: Sequence[str]) -> bool:
+    return any(fnmatch.fnmatch(name, pattern) for pattern in patterns)
+
+
+def prune_managed_children(
+    source_dir: str,
+    target_dir: str,
+    desired_names: set[str],
+    dry_run: bool,
+    stats: Stats,
+) -> None:
+    source_real = os.path.realpath(source_dir)
+    for name in sorted(os.listdir(target_dir)):
+        if name in desired_names:
+            continue
+        target_path = os.path.join(target_dir, name)
+        if not os.path.islink(target_path):
+            continue
+        resolved = os.path.realpath(target_path)
+        if resolved.startswith(source_real + os.sep):
+            remove_path(target_path, dry_run, stats)
+
+
+def apply_link_children(
+    actual_source_dir: str,
+    managed_source_dir: str,
+    target_dir: str,
+    exclude: Sequence[str],
+    force: bool,
+    dry_run: bool,
+    prune: bool,
+    stats: Stats,
+) -> None:
+    if not ensure_target_directory(target_dir, force, dry_run, stats):
+        return
+
+    desired_names: set[str] = set()
+    for name in sorted(os.listdir(actual_source_dir)):
+        if is_excluded(name, exclude):
+            continue
+        desired_names.add(name)
+        source_path = os.path.join(managed_source_dir, name)
+        target_path = os.path.join(target_dir, name)
+        ensure_symlink(source_path, target_path, force, dry_run, stats)
+
+    if prune and os.path.isdir(target_dir):
+        prune_managed_children(actual_source_dir, target_dir, desired_names, dry_run, stats)
+
+
+def apply_mapping(
+    mapping: Mapping,
+    actual_repo_root: str,
+    force: bool,
+    dry_run: bool,
+    prune: bool,
+    stats: Stats,
+) -> None:
+    actual_source = os.path.join(actual_repo_root, mapping.source)
+    if not path_exists(actual_source):
+        raise RuntimeError(f"Missing source path: {actual_source}")
+
+    compat_source = os.path.join(home_dotfiles_path(), mapping.source)
+    target = expand_target(mapping.target)
+    print_info(f"==> {mapping.name}")
+
+    if mapping.mode == "symlink":
+        ensure_symlink(compat_source, target, force, dry_run, stats)
+        return
+
+    if not os.path.isdir(actual_source):
+        raise RuntimeError(f"link_children source must be a directory: {actual_source}")
+    apply_link_children(
+        actual_source,
+        compat_source,
+        target,
+        mapping.exclude,
+        force,
+        dry_run,
+        prune,
+        stats,
+    )
+
+
+def apply_manifest(
+    actual_repo_root: str,
+    manifest_path: str,
+    include_optional: bool = False,
+    force: bool = False,
+    dry_run: bool = False,
+    prune: bool = False,
+) -> Stats:
+    stats = Stats()
+    mappings = load_manifest(manifest_path)
+
+    if not ensure_home_dotfiles_link(actual_repo_root, force, dry_run, stats):
+        return stats
+
+    for mapping in mappings:
+        if not should_include_mapping(mapping, include_optional):
+            continue
+        try:
+            apply_mapping(mapping, actual_repo_root, force, dry_run, prune, stats)
+        except (OSError, RuntimeError) as exc:
+            print_warning(f"[error] {mapping.name}: {exc}")
+            stats.errors += 1
+    return stats
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+    actual_repo_root = repo_root()
+    manifest_path = expand_target(args.manifest)
+    try:
+        stats = apply_manifest(
+            actual_repo_root,
+            manifest_path,
+            include_optional=args.include_optional,
+            force=args.force,
+            dry_run=args.dry_run,
+            prune=args.prune,
+        )
+    except (OSError, RuntimeError, json.JSONDecodeError) as exc:
+        print_warning(f"[error] {exc}")
+        return 1
+    print_info(
+        "Summary: "
+        f"linked={stats.linked} backed_up={stats.backed_up} removed={stats.removed} "
+        f"skipped={stats.skipped} errors={stats.errors}"
+    )
+    return 1 if stats.errors else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

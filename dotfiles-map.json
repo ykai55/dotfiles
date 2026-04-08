@@ -1,0 +1,79 @@
+{
+  "$schema": "./dotfiles-map.schema.json",
+  "version": 1,
+  "mappings": [
+    {
+      "name": "fish",
+      "source": "fish",
+      "target": "~/.config/fish",
+      "mode": "link_children",
+      "exclude": [
+        ".gitignore",
+        "fish_variables*",
+        "fishd.tmp*"
+      ]
+    },
+    {
+      "name": "nvim",
+      "source": "nvim",
+      "target": "~/.config/nvim",
+      "mode": "symlink"
+    },
+    {
+      "name": "ideavim",
+      "source": "nvim/ideavimrc",
+      "target": "~/.ideavimrc",
+      "mode": "symlink"
+    },
+    {
+      "name": "kitty",
+      "source": "kitty.conf",
+      "target": "~/.config/kitty/kitty.conf",
+      "mode": "symlink"
+    },
+    {
+      "name": "git",
+      "source": "gitconfig",
+      "target": "~/.gitconfig",
+      "mode": "symlink"
+    },
+    {
+      "name": "tmux",
+      "source": "tmux/tmux.conf",
+      "target": "~/.tmux.conf",
+      "mode": "symlink"
+    },
+    {
+      "name": "tmux-local",
+      "source": "tmux/tmux.conf.local",
+      "target": "~/.tmux.conf.local",
+      "mode": "symlink"
+    },
+    {
+      "name": "opencode",
+      "source": "opencode",
+      "target": "~/.config/opencode",
+      "mode": "link_children"
+    },
+    {
+      "name": "niri",
+      "source": "niri/config.kdl",
+      "target": "~/.config/niri/config.kdl",
+      "mode": "symlink",
+      "platforms": [
+        "linux"
+      ],
+      "optional": true
+    },
+    {
+      "name": "keyd",
+      "source": "keyd/default.conf",
+      "target": "/etc/keyd/default.conf",
+      "mode": "symlink",
+      "platforms": [
+        "linux"
+      ],
+      "optional": true
+    }
+  ]
+}
