@@ -70,6 +70,9 @@ set -gx ANDROID_HOME (if is_mac; echo ~/Library/Android/sdk; else; echo /opt/and
 set -gx ANDROID_SDK_ROOT (if is_mac; echo ~/Library/Android/sdk; else; echo /opt/android-sdk; end)
 set -gx PAGER 'less --mouse --wheel-lines=3'
 set -gx HOMEBREW_NO_AUTO_UPDATE 1
+if test -x
+  set -gx MANPAGER "nvim +Man!"
+end
 
 set -gx tide_git_truncation_length 40
 
