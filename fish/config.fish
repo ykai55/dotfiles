@@ -37,6 +37,10 @@ end
 
 set fish_greeting
 
+if test -f ~/.bashrc
+  apply_env ~/.bashrc
+end
+
 # 放到最前面，后面有些命令会依赖
 if is_mac
   eval (/opt/homebrew/bin/brew shellenv)
@@ -107,10 +111,6 @@ if type fnm -q && status is-interactive
   fnm env --use-on-cd --version-file-strategy recursive --shell fish --log-level quiet | .
   fnm completions --shell fish | .
   alias nvm=fnm
-end
-
-if test -f ~/.bashrc
-  apply_env ~/.bashrc
 end
 
 if type rbenv -q && status --is-interactive

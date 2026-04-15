@@ -5,19 +5,19 @@ function apply_env --description "source a .sh script and apply its env changes 
 
     # Check for input file
     if test -z "$argv[1]"
-        echo "Usage: apply_env <path_to_script.sh>"
+        echo "Usage: apply_env <path_to_script.sh>" >&2
         return 1
     end
 
     set script_path $argv[1]
 
     if not test -f "$script_path"
-        echo "Error: File not found at '$script_path'"
+        echo "Error: File not found at '$script_path'" >&2
         return 1
     end
 
     # Blacklist of special/read-only variables to ignore
-    set -l ignored_vars _ SHLVL PWD PS1
+    set -l ignored_vars _ SHLVL PWD PS1 FROM_FISH_APPLY_ENV
 
     set before_file (mktemp)
     set after_file (mktemp)
@@ -30,17 +30,30 @@ function apply_env --description "source a .sh script and apply its env changes 
         echo "--- Sourcing '$script_path'... ---"
     end
 
-    # We execute two commands in a bash subshell:
-    # 1. `source ...`: This sources the script.
-    # 2. `env`: This prints the environment *after* sourcing.
-    # The > "$after_file" at the end captures only the output of the *last* command (env).
     # Extract script arguments (everything after the script path)
     set -l script_args $argv[2..-1]
-    
-    env FROM_FISH_APPLY_ENV=1 bash -c "source '$(string escape -- $script_path)' $(string escape -- $script_args | string join ' '); env > \"$after_file\""
+
+    env FROM_FISH_APPLY_ENV=1 bash -c '
+        script_path=$1
+        after_file=$2
+        shift 2
+        source "$script_path" "$@"
+        source_status=$?
+        if [ "$source_status" -eq 0 ]; then
+            env > "$after_file"
+        fi
+        exit "$source_status"
+    ' _ "$script_path" "$after_file" $script_args
+    set -l source_status $status
 
     if set -q _flag_verbose
         echo "--- End of script output ---"
+    end
+
+    if test "$source_status" -ne 0
+        set -e FROM_FISH_APPLY_ENV
+        rm "$before_file" "$after_file"
+        return $source_status
     end
 
     # Sort the captured environment file
@@ -52,23 +65,18 @@ function apply_env --description "source a .sh script and apply its env changes 
 
     rm "$before_file" "$after_file"
 
-    # 4. Get a list of keys that were added/changed to avoid incorrectly unsetting them
-    set changed_keys
-    for line in $added_or_changed
-        if test -z "$line"; continue; end
-        set -l key (string split -m 1 '=' -- "$line")[1]
-        set changed_keys $changed_keys $key
-    end
-
     if set -q _flag_verbose
         echo "Applying environment changes..."
     end
 
-    # 5. Apply added or changed variables
+    # 4. Apply added or changed variables while tracking keys that changed.
+    set changed_keys
     for line in $added_or_changed
         if test -z "$line"; continue; end
-        set -l key (string split -m 1 '=' -- "$line")[1]
-        set -l value (string split -m 1 '=' -- "$line")[2]
+        set -l parts (string split -m 1 '=' -- "$line")
+        set -l key $parts[1]
+        set -l value $parts[2]
+        set changed_keys $changed_keys $key
 
         if contains -- "$key" $ignored_vars
             if set -q _flag_verbose
@@ -83,7 +91,7 @@ function apply_env --description "source a .sh script and apply its env changes 
         end
     end
 
-    # 6. Handle truly unset variables
+    # 5. Handle truly unset variables.
     for line in $removed
         if test -z "$line"; continue; end
         set -l key (string split -m 1 '=' -- "$line")[1]
@@ -98,6 +106,8 @@ function apply_env --description "source a .sh script and apply its env changes 
             echo "  Unset: $key"
         end
     end
+
+    set -e FROM_FISH_APPLY_ENV
 
     if set -q _flag_verbose
         echo "Environment update complete."
