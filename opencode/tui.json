@@ -6,7 +6,7 @@
     "command_list": "ctrl+/,<leader>/",
     "history_previous": "ctrl+p",
     "history_next": "ctrl+n",
-    "app_exit": "ctrl+d,<leader>q",
+    "app_exit": "<leader>q",
     "session_interrupt": "ctrl+c",
   }
 }
