@@ -2,10 +2,10 @@
   "$schema": "https://opencode.ai/config.json",
   "model": "openai/gpt-5.4",
   "plugin": [
-    "opencode-gemini-auth@latest",
-    "opencode-openai-codex-auth@latest",
+    // "opencode-gemini-auth@latest",
+    // "opencode-openai-codex-auth@latest",
     // "oh-my-opencode@latest",
-    "opencode-antigravity-auth@latest"
+    // "opencode-antigravity-auth@latest"
   ],
   "mcp": {
     "tmux": {
@@ -17,6 +17,14 @@
         "--shell-type=fish"
       ],
       "enabled": true
+    }
+  },
+  "permission": {
+    "external_directory": {
+      "/tmp/opencode-clipboard": "allow",
+      "/tmp/opencode-clipboard/**": "allow",
+      "/private/tmp/opencode-clipboard": "allow",
+      "/private/tmp/opencode-clipboard/**": "allow"
     }
   },
   "provider": {
