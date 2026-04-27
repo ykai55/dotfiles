@@ -14,21 +14,27 @@ Lint
 
 Tests (Python)
 - After any code change, run the relevant unittest(s).
-- Run all tests (unittest):
-  - `python bin/tests/test_tmux_load.py`
-  - `python bin/tests/test_tmux_dump.py`
-  - `python bin/tests/test_tbox.py`
-- Run a single test (unittest):
-  - `python -m unittest bin/tests/test_tmux_load.py TmuxLoadWindowRestoreTests.test_restore_new_session_creates_all_windows`
-  - If that fails due to module path, run the file and temporarily narrow the
-    test name inside `bin/tests/test_tmux_load.py`.
+- Run all main tests (one command):
+  `python -m unittest bin/tests/test_tmux_load.py bin/tests/test_tmux_dump.py bin/tests/test_tbox.py bin/tests/test_tbox_integration.py`
+- Additional test files (run separately):
+  - `bin/tests/test_dotfiles_apply.py` — tests for `dotfiles-apply` script
+  - `bin/tests/test_apply_env.py` — tests for fish `apply_env.fish` function
+- Run a single test:
+  `python -m unittest bin.tests.test_tmux_load.TmuxLoadWindowRestoreTests.test_restore_new_session_creates_all_windows`
+  (Use dotted module path with `python -m unittest`; avoid running test files
+  directly as scripts since they may fail on module resolution.)
 
 ## Repository Layout
 
 - `bin/`: executable scripts (bash, Python, perl). Most tooling lives here.
-- `bin/tests/`: unittest coverage for `tmux-load` and `tmux-dump`.
+- `bin/tests/`: unittest coverage for scripts and modules.
+- `tbox/`: Python package (`tbox.cli`, `tbox.core`). `bin/tbox` is a thin
+  launcher that adds the repo root to `sys.path` and calls `tbox.cli.main()`.
+  Tests import from `tbox.core` directly.
 - `fish/`, `nvim/`, `tmux/`: shell/editor/terminal configs.
 - `kitty.conf`, `gitconfig`: app configs.
+- `dotfiles-map.json`: manifest mapping repo files to install targets;
+  consumed by `bin/dotfiles-apply`.
 - `tmux-box.md`: tbox usage and workflow documentation.
 
 
@@ -91,6 +97,16 @@ Config files (fish, nvim, tmux, kitty)
 
 - `bin/tests/test_tmux_load.py` uses `unittest` and `unittest.mock`.
 - Keep tests fast and isolated; mock tmux calls instead of running tmux.
+- `bin/tests/test_utils.py` provides `CapturingTestCase` base class (captures
+  stdout/stderr during tests). Used by `test_tbox`, `test_tmux_load`,
+  `test_dotfiles_apply`, and `test_apply_env`.
+- `bin/tests/test_dotfiles_apply.py` loads the script via `importlib` because
+  `dotfiles-apply` has no `.py` extension; tests must pass `-m unittest` style
+  to resolve the `test_utils` import.
+- `bin/tests/test_tbox_integration.py` runs `tbox` as a subprocess and
+  requires the `tbox` package to be importable from the repo root.
+- `bin/tests/test_apply_env.py` calls the `apply_env.fish` fish function via
+  `subprocess` with `fish -N -c`.
 
 ## tmux Tools Notes
 
@@ -99,7 +115,4 @@ Config files (fish, nvim, tmux, kitty)
 - `tmux-dump` schema reference: `tmux-dump.d.ts`.
 - When changing tbox commands, update `tmux-box.md`.
 
-## Cursor / Copilot Rules
 
-- No `.cursor/rules/`, `.cursorrules`, or `.github/copilot-instructions.md`
-  files were found in this repository at the time of writing.
