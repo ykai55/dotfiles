@@ -1,0 +1,3 @@
+target/
+helpers/macos/clip-macos-helper/.build/
+helpers/macos/clip-macos-helper/.swiftpm/
