@@ -24,6 +24,58 @@ fn targets_all_flag_is_preserved() {
 }
 
 #[test]
+fn short_flags_parse_for_get_and_set() {
+    let get_cli = Cli::try_parse_from([
+        "clip",
+        "get",
+        "-t",
+        "text/plain",
+        "-o",
+        "out.txt",
+        "-T",
+        "wayland",
+    ])
+    .unwrap();
+    match get_cli.command {
+        Command::Get(args) => {
+            assert_eq!(args.mime.as_deref(), Some("text/plain"));
+            assert_eq!(args.output.unwrap().to_string_lossy(), "out.txt");
+            assert_eq!(args.target, Some(clip_core::TargetKind::Wayland));
+        }
+        _ => panic!("expected get subcommand"),
+    }
+
+    let set_cli = Cli::try_parse_from([
+        "clip",
+        "set",
+        "-i",
+        "note.txt",
+        "-t",
+        "text/html",
+        "-T",
+        "x11",
+    ])
+    .unwrap();
+    match set_cli.command {
+        Command::Set(args) => {
+            assert_eq!(args.input.unwrap().to_string_lossy(), "note.txt");
+            assert_eq!(args.mime.as_deref(), Some("text/html"));
+            assert_eq!(args.target, Some(clip_core::TargetKind::X11));
+        }
+        _ => panic!("expected set subcommand"),
+    }
+}
+
+#[test]
+fn targets_all_short_flag_is_preserved() {
+    let cli = Cli::try_parse_from(["clip", "targets", "-a"]).unwrap();
+    match cli.command {
+        Command::Targets(args) => assert!(args.all),
+        _ => panic!("expected targets subcommand"),
+    }
+}
+
+#[test]
 fn get_rejects_unknown_target() {
     let err = Cli::try_parse_from(["clip", "get", "--target", "bogus"]).unwrap_err();
     assert!(err.to_string().contains("unknown target: bogus"));

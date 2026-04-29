@@ -20,34 +20,34 @@ pub enum Command {
 
 #[derive(Debug, Args)]
 pub struct GetArgs {
-    #[arg(long = "type")]
+    #[arg(short = 't', long = "type")]
     pub mime: Option<String>,
-    #[arg(long)]
+    #[arg(short = 'o', long)]
     pub output: Option<PathBuf>,
-    #[arg(long, value_parser = parse_target_kind)]
+    #[arg(short = 'T', long, value_parser = parse_target_kind)]
     pub target: Option<TargetKind>,
 }
 
 #[derive(Debug, Args)]
 pub struct SetArgs {
     pub text: Option<String>,
-    #[arg(long = "type")]
+    #[arg(short = 't', long = "type")]
     pub mime: Option<String>,
-    #[arg(long)]
+    #[arg(short = 'i', long)]
     pub input: Option<PathBuf>,
-    #[arg(long, value_parser = parse_target_kind)]
+    #[arg(short = 'T', long, value_parser = parse_target_kind)]
     pub target: Option<TargetKind>,
 }
 
 #[derive(Debug, Args)]
 pub struct TargetArgs {
-    #[arg(long, value_parser = parse_target_kind)]
+    #[arg(short = 'T', long, value_parser = parse_target_kind)]
     pub target: Option<TargetKind>,
 }
 
 #[derive(Debug, Args)]
 pub struct TargetsArgs {
-    #[arg(long)]
+    #[arg(short = 'a', long)]
     pub all: bool,
 }
 

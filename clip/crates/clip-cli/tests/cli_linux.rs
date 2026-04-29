@@ -243,6 +243,52 @@ fn get_text_can_write_to_an_output_file() {
 }
 
 #[test]
+fn get_missing_default_text_fails() {
+    let temp = TempDir::new().unwrap();
+    write_script(&temp, "wl-copy", "#!/usr/bin/env bash\nexit 0\n");
+    write_script(
+        &temp,
+        "wl-paste",
+        "#!/usr/bin/env bash\nprintf 'text/plain is not available in the clipboard\n' >&2\nexit 1\n",
+    );
+    let path = format!("{}:{}", temp.path().display(), std::env::var("PATH").unwrap());
+
+    Command::cargo_bin("clip")
+        .unwrap()
+        .args(["get", "--target", "wayland"])
+        .env("WAYLAND_DISPLAY", "wayland-0")
+        .env("PATH", path)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "text/plain is not available in the clipboard",
+        ));
+}
+
+#[test]
+fn get_missing_typed_text_fails() {
+    let temp = TempDir::new().unwrap();
+    write_script(&temp, "wl-copy", "#!/usr/bin/env bash\nexit 0\n");
+    write_script(
+        &temp,
+        "wl-paste",
+        "#!/usr/bin/env bash\nprintf 'text/plain is not available in the clipboard\n' >&2\nexit 1\n",
+    );
+    let path = format!("{}:{}", temp.path().display(), std::env::var("PATH").unwrap());
+
+    Command::cargo_bin("clip")
+        .unwrap()
+        .args(["get", "--type", "text/plain", "--target", "wayland"])
+        .env("WAYLAND_DISPLAY", "wayland-0")
+        .env("PATH", path)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "text/plain is not available in the clipboard",
+        ));
+}
+
+#[test]
 fn get_png_writes_binary_output() {
     let temp = TempDir::new().unwrap();
     write_script(&temp, "wl-copy", "#!/usr/bin/env bash\nexit 0\n");
@@ -271,6 +317,40 @@ fn get_png_writes_binary_output() {
         .success();
 
     assert_eq!(fs::read(output).unwrap(), b"\x89PNG\x0d\x0a");
+}
+
+#[test]
+fn get_missing_binary_type_fails_without_writing_output_file() {
+    let temp = TempDir::new().unwrap();
+    write_script(&temp, "wl-copy", "#!/usr/bin/env bash\nexit 0\n");
+    write_script(
+        &temp,
+        "wl-paste",
+        "#!/usr/bin/env bash\nprintf 'image/png is not available in the clipboard\n' >&2\nexit 1\n",
+    );
+    let output = temp.path().join("out.png");
+    let path = format!("{}:{}", temp.path().display(), std::env::var("PATH").unwrap());
+
+    Command::cargo_bin("clip")
+        .unwrap()
+        .args([
+            "get",
+            "--type",
+            "image/png",
+            "--output",
+            output.to_str().unwrap(),
+            "--target",
+            "wayland",
+        ])
+        .env("WAYLAND_DISPLAY", "wayland-0")
+        .env("PATH", path)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "image/png is not available in the clipboard",
+        ));
+
+    assert!(!output.exists());
 }
 
 #[test]

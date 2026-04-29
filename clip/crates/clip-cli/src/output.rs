@@ -32,6 +32,14 @@ pub fn write_output(blob: ClipboardBlob, output: Option<&Path>) -> Result<(), Cl
     }
 }
 
+pub fn write_empty_output(output: Option<&Path>) -> Result<(), ClipError> {
+    if let Some(path) = output {
+        fs::write(path, [])?;
+    }
+
+    Ok(())
+}
+
 fn decode_text_like_bytes(mime: &MimeType, data: &[u8]) -> Option<String> {
     if !mime.as_str().starts_with("text/") {
         return None;
