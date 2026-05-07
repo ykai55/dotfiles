@@ -1,88 +1,71 @@
 #!/usr/bin/env bash
 
-# Cross-platform clipboard utility
-# Supports macOS (pbcopy/pbpaste), Linux X11 (xclip/xsel), Linux Wayland (wl-clipboard)
-
 set -euo pipefail
 
-# Function to detect the platform and available clipboard tools
-detect_clipboard() {
-  if command -v pbcopy >/dev/null 2>&1 && command -v pbpaste >/dev/null 2>&1; then
-    # macOS
-    CLIPBOARD_COPY="pbcopy"
-    CLIPBOARD_PASTE="pbpaste"
-    return
-  elif command -v wl-copy >/dev/null 2>&1 && command -v wl-paste >/dev/null 2>&1; then
-    # Wayland
-    CLIPBOARD_COPY="wl-copy"
-    CLIPBOARD_PASTE="wl-paste"
-    return
-  elif command -v xclip >/dev/null 2>&1; then
-    # X11 with xclip
-    CLIPBOARD_COPY="xclip -selection clipboard"
-    CLIPBOARD_PASTE="xclip -selection clipboard -o"
-    return
-  elif command -v xsel >/dev/null 2>&1; then
-    # X11 with xsel
-    CLIPBOARD_COPY="xsel --clipboard --input"
-    CLIPBOARD_PASTE="xsel --clipboard --output"
-    return
-  else
-    echo "Error: No supported clipboard tool found" >&2
-    echo "Install one of: pbcopy (macOS), xclip, xsel (X11), wl-clipboard (Wayland)" >&2
-    exit 1
+fail() {
+  echo "clip wrapper: $1" >&2
+  exit 1
+}
+
+resolve_clip_binary() {
+  local script_dir repo_root system arch target_dir binary_name clip_bin
+
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  repo_root="$(cd "$script_dir/.." && pwd)"
+  system="$(uname -s)"
+  arch="$(uname -m)"
+  binary_name="clip"
+
+  case "$system" in
+    Darwin)
+      case "$arch" in
+        arm64|aarch64)
+          target_dir="macos-aarch64"
+          ;;
+        *)
+          fail "unsupported macOS architecture: $arch"
+          ;;
+      esac
+      ;;
+    Linux)
+      case "$arch" in
+        x86_64|amd64)
+          target_dir="linux-x86_64-musl"
+          ;;
+        *)
+          fail "unsupported Linux architecture: $arch"
+          ;;
+      esac
+      ;;
+    CYGWIN*|MINGW*|MSYS*)
+      case "$arch" in
+        x86_64|amd64)
+          target_dir="windows-x86_64-gnu"
+          binary_name="clip.exe"
+          ;;
+        *)
+          fail "unsupported Windows architecture: $arch"
+          ;;
+      esac
+      ;;
+    *)
+      fail "unsupported platform: $system"
+      ;;
+  esac
+
+  clip_bin="$repo_root/clip/dist/$target_dir/$binary_name"
+  if [[ ! -x "$clip_bin" ]]; then
+    fail "missing clip binary: $clip_bin"
   fi
+
+  printf '%s\n' "$clip_bin"
 }
 
-# Function to copy stdin to clipboard
-copy_to_clipboard() {
-  $CLIPBOARD_COPY
-}
-
-# Function to paste from clipboard to stdout
-paste_from_clipboard() {
-  $CLIPBOARD_PASTE
-}
-
-# Function to show usage
-show_usage() {
-  echo "Usage: $(basename "$0") [copy|paste]"
-  echo "  copy   - Copy stdin to clipboard (default if no arguments)"
-  echo "  paste  - Paste from clipboard to stdout"
-  echo ""
-  echo "Examples:"
-  echo "  echo 'hello' | $(basename "$0") copy"
-  echo "  $(basename "$0") paste"
-}
-
-# Main logic
 main() {
-  # Detect clipboard utilities
-  detect_clipboard
+  local clip_bin
 
-  # Parse arguments
-  if [[ $# -eq 0 ]]; then
-    # Default to copy if no arguments
-    copy_to_clipboard
-  else
-    case "$1" in
-      copy|-c|--copy)
-        copy_to_clipboard
-        ;;
-      paste|-p|--paste)
-        paste_from_clipboard
-        ;;
-      help|-h|--help)
-        show_usage
-        ;;
-      *)
-        echo "Unknown command: $1"
-        show_usage
-        exit 1
-        ;;
-    esac
-  fi
+  clip_bin="$(resolve_clip_binary)"
+  exec "$clip_bin" "$@"
 }
 
-# Run main function with all arguments
 main "$@"
