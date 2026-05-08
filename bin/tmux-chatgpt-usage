@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage_command=${TMUX_CHATGPT_USAGE_COMMAND:-opencodebar status --json}
+usage_provider=${TMUX_CHATGPT_USAGE_PROVIDER:-codex}
+usage_label=${TMUX_CHATGPT_USAGE_LABEL:-GPT}
+cache_ttl=${TMUX_CHATGPT_USAGE_TTL_SECONDS:-60}
+cache_file=${TMUX_CHATGPT_USAGE_CACHE_FILE:-${TMPDIR:-/tmp}/tmux-chatgpt-usage.cache}
+
+if python3 - "$cache_file" "$cache_ttl" <<'PY'
+from __future__ import annotations
+
+import os
+import sys
+import time
+
+
+cache_file = sys.argv[1]
+cache_ttl = float(sys.argv[2])
+try:
+    if cache_ttl > 0 and time.time() - os.path.getmtime(cache_file) < cache_ttl:
+        with open(cache_file, encoding="utf-8") as f:
+            print(f.read(), end="")
+        raise SystemExit(0)
+except FileNotFoundError:
+    pass
+raise SystemExit(1)
+PY
+then
+  exit 0
+fi
+
+if ! output=$(sh -c "$usage_command" 2>/dev/null); then
+  exit 0
+fi
+
+formatted=$(TMUX_CHATGPT_USAGE_OUTPUT=$output python3 - "$usage_provider" "$usage_label" <<'PY'
+from __future__ import annotations
+
+import json
+import os
+import sys
+
+
+def compact_plain_text(text: str) -> str:
+    for line in text.splitlines():
+        line = " ".join(line.split())
+        if line:
+            return line
+    return ""
+
+
+def main() -> int:
+    provider_name = sys.argv[1]
+    label = sys.argv[2]
+    text = os.environ.get("TMUX_CHATGPT_USAGE_OUTPUT", "").strip()
+    if not text:
+        return 0
+
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        print(compact_plain_text(text))
+        return 0
+
+    provider = data.get(provider_name)
+    if provider is None and provider_name == "codex":
+        provider = data.get("chatgpt")
+    if not isinstance(provider, dict):
+        return 0
+
+    usage = provider.get("usagePercentage")
+    cost = provider.get("cost")
+
+    if usage is not None:
+        print(f"{label} {usage}%")
+    elif cost is not None:
+        print(f"{label} ${cost:.2f}")
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+PY
+)
+
+if [ -n "$formatted" ]; then
+  printf '%s\n' "$formatted"
+  printf '%s\n' "$formatted" >"$cache_file" 2>/dev/null || true
+fi
