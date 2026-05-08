@@ -6,6 +6,7 @@
     // "opencode-openai-codex-auth@latest",
     // "oh-my-opencode@latest",
     // "opencode-antigravity-auth@latest"
+    "superpowers@git+https://github.com/obra/superpowers.git"
   ],
   "mcp": {
     "tmux": {
