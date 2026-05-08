@@ -53,6 +53,20 @@ class TmuxChatgptUsageTests(unittest.TestCase):
         self.assertEqual(result.stdout, "GPT 8%\n")
         self.assertEqual(result.stderr, "")
 
+    def test_formats_float_percentage_compactly(self):
+        command = self.make_command(textwrap.dedent(
+            """\
+            #!/usr/bin/env bash
+            printf '%s\n' '{"codex":{"usagePercentage":14.000000000000002}}'
+            """
+        ))
+
+        result = self.run_usage(command)
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "GPT 14%\n")
+        self.assertEqual(result.stderr, "")
+
     def test_prints_nothing_when_usage_command_fails(self):
         result = self.run_usage("definitely-not-opencodebar")
 

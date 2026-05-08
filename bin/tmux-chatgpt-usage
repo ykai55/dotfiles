@@ -50,6 +50,16 @@ def compact_plain_text(text: str) -> str:
     return ""
 
 
+def format_percentage(value: object) -> str:
+    try:
+        percentage = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if percentage.is_integer():
+        return str(int(percentage))
+    return f"{percentage:.1f}".rstrip("0").rstrip(".")
+
+
 def main() -> int:
     provider_name = sys.argv[1]
     label = sys.argv[2]
@@ -73,7 +83,7 @@ def main() -> int:
     cost = provider.get("cost")
 
     if usage is not None:
-        print(f"{label} {usage}%")
+        print(f"{label} {format_percentage(usage)}%")
     elif cost is not None:
         print(f"{label} ${cost:.2f}")
 
