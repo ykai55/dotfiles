@@ -1,53 +1,13 @@
-#!/usr/bin/env bash
-set -euo pipefail
-
-usage_command=${TMUX_CHATGPT_USAGE_COMMAND:-opencodebar status --json}
-usage_provider=${TMUX_CHATGPT_USAGE_PROVIDER:-codex}
-usage_label=${TMUX_CHATGPT_USAGE_LABEL:-GPT}
-cache_ttl=${TMUX_CHATGPT_USAGE_TTL_SECONDS:-60}
-cache_file=${TMUX_CHATGPT_USAGE_CACHE_FILE:-${TMPDIR:-/tmp}/tmux-chatgpt-usage.cache}
-
-if python3 - "$cache_file" "$cache_ttl" <<'PY'
-from __future__ import annotations
-
-import os
-import sys
-import time
-
-
-cache_file = sys.argv[1]
-cache_ttl = float(sys.argv[2])
-try:
-    if cache_ttl > 0 and time.time() - os.path.getmtime(cache_file) < cache_ttl:
-        with open(cache_file, encoding="utf-8") as f:
-            print(f.read(), end="")
-        raise SystemExit(0)
-except FileNotFoundError:
-    pass
-raise SystemExit(1)
-PY
-then
-  exit 0
-fi
-
-if ! output=$(sh -c "$usage_command" 2>/dev/null); then
-  exit 0
-fi
-
-formatted=$(TMUX_CHATGPT_USAGE_OUTPUT=$output python3 - "$usage_provider" "$usage_label" <<'PY'
+#!/usr/bin/env python3
 from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
+import tempfile
 import sys
-
-
-def compact_plain_text(text: str) -> str:
-    for line in text.splitlines():
-        line = " ".join(line.split())
-        if line:
-            return line
-    return ""
+import time
+from urllib import error, request
 
 
 def format_percentage(value: object) -> str:
@@ -60,42 +20,155 @@ def format_percentage(value: object) -> str:
     return f"{percentage:.1f}".rstrip("0").rstrip(".")
 
 
-def main() -> int:
-    provider_name = sys.argv[1]
-    label = sys.argv[2]
-    text = os.environ.get("TMUX_CHATGPT_USAGE_OUTPUT", "").strip()
-    if not text:
-        return 0
+def env(name: str, default: str) -> str:
+    value = os.environ.get(name)
+    if value:
+        return value
+    return default
 
+
+def cache_ttl_seconds() -> float:
+    raw_value = os.environ.get("TMUX_CHATGPT_USAGE_TTL_SECONDS", "60")
     try:
-        data = json.loads(text)
-    except json.JSONDecodeError:
-        print(compact_plain_text(text))
+        return float(raw_value)
+    except ValueError:
+        return 0.0
+
+
+def cache_file_path() -> Path:
+    default_dir = os.environ.get("TMPDIR", "/tmp")
+    default_path = os.path.join(default_dir, "tmux-chatgpt-usage.cache")
+    return Path(env("TMUX_CHATGPT_USAGE_CACHE_FILE", default_path))
+
+
+def read_cache(path: Path, ttl_seconds: float) -> str | None:
+    if ttl_seconds <= 0:
+        return None
+    try:
+        if time.time() - path.stat().st_mtime >= ttl_seconds:
+            return None
+        contents = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return None
+    if not contents:
+        return None
+    return contents
+
+
+def write_cache(path: Path, contents: str) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f"{path.name}.tmp.",
+            delete=False,
+        ) as temp_file:
+            temp_file.write(contents)
+            temp_path = Path(temp_file.name)
+        temp_path.replace(path)
+    except OSError:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except UnboundLocalError:
+            pass
+        except OSError:
+            pass
+
+
+def load_auth(path: str) -> tuple[str, str] | None:
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return None
+
+    tokens = data.get("tokens")
+    if not isinstance(tokens, dict):
+        return None
+
+    access_token = tokens.get("access_token")
+    account_id = tokens.get("account_id")
+    if not isinstance(access_token, str) or not access_token:
+        return None
+    if not isinstance(account_id, str) or not account_id:
+        return None
+
+    return access_token, account_id
+
+
+def fetch_usage(url: str, access_token: str, account_id: str) -> object | None:
+    req = request.Request(
+        url,
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "ChatGPT-Account-Id": account_id,
+        },
+    )
+    try:
+        with request.urlopen(req, timeout=10) as response:
+            if response.status != 200:
+                return None
+            return json.load(response)
+    except (error.HTTPError, error.URLError, OSError, TimeoutError, json.JSONDecodeError):
+        return None
+
+
+def extract_percentage(payload: object, *keys: str) -> object | None:
+    if not isinstance(payload, dict):
+        return None
+
+    for key in keys:
+        value = payload.get(key)
+        if value is not None:
+            return value
+
+    return None
+
+
+def main() -> int:
+    cache_file = cache_file_path()
+    cached = read_cache(cache_file, cache_ttl_seconds())
+    if cached is not None:
+        print(cached, end="")
         return 0
 
-    provider = data.get(provider_name)
-    if provider is None and provider_name == "codex":
-        provider = data.get("chatgpt")
-    if not isinstance(provider, dict):
+    auth_file = env("TMUX_CHATGPT_USAGE_AUTH_FILE", os.path.expanduser("~/.codex/auth.json"))
+    usage_url = env("TMUX_CHATGPT_USAGE_URL", "https://chatgpt.com/backend-api/wham/usage")
+    label = env("TMUX_CHATGPT_USAGE_LABEL", "GPT")
+
+    auth = load_auth(auth_file)
+    if auth is None:
         return 0
 
-    usage = provider.get("usagePercentage")
-    cost = provider.get("cost")
+    data = fetch_usage(usage_url, auth[0], auth[1])
+    if not isinstance(data, dict):
+        return 0
 
-    if usage is not None:
-        print(f"{label} {format_percentage(usage)}%")
-    elif cost is not None:
-        print(f"{label} ${cost:.2f}")
+    rate_limit = data.get("rate_limit")
+    if not isinstance(rate_limit, dict):
+        return 0
+
+    primary = extract_percentage(
+        rate_limit.get("primary_window"),
+        "used_percent",
+    )
+    secondary = extract_percentage(
+        rate_limit.get("secondary_window"),
+        "used_percent",
+    )
+
+    if primary is None or secondary is None:
+        return 0
+
+    formatted = f"{label} {format_percentage(primary)}%/{format_percentage(secondary)}%\n"
+    print(formatted, end="")
+    write_cache(cache_file, formatted)
 
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-PY
-)
-
-if [ -n "$formatted" ]; then
-  printf '%s\n' "$formatted"
-  printf '%s\n' "$formatted" >"$cache_file" 2>/dev/null || true
-fi
