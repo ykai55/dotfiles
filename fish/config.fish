@@ -92,7 +92,8 @@ if is_mac
 end
 
 # pyenv
-if type pyenv -q && test -z "$PYENV_SHELL"
+# if type pyenv -q && test -z "$PYENV_SHELL"
+if type pyenv -q
   pyenv init --no-rehash - | source
 end
 
