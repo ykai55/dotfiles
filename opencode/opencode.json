@@ -25,7 +25,9 @@
       "/tmp/opencode-clipboard": "allow",
       "/tmp/opencode-clipboard/**": "allow",
       "/private/tmp/opencode-clipboard": "allow",
-      "/private/tmp/opencode-clipboard/**": "allow"
+      "/private/tmp/opencode-clipboard/**": "allow",
+      "~/dotfiles/": "allow",
+      "~/dotfiles/**": "allow",
     }
   },
   "provider": {
