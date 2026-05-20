@@ -2,7 +2,7 @@
 
 Portable Docker Compose setup for running `opencode serve` while using the host user's filesystem and configuration.
 
-This Compose file intentionally avoids a local Docker build because some hosts have Docker Compose without the Buildx plugin installed.
+The image is built locally so Debian packages and npm packages are cached in the image instead of being installed on every container start.
 
 ## Host Bind Mounts
 
@@ -22,8 +22,10 @@ cp .env.example .env
 Set `OPENCODE_WORKDIR` only if you want a different start directory. It defaults to `$HOME`, and can be any host path under `$HOME` because the whole home directory is bind-mounted.
 
 ```bash
-docker compose up -d
+./server.sh
 ```
+
+`server.sh` builds the image with `--pull --no-cache` before starting it, so every script run installs the latest `opencode-ai` package during the image build.
 
 To start in a specific project for one run:
 
@@ -33,6 +35,8 @@ OPENCODE_WORKDIR="$HOME/src/lllw" docker compose up -d
 
 OpenCode will listen on `http://0.0.0.0:4096`.
 
+The Compose service is named `opencode-server`, and the local image is tagged `local/opencode-server:1.15.5`.
+
 ## Operations
 
 ```bash
@@ -40,10 +44,12 @@ docker compose logs -f
 docker compose restart
 docker compose down
 docker compose pull
+docker compose build --pull
 ```
 
 ## Notes
 
-- The container installs `opencode-ai@1.15.5` and `@larksuite/cli@1.0.34` at startup, matching the currently installed host versions.
+- The image installs `opencode-ai@latest` on every no-cache build and `@larksuite/cli@1.0.34`.
+- `DEBIAN_MIRROR=auto` benchmarks several Debian mirrors at build time. Set `DEBIAN_MIRROR=https://.../debian` in `.env` to force a mirror.
 - Config changes under `~/.config/opencode`, skills, agents, or plugins still require restarting the container with `docker compose restart`.
 - UID/GID use exported `UID` and `GID` when present. If your shell does not export them, run `UID=$(id -u) GID=$(id -g) docker compose up -d` or leave the default `1000:1000`.

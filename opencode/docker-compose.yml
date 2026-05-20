@@ -1,6 +1,10 @@
 services:
-  opencode:
-    image: node:20-bookworm
+  opencode-server:
+    build:
+      context: .
+      args:
+        DEBIAN_MIRROR: "${DEBIAN_MIRROR:-auto}"
+    image: local/opencode-server:1.15.5
     container_name: opencode
     hostname: opencode
     restart: unless-stopped
