@@ -1,0 +1,30 @@
+services:
+  opencode:
+    image: node:20-bookworm
+    container_name: opencode
+    hostname: opencode
+    restart: unless-stopped
+    working_dir: "${OPENCODE_WORKDIR:-${HOME}}"
+    user: root
+    environment:
+      HOST_UID: "${UID:-1000}"
+      HOST_GID: "${GID:-1000}"
+      HOST_USER: "${USER}"
+      HOST_HOME: "${HOME}"
+      HOME: "${HOME}"
+      USER: "${USER}"
+      XDG_CONFIG_HOME: "${HOME}/.config"
+      XDG_CACHE_HOME: "${HOME}/.cache"
+      XDG_DATA_HOME: "${HOME}/.local/share"
+      OPENCODE_SERVER_PASSWORD: "${OPENCODE_SERVER_PASSWORD:-}"
+      OPENCODE_HOST: 0.0.0.0
+      OPENCODE_PORT: "4096"
+      OPENCODE_WORKDIR: "${OPENCODE_WORKDIR:-${HOME}}"
+    volumes:
+      - ${HOME}:${HOME}
+      - /tmp/opencode:/tmp/opencode
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./entrypoint.sh:/opt/opencode/entrypoint.sh:ro
+    ports:
+      - "4096:4096"
+    command: ["bash", "/opt/opencode/entrypoint.sh"]
