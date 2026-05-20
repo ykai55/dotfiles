@@ -8,6 +8,7 @@ services:
     container_name: opencode
     hostname: opencode
     restart: unless-stopped
+    network_mode: host
     working_dir: "${OPENCODE_WORKDIR:-${HOME}}"
     user: root
     environment:
@@ -17,6 +18,8 @@ services:
       HOST_HOME: "${HOME}"
       HOME: "${HOME}"
       USER: "${USER}"
+      HOST_PATH: "${PATH}"
+      TMUX: "${TMUX:-}"
       XDG_CONFIG_HOME: "${HOME}/.config"
       XDG_CACHE_HOME: "${HOME}/.cache"
       XDG_DATA_HOME: "${HOME}/.local/share"
@@ -27,8 +30,7 @@ services:
     volumes:
       - ${HOME}:${HOME}
       - /tmp/opencode:/tmp/opencode
+      - /tmp/tmux-${UID:-1000}:/tmp/tmux-${UID:-1000}
       - /var/run/docker.sock:/var/run/docker.sock
       - ./entrypoint.sh:/opt/opencode/entrypoint.sh:ro
-    ports:
-      - "4096:4096"
     command: ["bash", "/opt/opencode/entrypoint.sh"]

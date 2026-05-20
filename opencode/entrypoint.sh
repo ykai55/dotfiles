@@ -6,6 +6,7 @@ set -euo pipefail
 : "${HOST_USER:=${USER:-node}}"
 : "${HOST_HOME:=${HOME:-/home/node}}"
 : "${OPENCODE_WORKDIR:=${HOST_HOME}}"
+container_path="${PATH}"
 
 if [ -z "${OPENCODE_SERVER_PASSWORD:-}" ]; then
   printf '%s\n' 'WARNING: OPENCODE_SERVER_PASSWORD is empty. Set it in .env before exposing this server beyond localhost.' >&2
@@ -23,6 +24,8 @@ cd "${OPENCODE_WORKDIR}"
 exec runuser -u "$(id -nu "${HOST_UID}")" -- env \
   HOME="${HOST_HOME}" \
   USER="${HOST_USER}" \
+  PATH="${HOST_PATH:+${HOST_PATH}:}${container_path}" \
+  TMUX="${TMUX:-}" \
   XDG_CONFIG_HOME="${HOST_HOME}/.config" \
   XDG_CACHE_HOME="${HOST_HOME}/.cache" \
   XDG_DATA_HOME="${HOST_HOME}/.local/share" \

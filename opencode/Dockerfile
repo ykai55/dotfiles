@@ -45,7 +45,7 @@ RUN set -euo pipefail; \
       "${mirror}" "${codename}" "${mirror}" "${codename}" "${codename}" >/etc/apt/sources.list; \
   fi; \
   apt-get update; \
-  apt-get install -y --no-install-recommends fish openssh-client python3 ripgrep; \
+  apt-get install -y --no-install-recommends fish openssh-client python3 ripgrep tmux; \
   rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g opencode-ai@latest @larksuite/cli@1.0.34
