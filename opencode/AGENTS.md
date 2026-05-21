@@ -14,3 +14,5 @@ The default shell may be fish instead of bash/zsh.
 Consider shell compatibility before generating scripts or shell commands.
 
 When sending a Lark message to me, prefix the message body with an @ mention of my own Lark user.
+
+Always respond to the user in Chinese.
