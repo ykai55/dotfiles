@@ -10,8 +10,8 @@ Check files like:
 - .python-version
 - .nvmrc
 
-The default shell may be fish instead of bash/zsh.
-Consider shell compatibility before generating scripts or shell commands.
+Assume the default shell is fish, not bash/zsh.
+Generate scripts and shell commands with fish compatibility first unless explicitly targeting another shell.
 
 When sending a Lark message to me, prefix the message body with an @ mention of my own Lark user.
 

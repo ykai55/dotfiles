@@ -288,6 +288,7 @@ layout {
 
 // This line starts waybar, a commonly used bar for Wayland compositors.
 spawn-at-startup "waybar"
+spawn-at-startup "swayidle" "-w" "timeout" "300" "swaylock -f" "timeout" "330" "niri msg action power-off-monitors" "resume" "niri msg action power-on-monitors"
 
 // To run a shell command (with variables, pipes, etc.), use spawn-sh-at-startup:
 // spawn-sh-at-startup "qs -c ~/source/qs/MyAwesomeShell"
