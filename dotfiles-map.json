@@ -53,7 +53,22 @@
       "name": "opencode",
       "source": "opencode",
       "target": "~/.config/opencode",
-      "mode": "link_children"
+      "mode": "link_children",
+      "exclude": [
+        "Dockerfile",
+        "docker-compose.yml",
+        "entrypoint.sh",
+        "server.sh"
+      ]
+    },
+    {
+      "name": "opencode-systemd-user",
+      "source": "systemd/user/opencode.service",
+      "target": "~/.config/systemd/user/opencode.service",
+      "mode": "symlink",
+      "platforms": [
+        "linux"
+      ]
     },
     {
       "name": "niri",

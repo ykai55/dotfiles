@@ -56,6 +56,34 @@ class DotfilesApplyTests(CapturingTestCase):
         self.assertIn("mapping", schema["$defs"])
         self.assertTrue(any(mapping.name == "fish" for mapping in mappings))
 
+        opencode_service = next(
+            mapping for mapping in mappings if mapping.name == "opencode-systemd-user"
+        )
+        self.assertEqual(opencode_service.source, "systemd/user/opencode.service")
+        self.assertEqual(
+            opencode_service.target,
+            "~/.config/systemd/user/opencode.service",
+        )
+        self.assertEqual(opencode_service.mode, "symlink")
+        self.assertEqual(opencode_service.platforms, ["linux"])
+
+    def test_repo_opencode_user_service_runs_requested_command(self):
+        service_path = (
+            pathlib.Path(__file__).resolve().parents[2]
+            / "systemd"
+            / "user"
+            / "opencode.service"
+        )
+
+        service = service_path.read_text(encoding="utf-8")
+
+        self.assertIn(
+            "ExecStart=/usr/bin/fnm exec --using=default opencode serve --hostname 0.0.0.0 --port 4096",
+            service,
+        )
+        self.assertIn("Restart=on-failure", service)
+        self.assertIn("WantedBy=default.target", service)
+
     def test_link_children_preserves_local_files_and_excludes(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             home = os.path.join(tmpdir, "home")
