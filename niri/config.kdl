@@ -117,6 +117,7 @@ input {
 output "LG Electronics LG ULTRAGEAR+ 309NTZNEE349" {
   scale 2
   position x=0 y=0
+  focus-at-startup
 }
 
 output "LG Electronics LG ULTRAFINE 405NTJJ5B044" {
