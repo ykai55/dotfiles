@@ -58,16 +58,27 @@
         "Dockerfile",
         "docker-compose.yml",
         "entrypoint.sh",
+        "opencode.plist",
+        "opencode.service",
         "server.sh"
       ]
     },
     {
       "name": "opencode-systemd-user",
-      "source": "systemd/user/opencode.service",
+      "source": "opencode/opencode.service",
       "target": "~/.config/systemd/user/opencode.service",
       "mode": "symlink",
       "platforms": [
         "linux"
+      ]
+    },
+    {
+      "name": "opencode-launchagent",
+      "source": "opencode/opencode.plist",
+      "target": "~/Library/LaunchAgents/opencode.server.plist",
+      "mode": "symlink",
+      "platforms": [
+        "macos"
       ]
     },
     {

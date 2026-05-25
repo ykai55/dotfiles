@@ -59,7 +59,7 @@ class DotfilesApplyTests(CapturingTestCase):
         opencode_service = next(
             mapping for mapping in mappings if mapping.name == "opencode-systemd-user"
         )
-        self.assertEqual(opencode_service.source, "systemd/user/opencode.service")
+        self.assertEqual(opencode_service.source, "opencode/opencode.service")
         self.assertEqual(
             opencode_service.target,
             "~/.config/systemd/user/opencode.service",
@@ -67,11 +67,25 @@ class DotfilesApplyTests(CapturingTestCase):
         self.assertEqual(opencode_service.mode, "symlink")
         self.assertEqual(opencode_service.platforms, ["linux"])
 
+        opencode_launchagent = next(
+            mapping for mapping in mappings if mapping.name == "opencode-launchagent"
+        )
+        self.assertEqual(opencode_launchagent.source, "opencode/opencode.plist")
+        self.assertEqual(
+            opencode_launchagent.target,
+            "~/Library/LaunchAgents/opencode.server.plist",
+        )
+        self.assertEqual(opencode_launchagent.mode, "symlink")
+        self.assertEqual(opencode_launchagent.platforms, ["macos"])
+
+        opencode_config = next(mapping for mapping in mappings if mapping.name == "opencode")
+        self.assertIn("opencode.service", opencode_config.exclude)
+        self.assertIn("opencode.plist", opencode_config.exclude)
+
     def test_repo_opencode_user_service_runs_requested_command(self):
         service_path = (
             pathlib.Path(__file__).resolve().parents[2]
-            / "systemd"
-            / "user"
+            / "opencode"
             / "opencode.service"
         )
 
@@ -83,6 +97,23 @@ class DotfilesApplyTests(CapturingTestCase):
         )
         self.assertIn("Restart=on-failure", service)
         self.assertIn("WantedBy=default.target", service)
+
+    def test_repo_opencode_launchagent_runs_requested_command(self):
+        service_path = (
+            pathlib.Path(__file__).resolve().parents[2]
+            / "opencode"
+            / "opencode.plist"
+        )
+
+        service = service_path.read_text(encoding="utf-8")
+
+        self.assertIn("<string>opencode.server</string>", service)
+        self.assertIn(
+            "<string>fnm exec --using=default opencode serve --hostname 0.0.0.0 --port 4096</string>",
+            service,
+        )
+        self.assertIn("<key>RunAtLoad</key>", service)
+        self.assertIn("<key>KeepAlive</key>", service)
 
     def test_link_children_preserves_local_files_and_excludes(self):
         with tempfile.TemporaryDirectory() as tmpdir:
