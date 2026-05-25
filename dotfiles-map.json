@@ -55,6 +55,7 @@
       "target": "~/.config/opencode",
       "mode": "link_children",
       "exclude": [
+        ".env",
         "Dockerfile",
         "docker-compose.yml",
         "entrypoint.sh",
