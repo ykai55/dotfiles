@@ -15,4 +15,4 @@ Generate scripts and shell commands with fish compatibility first unless explici
 
 When sending a Lark message to me, prefix the message body with an @ mention of my own Lark user.
 
-Always respond to the user in Chinese.
+Write thinking and intermediate files in English, but deliver the final answer to the user in Chinese.
