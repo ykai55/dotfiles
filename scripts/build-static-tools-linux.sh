@@ -107,6 +107,8 @@ cd "$BUILD/tmux-$TMUX_VERSION"
   LIBEVENT_LIBS="$PREFIX/lib/libevent_core.a" \
   NCURSES_CFLAGS="-I/usr/include/ncursesw" \
   NCURSES_LIBS="/usr/lib/libncursesw.a" \
+  LIBUTF8PROC_CFLAGS="-I$PREFIX/include" \
+  LIBUTF8PROC_LIBS="$PREFIX/lib/libutf8proc.a" \
   UTF8PROC_CFLAGS="-I$PREFIX/include" \
   UTF8PROC_LIBS="$PREFIX/lib/libutf8proc.a"
 make -j"$JOBS"

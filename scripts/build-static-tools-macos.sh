@@ -48,6 +48,7 @@ cd "$BUILD/tmux-$TMUX_VERSION"
 ./configure \
   --prefix="$PREFIX" \
   --enable-utf8proc \
+  PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig:$BREW_PREFIX/opt/libevent/lib/pkgconfig:$BREW_PREFIX/opt/ncurses/lib/pkgconfig" \
   CFLAGS="-O2 -I$PREFIX/include" \
   CPPFLAGS="-I$PREFIX/include" \
   LDFLAGS="-L$PREFIX/lib" \
@@ -55,6 +56,8 @@ cd "$BUILD/tmux-$TMUX_VERSION"
   LIBEVENT_LIBS="$BREW_PREFIX/opt/libevent/lib/libevent_core.a" \
   NCURSES_CFLAGS="-I$BREW_PREFIX/opt/ncurses/include" \
   NCURSES_LIBS="$BREW_PREFIX/opt/ncurses/lib/libncursesw.a" \
+  LIBUTF8PROC_CFLAGS="-I$PREFIX/include" \
+  LIBUTF8PROC_LIBS="$PREFIX/lib/libutf8proc.a" \
   UTF8PROC_CFLAGS="-I$PREFIX/include" \
   UTF8PROC_LIBS="$PREFIX/lib/libutf8proc.a"
 make -j"$JOBS"
