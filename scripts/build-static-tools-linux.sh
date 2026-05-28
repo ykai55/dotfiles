@@ -13,7 +13,7 @@ CONTAINER_IMAGE="${LINUX_BUILD_IMAGE:-alpine:3.22}"
 
 mkdir -p "$HOST_ROOT" "$HOST_OUT"
 
-docker run --rm \
+docker run --rm -i \
   -e NVIM_VERSION="$NVIM_VERSION" \
   -e FISH_VERSION="$FISH_VERSION" \
   -e TMUX_VERSION="$TMUX_VERSION" \
@@ -170,7 +170,7 @@ rm -rf "$HOST_OUT"
 mkdir -p "$HOST_OUT"
 cp -a "$HOST_ROOT/prefix/." "$HOST_OUT/"
 
-docker run --rm \
+docker run --rm -i \
   -e FISH_VERSION="$FISH_VERSION" \
   -v "$HOST_ROOT:/work" \
   -v "$HOST_OUT:/out" \
