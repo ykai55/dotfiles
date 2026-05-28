@@ -1,0 +1,66 @@
+name: Build static tools
+
+on:
+  schedule:
+    - cron: "17 18 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  NVIM_VERSION: "0.11.5"
+  FISH_VERSION: "4.3.3"
+  TMUX_VERSION: "3.6a"
+  UTF8PROC_VERSION: "2.11.3"
+
+jobs:
+  build-linux:
+    name: Linux static tools
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build
+        run: scripts/build-static-tools-linux.sh
+
+      - name: Pack artifact
+        run: |
+          mkdir -p dist
+          tar -C artifacts -czf "dist/static-tools-linux-${{ runner.arch }}.tar.gz" static-tools-linux
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: static-tools-linux-${{ runner.arch }}
+          path: dist/static-tools-linux-${{ runner.arch }}.tar.gz
+          if-no-files-found: error
+          retention-days: 30
+
+  build-macos:
+    name: macOS static-ish tools
+    runs-on: macos-14
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build
+        run: scripts/build-static-tools-macos.sh
+
+      - name: Pack artifact
+        run: |
+          mkdir -p dist
+          tar -C artifacts -czf "dist/static-tools-macos-${{ runner.arch }}.tar.gz" static-tools-macos
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: static-tools-macos-${{ runner.arch }}
+          path: dist/static-tools-macos-${{ runner.arch }}.tar.gz
+          if-no-files-found: error
+          retention-days: 30
