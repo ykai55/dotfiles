@@ -1,6 +1,10 @@
 name: Build static tools
 
 on:
+  push:
+    paths:
+      - ".github/workflows/static-tools.yml"
+      - "scripts/build-static-tools-*.sh"
   schedule:
     - cron: "17 18 * * *"
   workflow_dispatch:
