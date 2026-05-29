@@ -1,0 +1,25 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import sys
+import urllib.parse
+
+
+def read_input(args: list[str]) -> str:
+    if args:
+        return " ".join(args)
+
+    text = sys.stdin.read()
+    if text.endswith("\n"):
+        return text[:-1]
+    return text
+
+
+def main() -> int:
+    text = read_input(sys.argv[1:])
+    print(urllib.parse.unquote_plus(text))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
