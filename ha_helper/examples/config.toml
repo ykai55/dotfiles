@@ -1,0 +1,21 @@
+scan_interval_secs = 10
+
+[openwrt]
+host = "op"
+user = "root"
+
+[mqtt]
+host = "127.0.0.1"
+port = 1883
+client_id = "ha_helper"
+username = ""
+password = ""
+
+[[devices]]
+name = "xiaomi17"
+mac = "88:b9:51:eb:45:43"
+away_delay_secs = 120
+topic = "home/presence/xiaomi17"
+payload_home = "home"
+payload_away = "away"
+retain = true
