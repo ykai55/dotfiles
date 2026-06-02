@@ -32,6 +32,15 @@
       "mode": "symlink"
     },
     {
+      "name": "kitty-macos",
+      "source": "kitty-macos.conf",
+      "target": "~/.config/kitty/kitty-macos.conf",
+      "mode": "symlink",
+      "platforms": [
+        "macos"
+      ]
+    },
+    {
       "name": "git",
       "source": "gitconfig",
       "target": "~/.gitconfig",
@@ -62,24 +71,6 @@
         "opencode.plist",
         "opencode.service",
         "server.sh"
-      ]
-    },
-    {
-      "name": "opencode-systemd-user",
-      "source": "opencode/opencode.service",
-      "target": "~/.config/systemd/user/opencode.service",
-      "mode": "symlink",
-      "platforms": [
-        "linux"
-      ]
-    },
-    {
-      "name": "opencode-launchagent",
-      "source": "opencode/opencode.plist",
-      "target": "~/Library/LaunchAgents/opencode.server.plist",
-      "mode": "symlink",
-      "platforms": [
-        "macos"
       ]
     },
     {
