@@ -81,7 +81,7 @@ class TmuxChatgptUsageTests(unittest.TestCase):
         result = self.run_usage(auth_file, url)
 
         self.assertEqual(result.returncode, 0)
-        self.assertEqual(result.stdout, "GPT 14%/22.2%\n")
+        self.assertEqual(result.stdout, "14%/22.2%\n")
         self.assertEqual(result.stderr, "")
         self.assertEqual(state["authorization"], "Bearer test-access")
         self.assertEqual(state["account_id"], "acct-123")
@@ -151,7 +151,7 @@ class TmuxChatgptUsageTests(unittest.TestCase):
         )
 
         self.assertEqual(result.returncode, 0)
-        self.assertEqual(result.stdout, "GPT 14%/22.2%\n")
+        self.assertEqual(result.stdout, "14%/22.2%\n")
         self.assertEqual(result.stderr, "")
         self.assertEqual(state["requests"], 1)
 
@@ -168,7 +168,7 @@ class TmuxChatgptUsageTests(unittest.TestCase):
         result = self.run_usage(auth_file, url, cache_file=cache.name)
 
         self.assertEqual(result.returncode, 0)
-        self.assertEqual(result.stdout, "GPT 14%/22.2%\n")
+        self.assertEqual(result.stdout, "14%/22.2%\n")
         self.assertEqual(result.stderr, "")
         self.assertEqual(state["requests"], 1)
 
@@ -191,7 +191,7 @@ class TmuxChatgptUsageTests(unittest.TestCase):
         )
 
         self.assertEqual(result.returncode, 0)
-        self.assertEqual(result.stdout, "GPT 14%/22.2%\n")
+        self.assertEqual(result.stdout, "14%/22.2%\n")
         self.assertEqual(result.stderr, "")
         self.assertEqual(state["requests"], 1)
 
@@ -210,13 +210,13 @@ class TmuxChatgptUsageTests(unittest.TestCase):
         second_result = self.run_usage(auth_file, url, cache_file=cache.name)
 
         self.assertEqual(first_result.returncode, 0)
-        self.assertEqual(first_result.stdout, "GPT 14%/22.2%\n")
+        self.assertEqual(first_result.stdout, "14%/22.2%\n")
         self.assertEqual(first_result.stderr, "")
         self.assertEqual(second_result.returncode, 0)
-        self.assertEqual(second_result.stdout, "GPT 14%/22.2%\n")
+        self.assertEqual(second_result.stdout, "14%/22.2%\n")
         self.assertEqual(second_result.stderr, "")
         self.assertEqual(state["requests"], 1)
-        self.assertEqual(pathlib.Path(cache.name).read_text(encoding="utf-8"), "GPT 14%/22.2%\n")
+        self.assertEqual(pathlib.Path(cache.name).read_text(encoding="utf-8"), "14%/22.2%\n")
 
     def test_uses_cached_output_when_available(self):
         cache = tempfile.NamedTemporaryFile(delete=False)

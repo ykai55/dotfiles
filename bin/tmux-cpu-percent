@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+command_path=${TMUX_CPU_PERCENT_COMMAND:-/home/kai/.tmux/plugins/tmux-cpu/scripts/cpu_percentage.sh}
+raw_value=$("$command_path")
+percent=${raw_value%%%}
+
+awk -v percent="$percent" '
+  BEGIN {
+    rounded = int(percent + 0.5)
+    if (rounded >= 90) {
+      printf "#[fg=#d70000]%02d%%#[fg=#8a8a8a]", rounded
+    } else {
+      printf "%02d%%", rounded
+    }
+  }
+'
