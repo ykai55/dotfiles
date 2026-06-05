@@ -37,7 +37,7 @@ def cache_ttl_seconds() -> float:
 
 def cache_file_path() -> Path:
     default_dir = os.environ.get("TMPDIR", "/tmp")
-    default_path = os.path.join(default_dir, "tmux-chatgpt-usage.cache")
+    default_path = os.path.join(default_dir, "tmux-chatgpt-usage.v2.cache")
     return Path(env("TMUX_CHATGPT_USAGE_CACHE_FILE", default_path))
 
 
@@ -137,7 +137,7 @@ def main() -> int:
 
     auth_file = env("TMUX_CHATGPT_USAGE_AUTH_FILE", os.path.expanduser("~/.codex/auth.json"))
     usage_url = env("TMUX_CHATGPT_USAGE_URL", "https://chatgpt.com/backend-api/wham/usage")
-    label = env("TMUX_CHATGPT_USAGE_LABEL", "GPT")
+    label = env("TMUX_CHATGPT_USAGE_LABEL", "")
 
     auth = load_auth(auth_file)
     if auth is None:
@@ -163,7 +163,10 @@ def main() -> int:
     if primary is None or secondary is None:
         return 0
 
-    formatted = f"{label} {format_percentage(primary)}%/{format_percentage(secondary)}%\n"
+    usage = f"{format_percentage(primary)}%/{format_percentage(secondary)}%"
+    if label:
+        usage = f"{label} {usage}"
+    formatted = f"{usage}\n"
     print(formatted, end="")
     write_cache(cache_file, formatted)
 

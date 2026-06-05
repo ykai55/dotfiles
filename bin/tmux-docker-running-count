@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+docker_command=${TMUX_DOCKER_COMMAND:-docker}
+
+if ! command -v "$docker_command" >/dev/null 2>&1; then
+  printf -- "--"
+  exit 0
+fi
+
+if ! containers=$("$docker_command" ps -q 2>/dev/null); then
+  printf -- "--"
+  exit 0
+fi
+
+if [[ -z "$containers" ]]; then
+  printf "00"
+  exit 0
+fi
+
+printf "%02d" "$(printf "%s\n" "$containers" | wc -l)"
