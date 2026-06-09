@@ -119,6 +119,21 @@ type SessionLookupRow = {
   muted: number | null
 }
 
+type PostElement = {
+  tag: "text" | "a" | "at" | "img" | "media" | "emotion" | "hr" | "br" | "code_block" | "md"
+  text?: string
+  style?: string[]
+  language?: string
+}
+
+type PostMessage = {
+  type: "post"
+  title?: string
+  content: PostElement[][]
+}
+
+type LarkMessage = string | PostMessage
+
 const tokenCount = (tokens: unknown) => {
   if (!record(tokens)) return
   const cache = prop(tokens, "cache")
@@ -167,6 +182,67 @@ const patchPaths = (input: unknown) => {
 }
 
 const larkText = (text: string) => JSON.stringify({ text })
+
+const post = (content: PostElement[][], title?: string): PostMessage => ({ type: "post", title, content })
+
+const textNode = (text: string, style?: string[]): PostElement => ({ tag: "text", text, ...(style ? { style } : {}) })
+
+const br = (): PostElement => ({ tag: "br" })
+
+const codeBlock = (text: string, language?: string): PostElement => ({
+  tag: "code_block",
+  text,
+  ...(language ? { language } : {}),
+})
+
+const md = (text: string): PostElement => ({ tag: "md", text })
+
+const paragraph = (text: string, style?: string[]) => [textNode(text, style)]
+
+const quote = (text: string) => [textNode("▌ ", ["bold"]), textNode(text)]
+
+const postContent = (value: string) => {
+  const lines = value.split("\n")
+  const result: PostElement[][] = []
+  let text: string[] = []
+  let code: string[] | undefined
+  let language: string | undefined
+
+  function flushText() {
+    if (!text.length) return
+    result.push([md(text.join("\n"))])
+    text = []
+  }
+
+  function flushCode() {
+    if (!code) return
+    result.push([codeBlock(code.join("\n"), language)])
+    code = undefined
+    language = undefined
+  }
+
+  for (const line of lines) {
+    if (line.trimStart().startsWith("```")) {
+      if (code) {
+        flushCode()
+        continue
+      }
+      flushText()
+      code = []
+      language = line.trim().slice(3).trim() || undefined
+      continue
+    }
+    if (code) {
+      code.push(line)
+      continue
+    }
+    text.push(line)
+  }
+
+  flushText()
+  flushCode()
+  return result.length ? result : [paragraph("(no text output)")]
+}
 
 const larkMessageText = (message: unknown) => {
   const content = prop(prop(message, "body"), "content")
@@ -244,6 +320,11 @@ export default (async (input, options) => {
     WHERE thread_id = ?
     ORDER BY updated_at DESC
     LIMIT 1
+  `)
+  const selectThreads = db.query(`
+    SELECT DISTINCT thread_id
+    FROM session_state
+    WHERE thread_id IS NOT NULL AND muted = 0
   `)
   const upsertSession = db.query(`
     INSERT INTO session_state (
@@ -466,7 +547,6 @@ export default (async (input, options) => {
 
   function doneMessage(sessionID: string) {
     const current = statsBySession.get(sessionID)
-    const user = current?.userInput ? `> user: ${truncateEnd(current.userInput, 200)}\n\n` : ""
     const output = truncate(
       Array.from(current?.textByPart.values() ?? [])
         .join("\n\n")
@@ -483,7 +563,15 @@ export default (async (input, options) => {
     const meta = `\n\n> tools ${current?.toolCalls.size ?? 0} · r/w/c ${current?.readFiles.size ?? 0}/${
       current?.writtenFiles.size ?? 0
     }/${current?.changedFiles.size ?? 0}${context}`
-    return `${user}${output}${meta}`
+    return post(
+      [
+        ...(current?.userInput ? [quote(`user: ${truncateEnd(current.userInput, 200)}`), [br()]] : []),
+        ...postContent(output),
+        [br()],
+        quote(meta.trim().replace(/^>\s*/, "")),
+      ],
+      "OpenCode output",
+    )
   }
 
   async function tenantToken() {
@@ -528,21 +616,33 @@ export default (async (input, options) => {
     console.warn(`lark-notify plugin: ${path} failed (${response.status}) ${data.msg ?? JSON.stringify(data)}`)
   }
 
-  async function send(text: string, rootMessageID?: string) {
+  function larkBody(message: LarkMessage) {
+    if (typeof message === "string") return { msg_type: "text", content: larkText(message) }
+    return {
+      msg_type: "post",
+      content: JSON.stringify({
+        zh_cn: {
+          ...(message.title ? { title: message.title } : {}),
+          content: message.content,
+        },
+      }),
+    }
+  }
+
+  async function send(message: LarkMessage, rootMessageID?: string) {
     if (!chatID) {
       console.warn("lark-notify plugin: missing LARK_CHAT_ID")
       return
     }
     const data = rootMessageID
       ? await larkAPI("POST", `/im/v1/messages/${encodeURIComponent(rootMessageID)}/reply`, undefined, {
-          msg_type: "text",
-          content: larkText(text),
+          ...larkBody(message),
         })
       : await larkAPI(
           "POST",
           "/im/v1/messages",
           { receive_id_type: "chat_id" },
-          { receive_id: chatID, msg_type: "text", content: larkText(text) },
+          { receive_id: chatID, ...larkBody(message) },
         )
     const messageID = textOption(prop(data, "message_id") ?? prop(data, "messageId"))
     if (messageID) {
@@ -561,12 +661,15 @@ export default (async (input, options) => {
     if (current.rootMessageID) return current.rootMessageID
     if (current.rootMessagePromise) return current.rootMessagePromise
     current.rootMessagePromise = send(
-      [
-        `${sessionID} · ${input.directory}`,
-        `> user: ${current.userInput || "(unknown input)"}`,
-        "",
+      post(
+        [
+          [textNode(sessionID, ["bold"]), textNode(" · "), textNode(input.directory)],
+          quote(`user: ${current.userInput || "(unknown input)"}`),
+          [br()],
+          paragraph("OpenCode session", ["bold"]),
+        ],
         "OpenCode session",
-      ].join("\n"),
+      ),
     ).then((result) => {
       current.rootMessageID = result?.messageID
       current.threadID = result?.threadID
@@ -578,10 +681,10 @@ export default (async (input, options) => {
     return current.rootMessagePromise
   }
 
-  async function sendReply(sessionID: string, text: string) {
+  async function sendReply(sessionID: string, message: LarkMessage) {
     const rootID = await rootMessage(sessionID)
     if (!rootID) return
-    const result = await send(text, rootID)
+    const result = await send(message, rootID)
     if (result?.threadID) {
       stats(sessionID).threadID = result.threadID
       saveSession(sessionID)
@@ -643,13 +746,17 @@ export default (async (input, options) => {
     return db.query("SELECT changes() AS count").get() as { count: number }
   }
 
-  async function pollMessages(startTime: number, endTime: number) {
-    if (!chatID) return
+  async function pollMessages(
+    containerIDType: "chat" | "thread",
+    containerID: string,
+    startTime: number,
+    endTime: number,
+  ) {
     let pageToken: string | undefined
     do {
       const data = await larkAPI("GET", "/im/v1/messages", {
-        container_id_type: "chat",
-        container_id: chatID,
+        container_id_type: containerIDType,
+        container_id: containerID,
         start_time: String(startTime),
         end_time: String(endTime),
         page_size: "50",
@@ -676,7 +783,9 @@ export default (async (input, options) => {
         }
         const now = Math.floor(Date.now() / 1000)
         if (now > cursor) {
-          await pollMessages(cursor, now)
+          for (const row of selectThreads.all() as Array<{ thread_id: string | null }>) {
+            if (row.thread_id) await pollMessages("thread", row.thread_id, cursor, now)
+          }
           cursor = now
         }
       } catch (error) {
@@ -800,11 +909,14 @@ export default (async (input, options) => {
               pendingPermissionTimers.delete(requestID)
               void sendReply(
                 sessionID,
-                [
-                  `permission needed · ${shortID(sessionID)}`,
-                  `permission: ${textOption(prop(properties, "permission"), "unknown")}`,
-                  `patterns: ${patterns(prop(properties, "patterns")) || "unknown"}`,
-                ].join("\n"),
+                post(
+                  [
+                    paragraph(`permission needed · ${shortID(sessionID)}`, ["bold"]),
+                    paragraph(`permission: ${textOption(prop(properties, "permission"), "unknown")}`),
+                    paragraph(`patterns: ${patterns(prop(properties, "patterns")) || "unknown"}`),
+                  ],
+                  "OpenCode permission",
+                ),
               )
             }, permissionNotifyDelay),
           })
@@ -818,7 +930,13 @@ export default (async (input, options) => {
           const key = `question:${requestID}`
           if (notifiedRequests.has(key)) return
           notifiedRequests.add(key)
-          await sendReply(sessionID, `opencode is waiting for your answer\nsession: ${shortID(sessionID)}`)
+          await sendReply(
+            sessionID,
+            post(
+              [paragraph("opencode is waiting for your answer", ["bold"]), paragraph(`session: ${shortID(sessionID)}`)],
+              "OpenCode question",
+            ),
+          )
         }
       } catch (error) {
         console.warn("lark-notify plugin:", error instanceof Error ? error.message : error)
