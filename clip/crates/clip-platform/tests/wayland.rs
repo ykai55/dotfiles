@@ -65,9 +65,28 @@ fn read_text_returns_text_blob() {
         stdout: b"hello".to_vec(),
         stderr: Vec::new(),
     });
-    let backend = WaylandBackend::new(runner);
+    let backend = WaylandBackend::new(runner.clone());
 
     assert_eq!(backend.read(ReadRequest::text()).unwrap(), ClipboardBlob::Text(String::from("hello")));
+
+    let calls = runner.calls.lock().unwrap();
+    assert_eq!(calls[0].program, "wl-paste");
+    assert_eq!(calls[0].args, vec!["--no-newline"]);
+}
+
+#[test]
+fn read_text_preserves_unicode() {
+    let runner = FakeRunner::with_output(CommandOutput {
+        status: 0,
+        stdout: "中文".as_bytes().to_vec(),
+        stderr: Vec::new(),
+    });
+    let backend = WaylandBackend::new(runner);
+
+    assert_eq!(
+        backend.read(ReadRequest::text()).unwrap(),
+        ClipboardBlob::Text(String::from("中文"))
+    );
 }
 
 #[test]
