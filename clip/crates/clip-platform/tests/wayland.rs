@@ -40,6 +40,22 @@ fn list_types_splits_wayland_output_lines() {
 }
 
 #[test]
+fn list_types_ignores_non_mime_wayland_targets() {
+    let runner = FakeRunner::with_output(CommandOutput {
+        status: 0,
+        stdout: b"text/plain;charset=utf-8\nUTF8_STRING\nCOMPOUND_TEXT\nTEXT\ntext/plain\nSTRING\ntext/plain;charset=utf-8\ntext/plain\nSAVE_TARGETS\n".to_vec(),
+        stderr: Vec::new(),
+    });
+    let backend = WaylandBackend::new(runner);
+
+    let types = backend.list_types().unwrap();
+    assert_eq!(
+        types.iter().map(|item| item.as_str()).collect::<Vec<_>>(),
+        vec!["text/plain;charset=utf-8", "text/plain"]
+    );
+}
+
+#[test]
 fn write_bytes_uses_wl_copy_with_explicit_type() {
     let runner = FakeRunner::with_output(CommandOutput {
         status: 0,
