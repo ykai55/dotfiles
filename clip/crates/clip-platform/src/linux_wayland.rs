@@ -54,12 +54,18 @@ impl ClipboardBackend for WaylandBackend {
 
     fn list_types(&self) -> Result<Vec<MimeType>, ClipError> {
         let output = self.run("wl-paste", &["--list-types"], Vec::new())?;
-        output
+        let mut values = Vec::new();
+        for mime in output
             .stdout
             .split(|byte| *byte == b'\n')
             .filter(|line| !line.is_empty())
-            .map(|line| MimeType::new(String::from_utf8_lossy(line).to_string()))
-            .collect()
+            .filter_map(|line| MimeType::new(String::from_utf8_lossy(line).to_string()).ok())
+        {
+            if !values.contains(&mime) {
+                values.push(mime);
+            }
+        }
+        Ok(values)
     }
 
     fn read(&self, request: ReadRequest) -> Result<ClipboardBlob, ClipError> {
