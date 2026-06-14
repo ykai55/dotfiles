@@ -84,6 +84,16 @@
       "optional": true
     },
     {
+      "name": "ironbar",
+      "source": "ironbar",
+      "target": "~/.config/ironbar",
+      "mode": "symlink",
+      "platforms": [
+        "linux"
+      ],
+      "optional": true
+    },
+    {
       "name": "keyd",
       "source": "keyd/default.conf",
       "target": "/etc/keyd/default.conf",
