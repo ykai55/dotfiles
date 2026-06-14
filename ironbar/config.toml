@@ -1,0 +1,35 @@
+position = "top"
+height = 32
+popup_autohide = true
+
+[[start]]
+type = "workspaces"
+all_monitors = false
+
+center = []
+
+[[end]]
+type = "keyboard"
+show_caps = true
+show_num = true
+show_scroll = false
+show_layout = true
+
+[[end]]
+type = "tray"
+icon_size = 16
+
+[[end]]
+type = "volume"
+format = "{icon} {percentage}%"
+mute_format = "{icon} {percentage}%"
+sink_slider_orientation = "vertical"
+popup_orientation = "vertical"
+show_sinks = true
+show_sources = false
+max_volume = 100
+truncate_popup = "end"
+
+[[end]]
+type = "clock"
+format = "%d/%m/%Y %H:%M"
