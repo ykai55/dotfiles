@@ -84,6 +84,7 @@ add_path ~/src/blade-build/
 add_path ~/.opencode/bin
 add_path ~/dotfiles/bin
 add_path ~/.cargo/bin
+add_path ~/.bun/bin
 if is_mac
   add_path /Applications/Xcode.app/Contents/Developer/usr/bin
   add_path /opt/homebrew/opt/coreutils/libexec/gnubin
