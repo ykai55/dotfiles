@@ -375,6 +375,27 @@ fn get_typed_text_plain_prints_to_stdout_without_output_file() {
 }
 
 #[test]
+fn get_text_prints_unicode_to_stdout_without_escaping() {
+    let temp = TempDir::new().unwrap();
+    write_script(&temp, "wl-copy", "#!/usr/bin/env bash\nexit 0\n");
+    write_script(
+        &temp,
+        "wl-paste",
+        "#!/usr/bin/env bash\nprintf '中文'\n",
+    );
+    let path = format!("{}:{}", temp.path().display(), std::env::var("PATH").unwrap());
+
+    Command::cargo_bin("clip")
+        .unwrap()
+        .args(["get", "--target", "wayland"])
+        .env("WAYLAND_DISPLAY", "wayland-0")
+        .env("PATH", path)
+        .assert()
+        .success()
+        .stdout("中文");
+}
+
+#[test]
 fn set_html_file_uses_mime_and_raw_bytes() {
     let temp = TempDir::new().unwrap();
     write_script(

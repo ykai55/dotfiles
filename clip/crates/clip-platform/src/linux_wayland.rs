@@ -72,7 +72,7 @@ impl ClipboardBackend for WaylandBackend {
             });
         }
 
-        let output = self.run("wl-paste", &["--type", "text/plain", "--no-newline"], Vec::new())?;
+        let output = self.run("wl-paste", &["--no-newline"], Vec::new())?;
         Ok(ClipboardBlob::Text(String::from_utf8(output.stdout).map_err(|_| {
             ClipError::clipboard("clipboard text is not valid UTF-8")
         })?))

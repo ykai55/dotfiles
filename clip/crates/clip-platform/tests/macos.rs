@@ -98,9 +98,24 @@ fn list_types_maps_helper_output_to_mime_values() {
 }
 
 #[test]
+fn read_text_preserves_unicode_from_helper() {
+    let runner = FakeRunner::with_output(CommandOutput {
+        status: 0,
+        stdout: "中文".as_bytes().to_vec(),
+        stderr: Vec::new(),
+    });
+    let backend = MacOsBackend::new(runner, PathBuf::from("/tmp/clip-macos-helper"));
+
+    assert_eq!(
+        backend.read(ReadRequest::text()).unwrap(),
+        clip_core::ClipboardBlob::Text(String::from("中文"))
+    );
+}
+
+#[test]
 fn resolve_helper_path_finds_project_relative_release_binary() {
     let root = unique_temp_dir();
-    let helper = root.join("helpers/macos/clip-macos-helper/.build/arm64-apple-macosx/release/clip-macos-helper");
+    let helper = root.join("helpers/macos/clip-macos-helper/.build/release/clip-macos-helper");
     fs::create_dir_all(helper.parent().unwrap()).unwrap();
     fs::write(&helper, b"#!/bin/sh\n").unwrap();
 
