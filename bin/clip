@@ -53,19 +53,30 @@ resolve_clip_binary() {
       ;;
   esac
 
-  clip_bin="$repo_root/clip/dist/$target_dir/$binary_name"
+  clip_bin="$repo_root/bin/.downloads/clip/current/$target_dir/$binary_name"
   if [[ ! -x "$clip_bin" ]]; then
-    fail "missing clip binary: $clip_bin"
+    fail "missing downloaded clip binary: $clip_bin; run bin/dotfiles-apply"
   fi
 
-  printf '%s\n' "$clip_bin"
+  RESOLVED_REPO_ROOT="$repo_root"
+  RESOLVED_TARGET_DIR="$target_dir"
+  RESOLVED_CLIP_BIN="$clip_bin"
 }
 
 main() {
-  local clip_bin
+  local helper_path
 
-  clip_bin="$(resolve_clip_binary)"
-  exec "$clip_bin" "$@"
+  resolve_clip_binary
+
+  if [[ "$RESOLVED_TARGET_DIR" == "macos-aarch64" ]]; then
+    helper_path="$RESOLVED_REPO_ROOT/bin/.downloads/clip/current/$RESOLVED_TARGET_DIR/clip-macos-helper"
+    if [[ ! -x "$helper_path" ]]; then
+      fail "missing downloaded clip helper: $helper_path; run bin/dotfiles-apply"
+    fi
+    export CLIP_MACOS_HELPER="$helper_path"
+  fi
+
+  exec "$RESOLVED_CLIP_BIN" "$@"
 }
 
 main "$@"

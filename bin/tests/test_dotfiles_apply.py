@@ -1,11 +1,16 @@
+import hashlib
 import importlib.machinery
 import importlib.util
+import io
 import json
 import os
 import pathlib
+import stat
 import sys
+import tarfile
 import tempfile
 import unittest
+import zipfile
 from unittest import mock
 
 TESTS_DIR = pathlib.Path(__file__).resolve().parent
@@ -40,6 +45,634 @@ class DotfilesApplyTests(CapturingTestCase):
         with open(path, "w", encoding="utf-8") as f:
             json.dump(payload, f)
 
+    def write_clip_download_manifest(self, repo, archive_path, sha256):
+        manifest_path = os.path.join(repo, "downloads.json")
+        self.write_json(
+            manifest_path,
+            {
+                "$schema": "./downloads.schema.json",
+                "version": 1,
+                "tools": [
+                    {
+                        "name": "clip",
+                        "version": "v1.0.0",
+                        "targets": [
+                            {
+                                "target": "linux-x86_64-musl",
+                                "platform": "linux",
+                                "arch": "x86_64",
+                                "url": "file://" + archive_path,
+                                "sha256": sha256,
+                                "archive": "tar.gz",
+                                "executable": "clip",
+                            }
+                        ],
+                    }
+                ],
+            },
+        )
+        return manifest_path
+
+    def clip_download_marker(self, archive_path, sha256):
+        return {
+            "tool": "clip",
+            "version": "v1.0.0",
+            "target": "linux-x86_64-musl",
+            "url": "file://" + archive_path,
+            "sha256": sha256,
+            "archive": "tar.gz",
+            "executable": "clip",
+        }
+
+    def make_clip_archive(self, tmpdir, content="#!/usr/bin/env bash\nprintf 'clip-ok\\n'\n"):
+        source_dir = os.path.join(tmpdir, "archive-src")
+        os.makedirs(source_dir, exist_ok=True)
+        clip_path = os.path.join(source_dir, "clip")
+        with open(clip_path, "w", encoding="utf-8") as f:
+            f.write(content)
+        os.chmod(clip_path, os.stat(clip_path).st_mode | stat.S_IXUSR)
+        archive_path = os.path.join(tmpdir, "clip-linux-x86_64-musl.tar.gz")
+        with tarfile.open(archive_path, "w:gz") as archive:
+            archive.add(clip_path, arcname="clip")
+        with open(archive_path, "rb") as f:
+            sha256 = hashlib.sha256(f.read()).hexdigest()
+        return archive_path, sha256
+
+    def write_archive_bytes(self, path):
+        with open(path, "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()
+
+    def write_download_manifest_for_archive(self, repo, archive_path, archive_type, sha256):
+        manifest_path = self.write_clip_download_manifest(repo, archive_path, sha256)
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        payload["tools"][0]["targets"][0]["archive"] = archive_type
+        self.write_json(manifest_path, payload)
+        return manifest_path
+
+    def apply_managed_download(self, home, repo, manifest_path):
+        with mock.patch.dict(os.environ, {"HOME": home}, clear=False), mock.patch.object(
+            self.dotfiles_apply,
+            "current_platform",
+            return_value="linux",
+        ), mock.patch.object(
+            self.dotfiles_apply,
+            "current_machine_arch",
+            return_value="x86_64",
+        ):
+            return self.dotfiles_apply.apply_manifest(repo, manifest_path)
+
+    def test_managed_download_dry_run_does_not_fetch(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = os.path.join(tmpdir, "home")
+            repo = os.path.join(tmpdir, "repo")
+            os.makedirs(home, exist_ok=True)
+            os.makedirs(repo, exist_ok=True)
+            archive_path, sha256 = self.make_clip_archive(tmpdir)
+            self.write_clip_download_manifest(repo, archive_path, sha256)
+            manifest_path = os.path.join(repo, "manifest.json")
+            self.write_json(manifest_path, {"mappings": []})
+
+            with mock.patch.dict(os.environ, {"HOME": home}, clear=False), mock.patch.object(
+                self.dotfiles_apply,
+                "current_platform",
+                return_value="linux",
+            ), mock.patch.object(
+                self.dotfiles_apply,
+                "current_machine_arch",
+                return_value="x86_64",
+            ), mock.patch.object(
+                self.dotfiles_apply.urllib.request,
+                "urlopen",
+                side_effect=AssertionError("download should not run"),
+            ):
+                stats = self.dotfiles_apply.apply_manifest(repo, manifest_path, dry_run=True)
+
+            self.assertEqual(stats.errors, 0)
+            self.assertFalse(os.path.exists(os.path.join(repo, "bin", ".downloads")))
+            self.assertIn("[download] clip linux-x86_64-musl", self._stdout_buffer.getvalue())
+
+    def test_managed_download_installs_verified_archive(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = os.path.join(tmpdir, "home")
+            repo = os.path.join(tmpdir, "repo")
+            os.makedirs(home, exist_ok=True)
+            os.makedirs(repo, exist_ok=True)
+            archive_path, sha256 = self.make_clip_archive(tmpdir)
+            self.write_clip_download_manifest(repo, archive_path, sha256)
+            manifest_path = os.path.join(repo, "manifest.json")
+            self.write_json(manifest_path, {"mappings": []})
+
+            with mock.patch.dict(os.environ, {"HOME": home}, clear=False), mock.patch.object(
+                self.dotfiles_apply,
+                "current_platform",
+                return_value="linux",
+            ), mock.patch.object(
+                self.dotfiles_apply,
+                "current_machine_arch",
+                return_value="x86_64",
+            ):
+                stats = self.dotfiles_apply.apply_manifest(repo, manifest_path)
+
+            installed = os.path.join(
+                repo,
+                "bin",
+                ".downloads",
+                "clip",
+                "v1.0.0",
+                "linux-x86_64-musl",
+                "clip",
+            )
+            current = os.path.join(repo, "bin", ".downloads", "clip", "current")
+            self.assertEqual(stats.errors, 0)
+            self.assertTrue(os.path.exists(installed))
+            self.assertTrue(os.access(installed, os.X_OK))
+            self.assertTrue(os.path.islink(current))
+            self.assertEqual(os.readlink(current), "v1.0.0")
+
+    def test_managed_download_zero_sha256_fetches_sibling_checksum(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = os.path.join(tmpdir, "home")
+            repo = os.path.join(tmpdir, "repo")
+            os.makedirs(home, exist_ok=True)
+            os.makedirs(repo, exist_ok=True)
+            archive_path, sha256 = self.make_clip_archive(tmpdir)
+            self.write_clip_download_manifest(repo, archive_path, "0" * 64)
+            with open(archive_path + ".sha256", "w", encoding="utf-8") as f:
+                f.write(f"{sha256.upper()}  {os.path.basename(archive_path)}\n")
+            manifest_path = os.path.join(repo, "manifest.json")
+            self.write_json(manifest_path, {"mappings": []})
+
+            stats = self.apply_managed_download(home, repo, manifest_path)
+
+            installed = os.path.join(
+                repo,
+                "bin",
+                ".downloads",
+                "clip",
+                "v1.0.0",
+                "linux-x86_64-musl",
+                "clip",
+            )
+            marker_path = os.path.join(os.path.dirname(installed), ".download.json")
+            self.assertEqual(stats.errors, 0)
+            self.assertTrue(os.path.exists(installed))
+            with open(marker_path, "r", encoding="utf-8") as f:
+                marker = json.load(f)
+            self.assertEqual(marker["sha256"], sha256)
+
+    def test_managed_download_zero_sha256_rejects_invalid_checksum_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = os.path.join(tmpdir, "home")
+            repo = os.path.join(tmpdir, "repo")
+            os.makedirs(home, exist_ok=True)
+            os.makedirs(repo, exist_ok=True)
+            archive_path, _sha256 = self.make_clip_archive(tmpdir)
+            self.write_clip_download_manifest(repo, archive_path, "0" * 64)
+            with open(archive_path + ".sha256", "w", encoding="utf-8") as f:
+                f.write("no checksum here\n")
+            manifest_path = os.path.join(repo, "manifest.json")
+            self.write_json(manifest_path, {"mappings": []})
+
+            stats = self.apply_managed_download(home, repo, manifest_path)
+
+            installed = os.path.join(repo, "bin", ".downloads", "clip", "v1.0.0")
+            self.assertEqual(stats.errors, 1)
+            self.assertFalse(os.path.exists(installed))
+            self.assertIn("No sha256 checksum found", self._stderr_buffer.getvalue())
+
+    def test_managed_download_zero_sha256_dry_run_does_not_fetch_checksum(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = os.path.join(tmpdir, "home")
+            repo = os.path.join(tmpdir, "repo")
+            os.makedirs(home, exist_ok=True)
+            os.makedirs(repo, exist_ok=True)
+            archive_path, _sha256 = self.make_clip_archive(tmpdir)
+            self.write_clip_download_manifest(repo, archive_path, "0" * 64)
+            manifest_path = os.path.join(repo, "manifest.json")
+            self.write_json(manifest_path, {"mappings": []})
+
+            with mock.patch.dict(os.environ, {"HOME": home}, clear=False), mock.patch.object(
+                self.dotfiles_apply,
+                "current_platform",
+                return_value="linux",
+            ), mock.patch.object(
+                self.dotfiles_apply,
+                "current_machine_arch",
+                return_value="x86_64",
+            ), mock.patch.object(
+                self.dotfiles_apply.urllib.request,
+                "urlopen",
+                side_effect=AssertionError("download should not run"),
+            ):
+                stats = self.dotfiles_apply.apply_manifest(repo, manifest_path, dry_run=True)
+
+            self.assertEqual(stats.errors, 0)
+            self.assertFalse(os.path.exists(os.path.join(repo, "bin", ".downloads")))
+            self.assertIn("[download] clip linux-x86_64-musl", self._stdout_buffer.getvalue())
+
+    def test_managed_download_zero_sha256_accepts_cached_binary_with_resolved_marker(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = os.path.join(tmpdir, "home")
+            repo = os.path.join(tmpdir, "repo")
+            os.makedirs(home, exist_ok=True)
+            cached_dir = os.path.join(repo, "bin", ".downloads", "clip", "v1.0.0", "linux-x86_64-musl")
+            os.makedirs(cached_dir, exist_ok=True)
+            cached_clip = os.path.join(cached_dir, "clip")
+            with open(cached_clip, "w", encoding="utf-8") as f:
+                f.write("cached\n")
+            os.chmod(cached_clip, os.stat(cached_clip).st_mode | stat.S_IXUSR)
+            current = os.path.join(repo, "bin", ".downloads", "clip", "current")
+            os.symlink("v1.0.0", current)
+            archive_path, sha256 = self.make_clip_archive(tmpdir)
+            self.write_clip_download_manifest(repo, archive_path, "0" * 64)
+            marker_path = os.path.join(cached_dir, ".download.json")
+            self.write_json(marker_path, self.clip_download_marker(archive_path, sha256))
+            manifest_path = os.path.join(repo, "manifest.json")
+            self.write_json(manifest_path, {"mappings": []})
+
+            with mock.patch.dict(os.environ, {"HOME": home}, clear=False), mock.patch.object(
+                self.dotfiles_apply,
+                "current_platform",
+                return_value="linux",
+            ), mock.patch.object(
+                self.dotfiles_apply,
+                "current_machine_arch",
+                return_value="x86_64",
+            ), mock.patch.object(
+                self.dotfiles_apply.urllib.request,
+                "urlopen",
+                side_effect=AssertionError("download should not run"),
+            ):
+                stats = self.dotfiles_apply.apply_manifest(repo, manifest_path)
+
+            self.assertEqual(stats.errors, 0)
+            self.assertIn("[ok] clip linux-x86_64-musl", self._stdout_buffer.getvalue())
+
+    def test_managed_download_accepts_existing_cached_binary(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = os.path.join(tmpdir, "home")
+            repo = os.path.join(tmpdir, "repo")
+            os.makedirs(home, exist_ok=True)
+            cached_dir = os.path.join(repo, "bin", ".downloads", "clip", "v1.0.0", "linux-x86_64-musl")
+            os.makedirs(cached_dir, exist_ok=True)
+            cached_clip = os.path.join(cached_dir, "clip")
+            with open(cached_clip, "w", encoding="utf-8") as f:
+                f.write("cached\n")
+            os.chmod(cached_clip, os.stat(cached_clip).st_mode | stat.S_IXUSR)
+            current = os.path.join(repo, "bin", ".downloads", "clip", "current")
+            os.symlink("v1.0.0", current)
+            archive_path, sha256 = self.make_clip_archive(tmpdir)
+            self.write_clip_download_manifest(repo, archive_path, sha256)
+            marker_path = os.path.join(cached_dir, ".download.json")
+            self.write_json(marker_path, self.clip_download_marker(archive_path, sha256))
+            manifest_path = os.path.join(repo, "manifest.json")
+            self.write_json(manifest_path, {"mappings": []})
+
+            with mock.patch.dict(os.environ, {"HOME": home}, clear=False), mock.patch.object(
+                self.dotfiles_apply,
+                "current_platform",
+                return_value="linux",
+            ), mock.patch.object(
+                self.dotfiles_apply,
+                "current_machine_arch",
+                return_value="x86_64",
+            ), mock.patch.object(
+                self.dotfiles_apply.urllib.request,
+                "urlopen",
+                side_effect=AssertionError("download should not run"),
+            ):
+                stats = self.dotfiles_apply.apply_manifest(repo, manifest_path)
+
+            self.assertEqual(stats.errors, 0)
+            self.assertIn("[ok] clip linux-x86_64-musl", self._stdout_buffer.getvalue())
+
+    def test_managed_download_rejects_unmarked_cached_binary(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = os.path.join(tmpdir, "home")
+            repo = os.path.join(tmpdir, "repo")
+            os.makedirs(home, exist_ok=True)
+            cached_dir = os.path.join(repo, "bin", ".downloads", "clip", "v1.0.0", "linux-x86_64-musl")
+            os.makedirs(cached_dir, exist_ok=True)
+            cached_clip = os.path.join(cached_dir, "clip")
+            with open(cached_clip, "w", encoding="utf-8") as f:
+                f.write("cached\n")
+            os.chmod(cached_clip, os.stat(cached_clip).st_mode | stat.S_IXUSR)
+
+            archive_path, sha256 = self.make_clip_archive(tmpdir)
+            self.write_clip_download_manifest(repo, archive_path, sha256)
+            manifest_path = os.path.join(repo, "manifest.json")
+            self.write_json(manifest_path, {"mappings": []})
+
+            with mock.patch.dict(os.environ, {"HOME": home}, clear=False), mock.patch.object(
+                self.dotfiles_apply,
+                "current_platform",
+                return_value="linux",
+            ), mock.patch.object(
+                self.dotfiles_apply,
+                "current_machine_arch",
+                return_value="x86_64",
+            ):
+                stats = self.dotfiles_apply.apply_manifest(repo, manifest_path)
+
+            self.assertEqual(stats.errors, 0)
+            self.assertIn("[download] clip linux-x86_64-musl", self._stdout_buffer.getvalue())
+            with open(cached_clip, "r", encoding="utf-8") as f:
+                self.assertEqual(f.read(), "#!/usr/bin/env bash\nprintf 'clip-ok\\n'\n")
+            marker_path = os.path.join(cached_dir, ".download.json")
+            with open(marker_path, "r", encoding="utf-8") as f:
+                self.assertEqual(json.load(f), self.clip_download_marker(archive_path, sha256))
+
+    def test_managed_download_rejects_sha256_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = os.path.join(tmpdir, "home")
+            repo = os.path.join(tmpdir, "repo")
+            os.makedirs(home, exist_ok=True)
+            os.makedirs(repo, exist_ok=True)
+            archive_path, _sha256 = self.make_clip_archive(tmpdir)
+            self.write_clip_download_manifest(
+                repo,
+                archive_path,
+                "f" * 64,
+            )
+            manifest_path = os.path.join(repo, "manifest.json")
+            self.write_json(manifest_path, {"mappings": []})
+
+            with mock.patch.dict(os.environ, {"HOME": home}, clear=False), mock.patch.object(
+                self.dotfiles_apply,
+                "current_platform",
+                return_value="linux",
+            ), mock.patch.object(
+                self.dotfiles_apply,
+                "current_machine_arch",
+                return_value="x86_64",
+            ):
+                stats = self.dotfiles_apply.apply_manifest(repo, manifest_path)
+
+            installed = os.path.join(repo, "bin", ".downloads", "clip", "v1.0.0")
+            self.assertEqual(stats.errors, 1)
+            self.assertFalse(os.path.exists(installed))
+            self.assertIn("sha256 mismatch", self._stderr_buffer.getvalue())
+
+    def test_managed_download_rejects_unsafe_manifest_fields(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = os.path.join(tmpdir, "repo")
+            os.makedirs(repo, exist_ok=True)
+            archive_path, sha256 = self.make_clip_archive(tmpdir)
+
+            cases = (
+                ("tool", ["tools", 0, "name"], "../clip"),
+                ("version", ["tools", 0, "version"], "v1/0"),
+                ("target", ["tools", 0, "targets", 0, "target"], "/tmp/target"),
+                ("executable", ["tools", 0, "targets", 0, "executable"], "../clip"),
+                ("executable-empty-segment", ["tools", 0, "targets", 0, "executable"], "bin//clip"),
+                ("executable-backslash", ["tools", 0, "targets", 0, "executable"], "bin\\clip"),
+                ("executable-drive-relative", ["tools", 0, "targets", 0, "executable"], "C:clip.exe"),
+                ("executable-windows-absolute", ["tools", 0, "targets", 0, "executable"], "C:/clip.exe"),
+                ("sha256", ["tools", 0, "targets", 0, "sha256"], "g" * 64),
+            )
+            for key, path, value in cases:
+                with self.subTest(key=key):
+                    manifest_path = self.write_clip_download_manifest(repo, archive_path, sha256)
+                    with open(manifest_path, "r", encoding="utf-8") as f:
+                        payload = json.load(f)
+                    cursor = payload
+                    for segment in path[:-1]:
+                        cursor = cursor[segment]
+                    cursor[path[-1]] = value
+                    self.write_json(manifest_path, payload)
+
+                    with self.assertRaises(RuntimeError):
+                        self.dotfiles_apply.load_downloads_manifest(manifest_path)
+
+    def test_managed_download_rejects_schema_mismatched_manifest_shapes(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = os.path.join(tmpdir, "repo")
+            os.makedirs(repo, exist_ok=True)
+            archive_path, sha256 = self.make_clip_archive(tmpdir)
+            manifest_path = self.write_clip_download_manifest(repo, archive_path, sha256)
+
+            with open(manifest_path, "r", encoding="utf-8") as f:
+                valid_payload = json.load(f)
+
+            cases = (
+                ("missing schema", lambda payload: payload.pop("$schema")),
+                ("non-string schema", lambda payload: payload.update({"$schema": 1})),
+                ("missing version", lambda payload: payload.pop("version")),
+                ("wrong version", lambda payload: payload.update({"version": 2})),
+                ("missing tools", lambda payload: payload.pop("tools")),
+                ("root extra", lambda payload: payload.update({"extra": True})),
+                ("tool extra", lambda payload: payload["tools"][0].update({"extra": True})),
+                (
+                    "target extra",
+                    lambda payload: payload["tools"][0]["targets"][0].update({"extra": True}),
+                ),
+            )
+            for name, mutate in cases:
+                with self.subTest(name=name):
+                    payload = json.loads(json.dumps(valid_payload))
+                    mutate(payload)
+                    self.write_json(manifest_path, payload)
+
+                    with self.assertRaises(RuntimeError):
+                        self.dotfiles_apply.load_downloads_manifest(manifest_path)
+
+    def test_managed_download_rejects_tar_path_traversal(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = os.path.join(tmpdir, "home")
+            repo = os.path.join(tmpdir, "repo")
+            os.makedirs(home, exist_ok=True)
+            os.makedirs(repo, exist_ok=True)
+            archive_path = os.path.join(tmpdir, "clip-linux-x86_64-musl.tar.gz")
+            with tarfile.open(archive_path, "w:gz") as archive:
+                member = tarfile.TarInfo("../evil")
+                data = b"evil\n"
+                member.size = len(data)
+                archive.addfile(member, fileobj=io.BytesIO(data))
+            sha256 = self.write_archive_bytes(archive_path)
+            self.write_download_manifest_for_archive(repo, archive_path, "tar.gz", sha256)
+            manifest_path = os.path.join(repo, "manifest.json")
+            self.write_json(manifest_path, {"mappings": []})
+
+            stats = self.apply_managed_download(home, repo, manifest_path)
+
+            self.assertEqual(stats.errors, 1)
+            self.assertFalse(os.path.exists(os.path.join(tmpdir, "evil")))
+            self.assertIn("unsafe path", self._stderr_buffer.getvalue())
+
+    def test_managed_download_rejects_tar_absolute_path(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = os.path.join(tmpdir, "home")
+            repo = os.path.join(tmpdir, "repo")
+            os.makedirs(home, exist_ok=True)
+            os.makedirs(repo, exist_ok=True)
+            archive_path = os.path.join(tmpdir, "clip-linux-x86_64-musl.tar.gz")
+            with tarfile.open(archive_path, "w:gz") as archive:
+                member = tarfile.TarInfo("/tmp/evil")
+                data = b"evil\n"
+                member.size = len(data)
+                archive.addfile(member, fileobj=io.BytesIO(data))
+            sha256 = self.write_archive_bytes(archive_path)
+            self.write_download_manifest_for_archive(repo, archive_path, "tar.gz", sha256)
+            manifest_path = os.path.join(repo, "manifest.json")
+            self.write_json(manifest_path, {"mappings": []})
+
+            stats = self.apply_managed_download(home, repo, manifest_path)
+
+            self.assertEqual(stats.errors, 1)
+            self.assertIn("unsafe path", self._stderr_buffer.getvalue())
+
+    def test_managed_download_rejects_tar_links(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for link_type in (tarfile.SYMTYPE, tarfile.LNKTYPE):
+                with self.subTest(link_type=link_type):
+                    home = os.path.join(tmpdir, "home", str(link_type))
+                    repo = os.path.join(tmpdir, "repo", str(link_type))
+                    os.makedirs(home, exist_ok=True)
+                    os.makedirs(repo, exist_ok=True)
+                    archive_path = os.path.join(tmpdir, f"clip-{link_type}.tar.gz")
+                    with tarfile.open(archive_path, "w:gz") as archive:
+                        member = tarfile.TarInfo("clip")
+                        member.type = link_type
+                        member.linkname = "target"
+                        archive.addfile(member)
+                    sha256 = self.write_archive_bytes(archive_path)
+                    self.write_download_manifest_for_archive(repo, archive_path, "tar.gz", sha256)
+                    manifest_path = os.path.join(repo, "manifest.json")
+                    self.write_json(manifest_path, {"mappings": []})
+
+                    stats = self.apply_managed_download(home, repo, manifest_path)
+
+                    self.assertEqual(stats.errors, 1)
+                    self.assertIn("unsafe link", self._stderr_buffer.getvalue())
+                    self._stderr_buffer.truncate(0)
+                    self._stderr_buffer.seek(0)
+
+    def test_managed_download_rejects_zip_path_traversal(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = os.path.join(tmpdir, "home")
+            repo = os.path.join(tmpdir, "repo")
+            os.makedirs(home, exist_ok=True)
+            os.makedirs(repo, exist_ok=True)
+            archive_path = os.path.join(tmpdir, "clip-linux-x86_64-musl.zip")
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr("../evil", "evil\n")
+            sha256 = self.write_archive_bytes(archive_path)
+            self.write_download_manifest_for_archive(repo, archive_path, "zip", sha256)
+            manifest_path = os.path.join(repo, "manifest.json")
+            self.write_json(manifest_path, {"mappings": []})
+
+            stats = self.apply_managed_download(home, repo, manifest_path)
+
+            self.assertEqual(stats.errors, 1)
+            self.assertFalse(os.path.exists(os.path.join(tmpdir, "evil")))
+            self.assertIn("unsafe path", self._stderr_buffer.getvalue())
+
+    def test_managed_download_rejects_zip_absolute_path(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = os.path.join(tmpdir, "home")
+            repo = os.path.join(tmpdir, "repo")
+            os.makedirs(home, exist_ok=True)
+            os.makedirs(repo, exist_ok=True)
+            archive_path = os.path.join(tmpdir, "clip-linux-x86_64-musl.zip")
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr("/tmp/evil", "evil\n")
+            sha256 = self.write_archive_bytes(archive_path)
+            self.write_download_manifest_for_archive(repo, archive_path, "zip", sha256)
+            manifest_path = os.path.join(repo, "manifest.json")
+            self.write_json(manifest_path, {"mappings": []})
+
+            stats = self.apply_managed_download(home, repo, manifest_path)
+
+            self.assertEqual(stats.errors, 1)
+            self.assertIn("unsafe path", self._stderr_buffer.getvalue())
+
+    def test_managed_download_rejects_special_tar_members(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = os.path.join(tmpdir, "home")
+            repo = os.path.join(tmpdir, "repo")
+            os.makedirs(home, exist_ok=True)
+            os.makedirs(repo, exist_ok=True)
+            archive_path = os.path.join(tmpdir, "clip-linux-x86_64-musl.tar.gz")
+            with tarfile.open(archive_path, "w:gz") as archive:
+                member = tarfile.TarInfo("pipe")
+                member.type = tarfile.FIFOTYPE
+                archive.addfile(member)
+            with open(archive_path, "rb") as f:
+                sha256 = hashlib.sha256(f.read()).hexdigest()
+            self.write_clip_download_manifest(repo, archive_path, sha256)
+            manifest_path = os.path.join(repo, "manifest.json")
+            self.write_json(manifest_path, {"mappings": []})
+
+            with mock.patch.dict(os.environ, {"HOME": home}, clear=False), mock.patch.object(
+                self.dotfiles_apply,
+                "current_platform",
+                return_value="linux",
+            ), mock.patch.object(
+                self.dotfiles_apply,
+                "current_machine_arch",
+                return_value="x86_64",
+            ):
+                stats = self.dotfiles_apply.apply_manifest(repo, manifest_path)
+
+            installed = os.path.join(repo, "bin", ".downloads", "clip", "v1.0.0")
+            self.assertEqual(stats.errors, 1)
+            self.assertFalse(os.path.exists(installed))
+            self.assertIn("unsafe tar member", self._stderr_buffer.getvalue())
+
+    def test_managed_download_preserves_existing_install_when_replacement_fails(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = os.path.join(tmpdir, "home")
+            repo = os.path.join(tmpdir, "repo")
+            os.makedirs(home, exist_ok=True)
+            cached_dir = os.path.join(repo, "bin", ".downloads", "clip", "v1.0.0", "linux-x86_64-musl")
+            os.makedirs(cached_dir, exist_ok=True)
+            cached_clip = os.path.join(cached_dir, "clip")
+            with open(cached_clip, "w", encoding="utf-8") as f:
+                f.write("old install\n")
+            os.chmod(cached_clip, os.stat(cached_clip).st_mode | stat.S_IXUSR)
+            old_archive_path, old_sha256 = self.make_clip_archive(tmpdir, "old archive\n")
+            self.write_json(
+                os.path.join(cached_dir, ".download.json"),
+                self.clip_download_marker(old_archive_path, old_sha256),
+            )
+
+            archive_path, sha256 = self.make_clip_archive(tmpdir)
+            self.write_clip_download_manifest(repo, archive_path, sha256)
+            manifest_path = os.path.join(repo, "manifest.json")
+            self.write_json(manifest_path, {"mappings": []})
+            final_dir = cached_dir
+
+            real_replace = os.replace
+            failed_promotion = False
+            with mock.patch.dict(os.environ, {"HOME": home}, clear=False), mock.patch.object(
+                self.dotfiles_apply,
+                "current_platform",
+                return_value="linux",
+            ), mock.patch.object(
+                self.dotfiles_apply,
+                "current_machine_arch",
+                return_value="x86_64",
+            ), mock.patch.object(self.dotfiles_apply.os, "replace") as replace_mock:
+                def replace_side_effect(src, dst):
+                    nonlocal failed_promotion
+                    if dst == final_dir and not failed_promotion:
+                        failed_promotion = True
+                        raise OSError("promotion failed")
+                    return real_replace(src, dst)
+
+                replace_mock.side_effect = replace_side_effect
+                stats = self.dotfiles_apply.apply_manifest(repo, manifest_path)
+
+            self.assertEqual(stats.errors, 1)
+            with open(cached_clip, "r", encoding="utf-8") as f:
+                self.assertEqual(f.read(), "old install\n")
+            self.assertIn("promotion failed", self._stderr_buffer.getvalue())
+
+    def test_current_platform_normalizes_windows(self):
+        with mock.patch.object(self.dotfiles_apply.sys, "platform", "win32"):
+            self.assertEqual(self.dotfiles_apply.current_platform(), "windows")
+
     def test_repo_default_manifest_is_valid(self):
         manifest_path = pathlib.Path(__file__).resolve().parents[2] / "dotfiles-map.json"
         schema_path = pathlib.Path(__file__).resolve().parents[2] / "dotfiles-map.schema.json"
@@ -50,37 +683,23 @@ class DotfilesApplyTests(CapturingTestCase):
             schema = json.load(f)
 
         mappings = self.dotfiles_apply.load_manifest(str(manifest_path))
+        mappings_by_name = {mapping.name: mapping for mapping in mappings}
 
         self.assertEqual(manifest["$schema"], "./dotfiles-map.schema.json")
         self.assertEqual(schema["title"], "Dotfiles Mapping Manifest")
         self.assertIn("mapping", schema["$defs"])
-        self.assertTrue(any(mapping.name == "fish" for mapping in mappings))
+        self.assertIn("fish", mappings_by_name)
+        self.assertNotIn("opencode-systemd-user", mappings_by_name)
+        self.assertNotIn("opencode-launchagent", mappings_by_name)
 
-        opencode_service = next(
-            mapping for mapping in mappings if mapping.name == "opencode-systemd-user"
-        )
-        self.assertEqual(opencode_service.source, "opencode/opencode.service")
-        self.assertEqual(
-            opencode_service.target,
-            "~/.config/systemd/user/opencode.service",
-        )
-        self.assertEqual(opencode_service.mode, "symlink")
-        self.assertEqual(opencode_service.platforms, ["linux"])
-
-        opencode_launchagent = next(
-            mapping for mapping in mappings if mapping.name == "opencode-launchagent"
-        )
-        self.assertEqual(opencode_launchagent.source, "opencode/opencode.plist")
-        self.assertEqual(
-            opencode_launchagent.target,
-            "~/Library/LaunchAgents/opencode.server.plist",
-        )
-        self.assertEqual(opencode_launchagent.mode, "symlink")
-        self.assertEqual(opencode_launchagent.platforms, ["macos"])
-
-        opencode_config = next(mapping for mapping in mappings if mapping.name == "opencode")
+        opencode_config = mappings_by_name["opencode"]
         self.assertIn("opencode.service", opencode_config.exclude)
         self.assertIn("opencode.plist", opencode_config.exclude)
+
+        for name in ("niri", "ironbar", "keyd"):
+            if name in mappings_by_name:
+                self.assertEqual(mappings_by_name[name].platforms, ["linux"])
+                self.assertTrue(mappings_by_name[name].optional)
 
     def test_repo_opencode_user_service_runs_requested_command(self):
         service_path = (
