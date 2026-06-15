@@ -286,6 +286,8 @@ class DotfilesApplyTests(CapturingTestCase):
             os.symlink("v1.0.0", current)
             archive_path, sha256 = self.make_clip_archive(tmpdir)
             self.write_clip_download_manifest(repo, archive_path, "0" * 64)
+            with open(archive_path + ".sha256", "w", encoding="utf-8") as f:
+                f.write(f"{sha256}  {os.path.basename(archive_path)}\n")
             marker_path = os.path.join(cached_dir, ".download.json")
             self.write_json(marker_path, self.clip_download_marker(archive_path, sha256))
             manifest_path = os.path.join(repo, "manifest.json")
@@ -300,14 +302,46 @@ class DotfilesApplyTests(CapturingTestCase):
                 "current_machine_arch",
                 return_value="x86_64",
             ), mock.patch.object(
-                self.dotfiles_apply.urllib.request,
-                "urlopen",
-                side_effect=AssertionError("download should not run"),
+                self.dotfiles_apply,
+                "download_file",
+                side_effect=AssertionError("archive should not download"),
             ):
                 stats = self.dotfiles_apply.apply_manifest(repo, manifest_path)
 
             self.assertEqual(stats.errors, 0)
             self.assertIn("[ok] clip linux-x86_64-musl", self._stdout_buffer.getvalue())
+
+    def test_managed_download_zero_sha256_refreshes_stale_cached_binary(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = os.path.join(tmpdir, "home")
+            repo = os.path.join(tmpdir, "repo")
+            os.makedirs(home, exist_ok=True)
+            cached_dir = os.path.join(repo, "bin", ".downloads", "clip", "v1.0.0", "linux-x86_64-musl")
+            os.makedirs(cached_dir, exist_ok=True)
+            cached_clip = os.path.join(cached_dir, "clip")
+            with open(cached_clip, "w", encoding="utf-8") as f:
+                f.write("old cached\n")
+            os.chmod(cached_clip, os.stat(cached_clip).st_mode | stat.S_IXUSR)
+            current = os.path.join(repo, "bin", ".downloads", "clip", "current")
+            os.symlink("v1.0.0", current)
+            _old_archive_path, old_sha256 = self.make_clip_archive(tmpdir, "old archive\n")
+            archive_path, sha256 = self.make_clip_archive(tmpdir)
+            self.write_clip_download_manifest(repo, archive_path, "0" * 64)
+            with open(archive_path + ".sha256", "w", encoding="utf-8") as f:
+                f.write(f"{sha256}  {os.path.basename(archive_path)}\n")
+            self.write_json(
+                os.path.join(cached_dir, ".download.json"),
+                self.clip_download_marker(archive_path, old_sha256),
+            )
+            manifest_path = os.path.join(repo, "manifest.json")
+            self.write_json(manifest_path, {"mappings": []})
+
+            stats = self.apply_managed_download(home, repo, manifest_path)
+
+            self.assertEqual(stats.errors, 0)
+            self.assertIn("[download] clip linux-x86_64-musl", self._stdout_buffer.getvalue())
+            with open(cached_clip, "r", encoding="utf-8") as f:
+                self.assertEqual(f.read(), "#!/usr/bin/env bash\nprintf 'clip-ok\\n'\n")
 
     def test_managed_download_accepts_existing_cached_binary(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -346,6 +380,80 @@ class DotfilesApplyTests(CapturingTestCase):
 
             self.assertEqual(stats.errors, 0)
             self.assertIn("[ok] clip linux-x86_64-musl", self._stdout_buffer.getvalue())
+
+    def test_managed_download_can_be_disabled(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = os.path.join(tmpdir, "home")
+            repo = os.path.join(tmpdir, "repo")
+            os.makedirs(home, exist_ok=True)
+            os.makedirs(repo, exist_ok=True)
+            archive_path, sha256 = self.make_clip_archive(tmpdir)
+            self.write_clip_download_manifest(repo, archive_path, sha256)
+            manifest_path = os.path.join(repo, "manifest.json")
+            self.write_json(manifest_path, {"mappings": []})
+
+            with mock.patch.dict(os.environ, {"HOME": home}, clear=False), mock.patch.object(
+                self.dotfiles_apply,
+                "current_platform",
+                return_value="linux",
+            ), mock.patch.object(
+                self.dotfiles_apply,
+                "current_machine_arch",
+                return_value="x86_64",
+            ), mock.patch.object(
+                self.dotfiles_apply.urllib.request,
+                "urlopen",
+                side_effect=AssertionError("download should not run"),
+            ):
+                stats = self.dotfiles_apply.apply_manifest(
+                    repo,
+                    manifest_path,
+                    download_mode="never",
+                )
+
+            self.assertEqual(stats.errors, 0)
+            self.assertFalse(os.path.exists(os.path.join(repo, "bin", ".downloads")))
+            self.assertNotIn("[download] clip", self._stdout_buffer.getvalue())
+
+    def test_managed_download_always_refreshes_existing_cached_binary(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = os.path.join(tmpdir, "home")
+            repo = os.path.join(tmpdir, "repo")
+            os.makedirs(home, exist_ok=True)
+            cached_dir = os.path.join(repo, "bin", ".downloads", "clip", "v1.0.0", "linux-x86_64-musl")
+            os.makedirs(cached_dir, exist_ok=True)
+            cached_clip = os.path.join(cached_dir, "clip")
+            with open(cached_clip, "w", encoding="utf-8") as f:
+                f.write("cached\n")
+            os.chmod(cached_clip, os.stat(cached_clip).st_mode | stat.S_IXUSR)
+            current = os.path.join(repo, "bin", ".downloads", "clip", "current")
+            os.symlink("v1.0.0", current)
+            archive_path, sha256 = self.make_clip_archive(tmpdir)
+            self.write_clip_download_manifest(repo, archive_path, sha256)
+            marker_path = os.path.join(cached_dir, ".download.json")
+            self.write_json(marker_path, self.clip_download_marker(archive_path, sha256))
+            manifest_path = os.path.join(repo, "manifest.json")
+            self.write_json(manifest_path, {"mappings": []})
+
+            with mock.patch.dict(os.environ, {"HOME": home}, clear=False), mock.patch.object(
+                self.dotfiles_apply,
+                "current_platform",
+                return_value="linux",
+            ), mock.patch.object(
+                self.dotfiles_apply,
+                "current_machine_arch",
+                return_value="x86_64",
+            ):
+                stats = self.dotfiles_apply.apply_manifest(
+                    repo,
+                    manifest_path,
+                    download_mode="always",
+                )
+
+            self.assertEqual(stats.errors, 0)
+            self.assertIn("[download] clip linux-x86_64-musl", self._stdout_buffer.getvalue())
+            with open(cached_clip, "r", encoding="utf-8") as f:
+                self.assertEqual(f.read(), "#!/usr/bin/env bash\nprintf 'clip-ok\\n'\n")
 
     def test_managed_download_rejects_unmarked_cached_binary(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -673,6 +781,15 @@ class DotfilesApplyTests(CapturingTestCase):
         with mock.patch.object(self.dotfiles_apply.sys, "platform", "win32"):
             self.assertEqual(self.dotfiles_apply.current_platform(), "windows")
 
+    def test_parser_defaults_downloads_to_auto(self):
+        parser = self.dotfiles_apply.build_parser()
+
+        default_args = parser.parse_args([])
+        never_args = parser.parse_args(["--downloads", "never"])
+
+        self.assertEqual(default_args.downloads, "auto")
+        self.assertEqual(never_args.downloads, "never")
+
     def test_repo_downloads_manifest_targets_linux_and_macos_only(self):
         manifest_path = pathlib.Path(__file__).resolve().parents[2] / "downloads.json"
 
@@ -682,6 +799,8 @@ class DotfilesApplyTests(CapturingTestCase):
             [target.target for target in targets],
             ["linux-x86_64-musl", "macos-aarch64"],
         )
+        self.assertTrue(all("clip-latest" in target.url for target in targets))
+        self.assertTrue(all("clip-v1.0.0" not in target.url for target in targets))
 
     def test_repo_default_manifest_is_valid(self):
         manifest_path = pathlib.Path(__file__).resolve().parents[2] / "dotfiles-map.json"

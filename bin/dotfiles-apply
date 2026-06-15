@@ -283,6 +283,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Apply mappings marked as optional in the manifest.",
     )
+    parser.add_argument(
+        "--downloads",
+        choices=("auto", "always", "never"),
+        default="auto",
+        help="Control managed downloads. Defaults to auto, which refreshes stale or missing downloads.",
+    )
     return parser
 
 
@@ -360,14 +366,18 @@ def download_marker_payload(target: DownloadTarget, sha256: str | None = None) -
     }
 
 
-def download_marker_matches(actual_repo_root: str, target: DownloadTarget) -> bool:
+def download_marker_matches(
+    actual_repo_root: str,
+    target: DownloadTarget,
+    expected_sha256: str | None = None,
+) -> bool:
     try:
         with open(download_marker_path(actual_repo_root, target), "r", encoding="utf-8") as f:
             marker = json.load(f)
     except (OSError, json.JSONDecodeError):
         return False
-    expected = download_marker_payload(target)
-    if target.sha256.lower() != ZERO_SHA256:
+    expected = download_marker_payload(target, expected_sha256)
+    if expected_sha256 is not None or target.sha256.lower() != ZERO_SHA256:
         return marker == expected
     for key in ("tool", "version", "target", "url", "archive", "executable"):
         if marker.get(key) != expected[key]:
@@ -488,18 +498,21 @@ def ensure_download_target(
     target: DownloadTarget,
     dry_run: bool,
     stats: Stats,
+    download_mode: str = "auto",
 ) -> None:
     executable_path = download_executable_path(actual_repo_root, target)
     root = download_root(actual_repo_root, target)
-    if (
-        os.path.isfile(executable_path)
-        and os.access(executable_path, os.X_OK)
-        and download_marker_matches(actual_repo_root, target)
-    ):
-        print_info(f"[ok] {target.tool} {target.target}")
-        if not dry_run:
-            update_current_download_link(root, target.version)
-        return
+    if download_mode != "always" and os.path.isfile(executable_path) and os.access(executable_path, os.X_OK):
+        expected_sha256 = None
+        if target.sha256.lower() != ZERO_SHA256:
+            expected_sha256 = target.sha256.lower()
+        elif not dry_run:
+            expected_sha256 = resolve_download_sha256(target)
+        if download_marker_matches(actual_repo_root, target, expected_sha256):
+            print_info(f"[ok] {target.tool} {target.target}")
+            if not dry_run:
+                update_current_download_link(root, target.version)
+            return
 
     print_info(f"[download] {target.tool} {target.target} -> {executable_path}")
     if dry_run:
@@ -533,7 +546,14 @@ def ensure_download_target(
     update_current_download_link(root, target.version)
 
 
-def ensure_managed_downloads(actual_repo_root: str, dry_run: bool, stats: Stats) -> None:
+def ensure_managed_downloads(
+    actual_repo_root: str,
+    dry_run: bool,
+    stats: Stats,
+    download_mode: str = "auto",
+) -> None:
+    if download_mode == "never":
+        return
     downloads_path = os.path.join(actual_repo_root, "downloads.json")
     targets = load_downloads_manifest(downloads_path)
     platform_name = current_platform()
@@ -542,7 +562,7 @@ def ensure_managed_downloads(actual_repo_root: str, dry_run: bool, stats: Stats)
         if target.platform != platform_name or target.arch != arch_name:
             continue
         try:
-            ensure_download_target(actual_repo_root, target, dry_run, stats)
+            ensure_download_target(actual_repo_root, target, dry_run, stats, download_mode)
         except (OSError, RuntimeError, tarfile.TarError, zipfile.BadZipFile) as exc:
             print_warning(f"[error] {target.tool}: {exc}")
             stats.errors += 1
@@ -735,6 +755,7 @@ def apply_manifest(
     force: bool = False,
     dry_run: bool = False,
     prune: bool = False,
+    download_mode: str = "auto",
 ) -> Stats:
     stats = Stats()
     mappings = load_manifest(manifest_path)
@@ -742,7 +763,7 @@ def apply_manifest(
     if not ensure_home_dotfiles_link(actual_repo_root, force, dry_run, stats):
         return stats
 
-    ensure_managed_downloads(actual_repo_root, dry_run, stats)
+    ensure_managed_downloads(actual_repo_root, dry_run, stats, download_mode)
 
     for mapping in mappings:
         if not should_include_mapping(mapping, include_optional):
@@ -771,6 +792,7 @@ def main() -> int:
             force=args.force,
             dry_run=args.dry_run,
             prune=args.prune,
+            download_mode=args.downloads,
         )
     except (OSError, RuntimeError, json.JSONDecodeError) as exc:
         print_warning(f"[error] {exc}")
