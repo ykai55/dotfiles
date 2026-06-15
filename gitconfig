@@ -11,6 +11,9 @@
 	status = always
 [core]
 	autocrlf = input
+	untrackedCache = true
+	fsmonitor = false
+	splitIndex = true
 [push]
 	autoSetupRemote = true
 [alias]
@@ -35,3 +38,5 @@ detachedHead = false
 
 [include]
 	path = ~/.gitconfig.local
+[feature]
+	manyFiles = false
