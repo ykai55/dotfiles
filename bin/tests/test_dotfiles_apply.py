@@ -673,6 +673,16 @@ class DotfilesApplyTests(CapturingTestCase):
         with mock.patch.object(self.dotfiles_apply.sys, "platform", "win32"):
             self.assertEqual(self.dotfiles_apply.current_platform(), "windows")
 
+    def test_repo_downloads_manifest_targets_linux_and_macos_only(self):
+        manifest_path = pathlib.Path(__file__).resolve().parents[2] / "downloads.json"
+
+        targets = self.dotfiles_apply.load_downloads_manifest(str(manifest_path))
+
+        self.assertEqual(
+            [target.target for target in targets],
+            ["linux-x86_64-musl", "macos-aarch64"],
+        )
+
     def test_repo_default_manifest_is_valid(self):
         manifest_path = pathlib.Path(__file__).resolve().parents[2] / "dotfiles-map.json"
         schema_path = pathlib.Path(__file__).resolve().parents[2] / "dotfiles-map.schema.json"
