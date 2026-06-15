@@ -27,7 +27,7 @@ const readConfigFile = async (filePath: string) => {
   )
 }
 
-const readPluginConfig = () => readConfigFile(`${dirname(fileURLToPath(import.meta.url))}/lark-notify.conf`)
+const readPluginConfig = () => readConfigFile(`${dirname(dirname(fileURLToPath(import.meta.url)))}/chat-notify.conf`)
 
 const conf = (values: Record<string, string>, key: string) => values[key]?.trim()
 
@@ -179,6 +179,18 @@ const patchPaths = (input: unknown) => {
   const patch = prop(input, "patch")
   if (typeof patch !== "string") return []
   return Array.from(patch.matchAll(/^\*\*\* (?:Add File|Update File|Delete File): (.+)$/gm), (match) => match[1])
+}
+
+const syntheticText = (value: string) => {
+  const text = value.trimStart()
+  return (
+    /^Called the .+ tool with the following input:/.test(text) ||
+    text.startsWith("<path>") ||
+    text.startsWith("<type>") ||
+    text.startsWith("<content>") ||
+    text.startsWith("Read tool failed to read") ||
+    text.startsWith("Referenced configured reference ")
+  )
 }
 
 const larkText = (text: string) => JSON.stringify({ text })
@@ -526,7 +538,14 @@ export default (async (input, options) => {
       const current = stats(sessionID)
       if (current.userPartIDs.has(partID) || current.ignoredPartIDs.has(partID)) return
       const text = prop(part, "text")
-      if (typeof text === "string") current.textByPart.set(partID, text)
+      if (typeof text === "string") {
+        if (syntheticText(text)) {
+          current.ignoredPartIDs.add(partID)
+          current.textByPart.delete(partID)
+          return
+        }
+        current.textByPart.set(partID, text)
+      }
       return
     }
     if (partType === "tool") {
@@ -549,6 +568,7 @@ export default (async (input, options) => {
     const current = statsBySession.get(sessionID)
     const output = truncate(
       Array.from(current?.textByPart.values() ?? [])
+        .filter((text) => !syntheticText(text))
         .join("\n\n")
         .trim() || "(no text output)",
       maxOutputChars,
@@ -733,6 +753,7 @@ export default (async (input, options) => {
     const text = larkMessageText(message)
     if (!text) return
 
+    insertSentMessage.run(messageID, Date.now())
     const result = await input.client.session.promptAsync({
       path: { id: target.sessionID },
       query: { directory: target.directory },
@@ -859,7 +880,13 @@ export default (async (input, options) => {
             return
           const current = stats(sessionID)
           if (current.userPartIDs.has(partID) || current.ignoredPartIDs.has(partID)) return
-          current.textByPart.set(partID, `${current.textByPart.get(partID) ?? ""}${delta}`)
+          const next = `${current.textByPart.get(partID) ?? ""}${delta}`
+          if (syntheticText(next)) {
+            current.ignoredPartIDs.add(partID)
+            current.textByPart.delete(partID)
+            return
+          }
+          current.textByPart.set(partID, next)
           return
         }
 
