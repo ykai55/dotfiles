@@ -1,20 +1,68 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-meminfo_path=${TMUX_MEMINFO_PATH:-/proc/meminfo}
-
-awk '
-  /MemTotal/ { total = $2 }
-  /MemAvailable/ { available = $2 }
-  END {
-    if (total > 0) {
-      used = total - available
-      percent = used / total * 100
-      if (percent >= 90) {
-        printf "#[fg=#d70000]%02.0f%%#[fg=#8a8a8a]", percent
-      } else {
-        printf "%02.0f%%", percent
+print_percent() {
+  awk -v total="$1" -v available="$2" '
+    BEGIN {
+      if (total > 0) {
+        used = total - available
+        percent = used / total * 100
+        if (percent >= 90) {
+          printf "#[fg=#d70000]%02.0f%%#[fg=#8a8a8a]", percent
+        } else {
+          printf "%02.0f%%", percent
+        }
       }
     }
-  }
-' "$meminfo_path"
+  '
+}
+
+print_linux_percent() {
+  local meminfo_path values total available
+  meminfo_path=${TMUX_MEMINFO_PATH:-/proc/meminfo}
+
+  values=$(awk '
+    /MemTotal/ { total = $2 }
+    /MemAvailable/ { available = $2 }
+    END {
+      print total, available
+    }
+  ' "$meminfo_path"
+  )
+  read -r total available <<<"$values"
+  print_percent "$total" "$available"
+}
+
+print_macos_percent() {
+  local total available
+  total=$(sysctl -n hw.memsize)
+  available=$(vm_stat | awk '
+    /page size of/ {
+      for (i = 1; i <= NF; i++) {
+        if ($i == "of") {
+          page_size = $(i + 1)
+          gsub(/[^0-9]/, "", page_size)
+        }
+      }
+    }
+    /Pages free:/ { free = $3; gsub(/[^0-9]/, "", free) }
+    /Pages inactive:/ { inactive = $3; gsub(/[^0-9]/, "", inactive) }
+    /Pages speculative:/ { speculative = $3; gsub(/[^0-9]/, "", speculative) }
+    END {
+      if (page_size > 0) {
+        print (free + inactive + speculative) * page_size
+      }
+    }
+  ')
+
+  print_percent "$total" "$available"
+}
+
+case "$(uname -s)" in
+  Darwin)
+    print_macos_percent
+    ;;
+  *)
+    print_linux_percent
+    ;;
+esac
