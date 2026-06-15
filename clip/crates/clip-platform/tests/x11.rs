@@ -44,7 +44,10 @@ fn xclip_write_uses_type_flag_for_custom_mime() {
 
     let calls = runner.calls.lock().unwrap();
     assert_eq!(calls[0].program, "xclip");
-    assert_eq!(calls[0].args, vec!["-selection", "clipboard", "-t", "text/html", "-i"]);
+    assert_eq!(
+        calls[0].args,
+        vec!["-selection", "clipboard", "-t", "text/html", "-i"]
+    );
 }
 
 #[test]
@@ -116,7 +119,10 @@ fn xsel_list_types_reports_unsupported() {
 
     let err = backend.list_types().unwrap_err();
 
-    assert_eq!(err.to_string(), "xsel backend does not support listing clipboard MIME types");
+    assert_eq!(
+        err.to_string(),
+        "xsel backend does not support listing clipboard MIME types"
+    );
     assert!(!backend.capabilities().supports_type_listing);
 }
 

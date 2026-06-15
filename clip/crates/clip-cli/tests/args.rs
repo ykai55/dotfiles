@@ -11,7 +11,10 @@ fn run_error(argv: impl IntoIterator<Item = &'static str>) -> String {
 fn set_rejects_conflicting_input_flags() {
     let cli = Cli::try_parse_from(["clip", "set", "hello", "--input", "note.txt"]).unwrap();
     let err = validate(&cli).unwrap_err();
-    assert_eq!(err.to_string(), "set accepts exactly one of positional text, stdin, or --input");
+    assert_eq!(
+        err.to_string(),
+        "set accepts exactly one of positional text, stdin, or --input"
+    );
 }
 
 #[test]

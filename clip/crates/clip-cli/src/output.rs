@@ -22,9 +22,8 @@ pub fn write_output(blob: ClipboardBlob, output: Option<&Path>) -> Result<(), Cl
                 }
                 Ok(())
             } else {
-                let path = output.ok_or_else(|| {
-                    ClipError::config("binary clipboard reads require --output")
-                })?;
+                let path = output
+                    .ok_or_else(|| ClipError::config("binary clipboard reads require --output"))?;
                 fs::write(path, data)?;
                 Ok(())
             }

@@ -64,7 +64,11 @@ fn set_text_uses_wayland_commands() {
 
     let args_path = temp.path().join("args.txt");
     let stdin_path = temp.path().join("stdin.txt");
-    let path = format!("{}:{}", temp.path().display(), std::env::var("PATH").unwrap());
+    let path = format!(
+        "{}:{}",
+        temp.path().display(),
+        std::env::var("PATH").unwrap()
+    );
 
     command_with_tty(&temp, "set-text", &["set", "hello", "--target", "wayland"])
         .env("WAYLAND_DISPLAY", "wayland-0")
@@ -74,7 +78,10 @@ fn set_text_uses_wayland_commands() {
         .assert()
         .success();
 
-    assert_eq!(fs::read_to_string(args_path).unwrap(), "--type text/plain\n");
+    assert_eq!(
+        fs::read_to_string(args_path).unwrap(),
+        "--type text/plain\n"
+    );
     assert_eq!(fs::read_to_string(stdin_path).unwrap(), "hello");
 }
 
@@ -90,7 +97,11 @@ fn set_rejects_positional_text_when_stdin_is_piped() {
 
     let args_path = temp.path().join("args.txt");
     let stdin_path = temp.path().join("stdin.txt");
-    let path = format!("{}:{}", temp.path().display(), std::env::var("PATH").unwrap());
+    let path = format!(
+        "{}:{}",
+        temp.path().display(),
+        std::env::var("PATH").unwrap()
+    );
 
     Command::cargo_bin("clip")
         .unwrap()
@@ -121,7 +132,11 @@ fn set_rejects_input_file_when_stdin_is_piped() {
     fs::write(&fixture, "from file").unwrap();
     let args_path = temp.path().join("args.txt");
     let stdin_path = temp.path().join("stdin.txt");
-    let path = format!("{}:{}", temp.path().display(), std::env::var("PATH").unwrap());
+    let path = format!(
+        "{}:{}",
+        temp.path().display(),
+        std::env::var("PATH").unwrap()
+    );
 
     Command::cargo_bin("clip")
         .unwrap()
@@ -156,7 +171,11 @@ fn set_accepts_empty_piped_stdin_for_text() {
 
     let args_path = temp.path().join("args.txt");
     let stdin_path = temp.path().join("stdin.txt");
-    let path = format!("{}:{}", temp.path().display(), std::env::var("PATH").unwrap());
+    let path = format!(
+        "{}:{}",
+        temp.path().display(),
+        std::env::var("PATH").unwrap()
+    );
 
     Command::cargo_bin("clip")
         .unwrap()
@@ -169,7 +188,10 @@ fn set_accepts_empty_piped_stdin_for_text() {
         .assert()
         .success();
 
-    assert_eq!(fs::read_to_string(args_path).unwrap(), "--type text/plain\n");
+    assert_eq!(
+        fs::read_to_string(args_path).unwrap(),
+        "--type text/plain\n"
+    );
     assert_eq!(fs::read(stdin_path).unwrap(), b"");
 }
 
@@ -185,7 +207,11 @@ fn set_accepts_empty_piped_stdin_for_typed_bytes() {
 
     let args_path = temp.path().join("args.txt");
     let stdin_path = temp.path().join("stdin.bin");
-    let path = format!("{}:{}", temp.path().display(), std::env::var("PATH").unwrap());
+    let path = format!(
+        "{}:{}",
+        temp.path().display(),
+        std::env::var("PATH").unwrap()
+    );
 
     Command::cargo_bin("clip")
         .unwrap()
@@ -206,8 +232,16 @@ fn set_accepts_empty_piped_stdin_for_typed_bytes() {
 fn types_prints_detected_mime_values() {
     let temp = TempDir::new().unwrap();
     write_script(&temp, "wl-copy", "#!/usr/bin/env bash\nexit 0\n");
-    write_script(&temp, "wl-paste", "#!/usr/bin/env bash\nprintf 'text/plain\ntext/html\n'\n");
-    let path = format!("{}:{}", temp.path().display(), std::env::var("PATH").unwrap());
+    write_script(
+        &temp,
+        "wl-paste",
+        "#!/usr/bin/env bash\nprintf 'text/plain\ntext/html\n'\n",
+    );
+    let path = format!(
+        "{}:{}",
+        temp.path().display(),
+        std::env::var("PATH").unwrap()
+    );
 
     Command::cargo_bin("clip")
         .unwrap()
@@ -229,11 +263,21 @@ fn get_text_can_write_to_an_output_file() {
         "#!/usr/bin/env bash\nprintf 'hello from backend'\n",
     );
     let output = temp.path().join("out.txt");
-    let path = format!("{}:{}", temp.path().display(), std::env::var("PATH").unwrap());
+    let path = format!(
+        "{}:{}",
+        temp.path().display(),
+        std::env::var("PATH").unwrap()
+    );
 
     Command::cargo_bin("clip")
         .unwrap()
-        .args(["get", "--output", output.to_str().unwrap(), "--target", "wayland"])
+        .args([
+            "get",
+            "--output",
+            output.to_str().unwrap(),
+            "--target",
+            "wayland",
+        ])
         .env("WAYLAND_DISPLAY", "wayland-0")
         .env("PATH", path)
         .assert()
@@ -251,7 +295,11 @@ fn get_missing_default_text_fails() {
         "wl-paste",
         "#!/usr/bin/env bash\nprintf 'text/plain is not available in the clipboard\n' >&2\nexit 1\n",
     );
-    let path = format!("{}:{}", temp.path().display(), std::env::var("PATH").unwrap());
+    let path = format!(
+        "{}:{}",
+        temp.path().display(),
+        std::env::var("PATH").unwrap()
+    );
 
     Command::cargo_bin("clip")
         .unwrap()
@@ -274,7 +322,11 @@ fn get_missing_typed_text_fails() {
         "wl-paste",
         "#!/usr/bin/env bash\nprintf 'text/plain is not available in the clipboard\n' >&2\nexit 1\n",
     );
-    let path = format!("{}:{}", temp.path().display(), std::env::var("PATH").unwrap());
+    let path = format!(
+        "{}:{}",
+        temp.path().display(),
+        std::env::var("PATH").unwrap()
+    );
 
     Command::cargo_bin("clip")
         .unwrap()
@@ -298,7 +350,11 @@ fn get_png_writes_binary_output() {
         "#!/usr/bin/env bash\nprintf '\\x89PNG\\x0d\\x0a'\n",
     );
     let output = temp.path().join("out.png");
-    let path = format!("{}:{}", temp.path().display(), std::env::var("PATH").unwrap());
+    let path = format!(
+        "{}:{}",
+        temp.path().display(),
+        std::env::var("PATH").unwrap()
+    );
 
     Command::cargo_bin("clip")
         .unwrap()
@@ -329,7 +385,11 @@ fn get_missing_binary_type_fails_without_writing_output_file() {
         "#!/usr/bin/env bash\nprintf 'image/png is not available in the clipboard\n' >&2\nexit 1\n",
     );
     let output = temp.path().join("out.png");
-    let path = format!("{}:{}", temp.path().display(), std::env::var("PATH").unwrap());
+    let path = format!(
+        "{}:{}",
+        temp.path().display(),
+        std::env::var("PATH").unwrap()
+    );
 
     Command::cargo_bin("clip")
         .unwrap()
@@ -362,7 +422,11 @@ fn get_typed_text_plain_prints_to_stdout_without_output_file() {
         "wl-paste",
         "#!/usr/bin/env bash\nprintf 'hello typed text'\n",
     );
-    let path = format!("{}:{}", temp.path().display(), std::env::var("PATH").unwrap());
+    let path = format!(
+        "{}:{}",
+        temp.path().display(),
+        std::env::var("PATH").unwrap()
+    );
 
     Command::cargo_bin("clip")
         .unwrap()
@@ -378,12 +442,12 @@ fn get_typed_text_plain_prints_to_stdout_without_output_file() {
 fn get_text_prints_unicode_to_stdout_without_escaping() {
     let temp = TempDir::new().unwrap();
     write_script(&temp, "wl-copy", "#!/usr/bin/env bash\nexit 0\n");
-    write_script(
-        &temp,
-        "wl-paste",
-        "#!/usr/bin/env bash\nprintf '中文'\n",
+    write_script(&temp, "wl-paste", "#!/usr/bin/env bash\nprintf '中文'\n");
+    let path = format!(
+        "{}:{}",
+        temp.path().display(),
+        std::env::var("PATH").unwrap()
     );
-    let path = format!("{}:{}", temp.path().display(), std::env::var("PATH").unwrap());
 
     Command::cargo_bin("clip")
         .unwrap()
@@ -409,7 +473,11 @@ fn set_html_file_uses_mime_and_raw_bytes() {
     fs::write(&fixture, "<b>fixture</b>").unwrap();
     let args_path = temp.path().join("args.txt");
     let stdin_path = temp.path().join("stdin.bin");
-    let path = format!("{}:{}", temp.path().display(), std::env::var("PATH").unwrap());
+    let path = format!(
+        "{}:{}",
+        temp.path().display(),
+        std::env::var("PATH").unwrap()
+    );
 
     command_with_tty(
         &temp,
@@ -424,12 +492,12 @@ fn set_html_file_uses_mime_and_raw_bytes() {
             "wayland",
         ],
     )
-        .env("WAYLAND_DISPLAY", "wayland-0")
-        .env("PATH", path)
-        .env("CLIP_TEST_ARGS", &args_path)
-        .env("CLIP_TEST_STDIN", &stdin_path)
-        .assert()
-        .success();
+    .env("WAYLAND_DISPLAY", "wayland-0")
+    .env("PATH", path)
+    .env("CLIP_TEST_ARGS", &args_path)
+    .env("CLIP_TEST_STDIN", &stdin_path)
+    .assert()
+    .success();
 
     assert_eq!(fs::read_to_string(args_path).unwrap(), "--type text/html\n");
     assert_eq!(fs::read(stdin_path).unwrap(), b"<b>fixture</b>");
@@ -439,8 +507,16 @@ fn set_html_file_uses_mime_and_raw_bytes() {
 fn omitted_target_detection_matches_host_platform() {
     let temp = TempDir::new().unwrap();
     write_script(&temp, "wl-copy", "#!/usr/bin/env bash\nexit 0\n");
-    write_script(&temp, "wl-paste", "#!/usr/bin/env bash\nprintf 'text/plain\n'\n");
-    let path = format!("{}:{}", temp.path().display(), std::env::var("PATH").unwrap());
+    write_script(
+        &temp,
+        "wl-paste",
+        "#!/usr/bin/env bash\nprintf 'text/plain\n'\n",
+    );
+    let path = format!(
+        "{}:{}",
+        temp.path().display(),
+        std::env::var("PATH").unwrap()
+    );
 
     let assert = Command::cargo_bin("clip")
         .unwrap()
@@ -455,6 +531,8 @@ fn omitted_target_detection_matches_host_platform() {
     } else if cfg!(target_os = "linux") {
         assert.success().stdout("text/plain\n");
     } else {
-        assert.failure().stderr(predicate::str::contains("unsupported host os"));
+        assert
+            .failure()
+            .stderr(predicate::str::contains("unsupported host os"));
     }
 }

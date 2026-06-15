@@ -60,8 +60,8 @@ fn is_executable(path: &std::path::Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::{fs, PathBuf};
     use super::{EnvProbe, RealEnvProbe};
-    use super::{PathBuf, fs};
     use std::env;
     use std::ffi::OsString;
     use std::sync::{Mutex, OnceLock};

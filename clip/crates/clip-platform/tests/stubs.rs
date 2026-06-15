@@ -23,14 +23,21 @@ impl EnvProbe for FakeEnv {
 #[test]
 fn targets_all_includes_stub_backends() {
     let env = FakeEnv;
-    assert_eq!(available_targets(&env, true), vec![TargetKind::Windows, TargetKind::Adb]);
+    assert_eq!(
+        available_targets(&env, true),
+        vec![TargetKind::Windows, TargetKind::Adb]
+    );
 }
 
 #[test]
 fn windows_backend_returns_not_implemented_error() {
-    let backend =
-        resolve_backend(&FakeEnv, Arc::new(ProcessCommandRunner), Some(TargetKind::Windows), None)
-            .unwrap();
+    let backend = resolve_backend(
+        &FakeEnv,
+        Arc::new(ProcessCommandRunner),
+        Some(TargetKind::Windows),
+        None,
+    )
+    .unwrap();
     let err = backend.read(ReadRequest::text()).unwrap_err();
     assert_eq!(err.to_string(), "windows backend is not implemented yet");
 }
