@@ -1,8 +1,9 @@
 # AGENTS
 
-This repository is a personal dotfiles collection with a small set of scripts
-in `bin/` (bash, Python, perl). There is no centralized build system or lint
-configuration; most scripts are standalone.
+This repository is a personal dotfiles collection. Most tooling lives in
+standalone scripts under `bin/` (bash, Python, perl), with a few focused
+subprojects such as `ha_helper/` and `opencode/`. There is no centralized build
+system or lint configuration.
 
 ## Build / Lint / Test
 
@@ -14,15 +15,20 @@ Lint
 
 Tests (Python)
 - After any code change, run the relevant unittest(s).
-- Run all main tests (one command):
-  `python -m unittest bin/tests/test_tmux_load.py bin/tests/test_tmux_dump.py bin/tests/test_tbox.py bin/tests/test_tbox_integration.py`
-- Additional test files (run separately):
-  - `bin/tests/test_dotfiles_apply.py` — tests for `dotfiles-apply` script
-  - `bin/tests/test_apply_env.py` — tests for fish `apply_env.fish` function
+- Run all `bin/` Python tests:
+  `python -m unittest discover -s bin/tests -p 'test_*.py'`
 - Run a single test:
   `python -m unittest bin.tests.test_tmux_load.TmuxLoadWindowRestoreTests.test_restore_new_session_creates_all_windows`
   (Use dotted module path with `python -m unittest`; avoid running test files
   directly as scripts since they may fail on module resolution.)
+
+Tests (Rust)
+- `ha_helper/` is an independent Rust crate. After Rust changes, run:
+  `cargo test --manifest-path ha_helper/Cargo.toml`
+
+Subdirectory instructions
+- More specific `AGENTS.md` files exist under some subdirectories. Follow the
+  nearest one for work in that subtree.
 
 ## Repository Layout
 
@@ -35,8 +41,12 @@ Tests (Python)
 - `kitty.conf`, `gitconfig`: app configs.
 - `dotfiles-map.json`: manifest mapping repo files to install targets;
   consumed by `bin/dotfiles-apply`.
+- `downloads.json`, `downloads.schema.json`: downloaded binary/tool manifest
+  and schema used by `bin/dotfiles-apply`.
+- `opencode/`: opencode config, plugins, skills, and service/container helpers.
+- `ha_helper/`: independent Rust crate for OpenWrt WiFi presence to MQTT.
+- `scripts/`: helper scripts for building static tools.
 - `tmux-box.md`: tbox usage and workflow documentation.
-
 
 ## Code Style Guidelines
 
@@ -44,6 +54,10 @@ General
 - Prefer minimal, direct changes; these scripts are small and focused.
 - Keep changes ASCII-only unless the file already contains non-ASCII.
 - Use descriptive variable names; avoid unnecessary abbreviations.
+- Do not run broad content searches from large scopes such as the home directory
+  or filesystem root by default. Filename searches are fine; content/string
+  matching over those scopes requires either an explicit user request or prior
+  user approval.
 
 Python (tmux-dump, tmux-load)
 - Shebang: `#!/usr/bin/env python3`.
@@ -115,4 +129,15 @@ Config files (fish, nvim, tmux, kitty)
 - `tmux-dump` schema reference: `tmux-dump.d.ts`.
 - When changing tbox commands, update `tmux-box.md`.
 
+## clip Wrapper Notes
 
+- `bin/clip` is a Bash wrapper around the downloaded `clip` binary under
+  `bin/.downloads/clip/current/<platform>/`.
+- Supported targets are macOS arm64 (`macos-aarch64`), Linux x86_64
+  (`linux-x86_64-musl`), and Windows x86_64 (`windows-x86_64-gnu`).
+- On macOS arm64, the wrapper also exports `CLIP_MACOS_HELPER` pointing at the
+  downloaded `clip-macos-helper` executable.
+- If the binary or helper is missing, the user-facing recovery is to run
+  `bin/dotfiles-apply`.
+- Keep `bin/clip` as a thin Bash wrapper: preserve `set -euo pipefail`, quote
+  variables, and prefer explicit platform/architecture errors.
