@@ -16,11 +16,18 @@ impl WaylandBackend {
         Self { runner }
     }
 
-    fn run(&self, program: &str, args: &[&str], stdin: Vec<u8>) -> Result<CommandOutput, ClipError> {
+    fn run(
+        &self,
+        program: &str,
+        args: &[&str],
+        stdin: Vec<u8>,
+        capture_output: bool,
+    ) -> Result<CommandOutput, ClipError> {
         let output = self.runner.run(CommandSpec {
             program: String::from(program),
             args: args.iter().map(|value| String::from(*value)).collect(),
             stdin,
+            capture_output,
         })?;
 
         if output.status != 0 {
@@ -53,7 +60,7 @@ impl ClipboardBackend for WaylandBackend {
     }
 
     fn list_types(&self) -> Result<Vec<MimeType>, ClipError> {
-        let output = self.run("wl-paste", &["--list-types"], Vec::new())?;
+        let output = self.run("wl-paste", &["--list-types"], Vec::new(), true)?;
         let mut values = Vec::new();
         for mime in output
             .stdout
@@ -71,26 +78,37 @@ impl ClipboardBackend for WaylandBackend {
     fn read(&self, request: ReadRequest) -> Result<ClipboardBlob, ClipError> {
         if let Some(mime) = request.mime() {
             let mime = mime.clone();
-            let output = self.run("wl-paste", &["--type", mime.as_str(), "--no-newline"], Vec::new())?;
+            let output = self.run(
+                "wl-paste",
+                &["--type", mime.as_str(), "--no-newline"],
+                Vec::new(),
+                true,
+            )?;
             return Ok(ClipboardBlob::Bytes {
                 mime,
                 data: output.stdout,
             });
         }
 
-        let output = self.run("wl-paste", &["--no-newline"], Vec::new())?;
-        Ok(ClipboardBlob::Text(String::from_utf8(output.stdout).map_err(|_| {
-            ClipError::clipboard("clipboard text is not valid UTF-8")
-        })?))
+        let output = self.run("wl-paste", &["--no-newline"], Vec::new(), true)?;
+        Ok(ClipboardBlob::Text(
+            String::from_utf8(output.stdout)
+                .map_err(|_| ClipError::clipboard("clipboard text is not valid UTF-8"))?,
+        ))
     }
 
     fn write(&self, item: &ClipboardItem) -> Result<(), ClipError> {
         match item {
             ClipboardItem::Text(text) => {
-                self.run("wl-copy", &["--type", "text/plain"], text.as_bytes().to_vec())?;
+                self.run(
+                    "wl-copy",
+                    &["--type", "text/plain"],
+                    text.as_bytes().to_vec(),
+                    false,
+                )?;
             }
             ClipboardItem::Bytes { mime, data } => {
-                self.run("wl-copy", &["--type", mime.as_str()], data.clone())?;
+                self.run("wl-copy", &["--type", mime.as_str()], data.clone(), false)?;
             }
         }
         Ok(())
