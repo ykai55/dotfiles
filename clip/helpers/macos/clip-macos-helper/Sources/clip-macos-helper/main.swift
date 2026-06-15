@@ -48,7 +48,7 @@ func parseUriList(_ payload: Data) throws -> [NSURL] {
     }
 
     let urls = try text
-        .split(whereSeparator: \Character.isNewline)
+        .split(whereSeparator: { $0.isNewline })
         .map(String.init)
         .filter { !$0.isEmpty && !$0.hasPrefix("#") }
         .map { value throws -> NSURL in

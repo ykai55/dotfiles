@@ -23,15 +23,6 @@
           "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
           "archive": "tar.gz",
           "executable": "clip"
-        },
-        {
-          "target": "windows-x86_64-gnu",
-          "platform": "windows",
-          "arch": "x86_64",
-          "url": "https://github.com/ykai55/dotfiles/releases/download/clip-v1.0.0/clip-windows-x86_64-gnu.zip",
-          "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
-          "archive": "zip",
-          "executable": "clip.exe"
         }
       ]
     }

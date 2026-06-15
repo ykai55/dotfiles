@@ -75,54 +75,12 @@ jobs:
             dist/clip-macos-aarch64.tar.gz
             dist/clip-macos-aarch64.tar.gz.sha256
 
-  build-windows:
-    name: Windows x86_64 gnu
-    runs-on: windows-2022
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Rust target
-        run: rustup target add x86_64-pc-windows-gnu
-
-      - name: Install MinGW toolchain
-        uses: msys2/setup-msys2@v2
-        with:
-          msystem: MINGW64
-          path-type: inherit
-          install: mingw-w64-x86_64-gcc
-
-      - name: Check MinGW toolchain
-        run: gcc --version
-
-      - name: Build
-        working-directory: clip
-        run: cargo build --release --target x86_64-pc-windows-gnu
-
-      - name: Package
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path dist/clip-windows-x86_64-gnu | Out-Null
-          Copy-Item clip/target/x86_64-pc-windows-gnu/release/clip.exe dist/clip-windows-x86_64-gnu/clip.exe
-          Compress-Archive -Path dist/clip-windows-x86_64-gnu/clip.exe -DestinationPath dist/clip-windows-x86_64-gnu.zip -Force
-          $hash = (Get-FileHash dist/clip-windows-x86_64-gnu.zip -Algorithm SHA256).Hash.ToLower()
-          "$hash  dist/clip-windows-x86_64-gnu.zip" | Out-File -Encoding ascii dist/clip-windows-x86_64-gnu.zip.sha256
-
-      - name: Upload build artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: clip-windows-x86_64-gnu
-          path: |
-            dist/clip-windows-x86_64-gnu.zip
-            dist/clip-windows-x86_64-gnu.zip.sha256
-
   release:
     name: Publish GitHub Release assets
     runs-on: ubuntu-24.04
     needs:
       - build-linux
       - build-macos
-      - build-windows
     if: startsWith(github.ref, 'refs/tags/clip-v')
     steps:
       - name: Download artifacts
@@ -139,5 +97,3 @@ jobs:
             dist/clip-linux-x86_64-musl.tar.gz.sha256
             dist/clip-macos-aarch64.tar.gz
             dist/clip-macos-aarch64.tar.gz.sha256
-            dist/clip-windows-x86_64-gnu.zip
-            dist/clip-windows-x86_64-gnu.zip.sha256
