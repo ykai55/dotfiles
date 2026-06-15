@@ -85,6 +85,13 @@ def load_auth(path: str) -> tuple[str, str] | None:
     except (FileNotFoundError, OSError, json.JSONDecodeError):
         return None
 
+    openai = data.get("openai")
+    if isinstance(openai, dict):
+        access_token = openai.get("access")
+        account_id = openai.get("accountId")
+        if isinstance(access_token, str) and access_token and isinstance(account_id, str) and account_id:
+            return access_token, account_id
+
     tokens = data.get("tokens")
     if not isinstance(tokens, dict):
         return None
@@ -135,7 +142,10 @@ def main() -> int:
         print(cached, end="")
         return 0
 
-    auth_file = env("TMUX_CHATGPT_USAGE_AUTH_FILE", os.path.expanduser("~/.codex/auth.json"))
+    auth_file = env(
+        "TMUX_CHATGPT_USAGE_AUTH_FILE",
+        os.path.expanduser("~/.local/share/opencode/auth.json"),
+    )
     usage_url = env("TMUX_CHATGPT_USAGE_URL", "https://chatgpt.com/backend-api/wham/usage")
     label = env("TMUX_CHATGPT_USAGE_LABEL", "")
 

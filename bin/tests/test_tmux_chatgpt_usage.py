@@ -46,6 +46,16 @@ class TmuxChatgptUsageTests(unittest.TestCase):
         )
         return path
 
+    def make_opencode_auth_file(self):
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        path = pathlib.Path(tempdir.name) / "auth.json"
+        path.write_text(
+            '{"openai":{"type":"oauth","access":"test-access","accountId":"acct-123"}}',
+            encoding="utf-8",
+        )
+        return path
+
     def start_server(self, status_code, body):
         state = {"requests": 0, "authorization": None, "account_id": None}
 
@@ -73,6 +83,21 @@ class TmuxChatgptUsageTests(unittest.TestCase):
 
     def test_formats_dual_window_usage_from_http(self):
         auth_file = self.make_auth_file()
+        url, state = self.start_server(
+            200,
+            '{"rate_limit":{"primary_window":{"used_percent":14.0},"secondary_window":{"used_percent":22.25}}}',
+        )
+
+        result = self.run_usage(auth_file, url)
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "14%/22.2%\n")
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(state["authorization"], "Bearer test-access")
+        self.assertEqual(state["account_id"], "acct-123")
+
+    def test_reads_openai_oauth_from_opencode_auth_file(self):
+        auth_file = self.make_opencode_auth_file()
         url, state = self.start_server(
             200,
             '{"rate_limit":{"primary_window":{"used_percent":14.0},"secondary_window":{"used_percent":22.25}}}',
