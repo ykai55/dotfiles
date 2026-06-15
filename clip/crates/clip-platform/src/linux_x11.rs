@@ -17,11 +17,18 @@ impl X11Backend {
         Self { tool, runner }
     }
 
-    fn run(&self, program: &str, args: &[&str], stdin: Vec<u8>) -> Result<CommandOutput, ClipError> {
+    fn run(
+        &self,
+        program: &str,
+        args: &[&str],
+        stdin: Vec<u8>,
+        capture_output: bool,
+    ) -> Result<CommandOutput, ClipError> {
         let output = self.runner.run(CommandSpec {
             program: String::from(program),
             args: args.iter().map(|value| String::from(*value)).collect(),
             stdin,
+            capture_output,
         })?;
         if output.status != 0 {
             return Err(ClipError::clipboard(
@@ -65,8 +72,12 @@ impl ClipboardBackend for X11Backend {
     fn list_types(&self) -> Result<Vec<MimeType>, ClipError> {
         match self.tool {
             X11Tool::Xclip => {
-                let output =
-                    self.run("xclip", &["-selection", "clipboard", "-o", "-t", "TARGETS"], Vec::new())?;
+                let output = self.run(
+                    "xclip",
+                    &["-selection", "clipboard", "-o", "-t", "TARGETS"],
+                    Vec::new(),
+                    true,
+                )?;
                 let mut types = Vec::new();
                 for line in output.stdout.split(|byte| *byte == b'\n') {
                     if line.is_empty() {
@@ -96,31 +107,45 @@ impl ClipboardBackend for X11Backend {
         match (&self.tool, request.mime()) {
             (X11Tool::Xclip, Some(mime)) => {
                 let mime = mime.clone();
-                let output =
-                    self.run("xclip", &["-selection", "clipboard", "-o", "-t", mime.as_str()], Vec::new())?;
+                let output = self.run(
+                    "xclip",
+                    &["-selection", "clipboard", "-o", "-t", mime.as_str()],
+                    Vec::new(),
+                    true,
+                )?;
                 Ok(ClipboardBlob::Bytes {
                     mime,
                     data: output.stdout,
                 })
             }
             (X11Tool::Xclip, None) => {
-                let output = self.run("xclip", &["-selection", "clipboard", "-o"], Vec::new())?;
-                Ok(ClipboardBlob::Text(String::from_utf8(output.stdout).map_err(|_| {
-                    ClipError::clipboard("clipboard text is not valid UTF-8")
-                })?))
+                let output = self.run(
+                    "xclip",
+                    &["-selection", "clipboard", "-o"],
+                    Vec::new(),
+                    true,
+                )?;
+                Ok(ClipboardBlob::Text(
+                    String::from_utf8(output.stdout)
+                        .map_err(|_| ClipError::clipboard("clipboard text is not valid UTF-8"))?,
+                ))
             }
             (X11Tool::Xsel, Some(mime)) if Self::is_text_plain(mime) => {
-                let output = self.run("xsel", &["--clipboard", "--output"], Vec::new())?;
-                Ok(ClipboardBlob::Text(String::from_utf8(output.stdout).map_err(|_| {
-                    ClipError::clipboard("clipboard text is not valid UTF-8")
-                })?))
+                let output = self.run("xsel", &["--clipboard", "--output"], Vec::new(), true)?;
+                Ok(ClipboardBlob::Text(
+                    String::from_utf8(output.stdout)
+                        .map_err(|_| ClipError::clipboard("clipboard text is not valid UTF-8"))?,
+                ))
             }
-            (X11Tool::Xsel, Some(_)) => Err(ClipError::clipboard("xsel backend only supports text/plain")),
+            (X11Tool::Xsel, Some(_)) => Err(ClipError::clipboard(
+                "xsel backend only supports text/plain",
+            )),
             (X11Tool::Xsel, None) => {
-                let output = self.run("xsel", &["--clipboard", "--output"], Vec::new())?;
-                Ok(ClipboardBlob::Text(String::from_utf8(output.stdout).map_err(|_| {
-                    ClipError::clipboard("clipboard text is not valid UTF-8")
-                })?))
+                let output = self.run("xsel", &["--clipboard", "--output"], Vec::new(), true)?;
+                Ok(ClipboardBlob::Text(
+                    String::from_utf8(output.stdout)
+                        .map_err(|_| ClipError::clipboard("clipboard text is not valid UTF-8"))?,
+                ))
             }
         }
     }
@@ -128,24 +153,39 @@ impl ClipboardBackend for X11Backend {
     fn write(&self, item: &ClipboardItem) -> Result<(), ClipError> {
         match (&self.tool, item) {
             (X11Tool::Xclip, ClipboardItem::Text(text)) => {
-                self.run("xclip", &["-selection", "clipboard", "-i"], text.as_bytes().to_vec())?;
+                self.run(
+                    "xclip",
+                    &["-selection", "clipboard", "-i"],
+                    text.as_bytes().to_vec(),
+                    false,
+                )?;
                 Ok(())
             }
             (X11Tool::Xclip, ClipboardItem::Bytes { mime, data }) => {
-                self.run("xclip", &["-selection", "clipboard", "-t", mime.as_str(), "-i"], data.clone())?;
+                self.run(
+                    "xclip",
+                    &["-selection", "clipboard", "-t", mime.as_str(), "-i"],
+                    data.clone(),
+                    false,
+                )?;
                 Ok(())
             }
             (X11Tool::Xsel, ClipboardItem::Text(text)) => {
-                self.run("xsel", &["--clipboard", "--input"], text.as_bytes().to_vec())?;
+                self.run(
+                    "xsel",
+                    &["--clipboard", "--input"],
+                    text.as_bytes().to_vec(),
+                    false,
+                )?;
                 Ok(())
             }
             (X11Tool::Xsel, ClipboardItem::Bytes { mime, data }) if Self::is_text_plain(mime) => {
-                self.run("xsel", &["--clipboard", "--input"], data.clone())?;
+                self.run("xsel", &["--clipboard", "--input"], data.clone(), false)?;
                 Ok(())
             }
-            (X11Tool::Xsel, ClipboardItem::Bytes { .. }) => {
-                Err(ClipError::clipboard("xsel backend only supports text/plain"))
-            }
+            (X11Tool::Xsel, ClipboardItem::Bytes { .. }) => Err(ClipError::clipboard(
+                "xsel backend only supports text/plain",
+            )),
         }
     }
 }

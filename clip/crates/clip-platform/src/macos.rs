@@ -19,11 +19,17 @@ impl MacOsBackend {
         Self { runner, helper }
     }
 
-    fn run(&self, args: &[&str], stdin: Vec<u8>) -> Result<CommandOutput, ClipError> {
+    fn run(
+        &self,
+        args: &[&str],
+        stdin: Vec<u8>,
+        capture_output: bool,
+    ) -> Result<CommandOutput, ClipError> {
         let output = self.runner.run(CommandSpec {
             program: self.helper.display().to_string(),
             args: args.iter().map(|value| String::from(*value)).collect(),
             stdin,
+            capture_output,
         })?;
         if output.status != 0 {
             return Err(ClipError::clipboard(
@@ -116,7 +122,7 @@ impl ClipboardBackend for MacOsBackend {
     }
 
     fn list_types(&self) -> Result<Vec<MimeType>, ClipError> {
-        let output = self.run(&["types"], Vec::new())?;
+        let output = self.run(&["types"], Vec::new(), true)?;
         let mut values = Vec::new();
         for mime in output
             .stdout
@@ -137,29 +143,34 @@ impl ClipboardBackend for MacOsBackend {
                 return Err(Self::unsupported_type_error());
             }
             let mime = mime.clone();
-            let output = self.run(&["read", "--type", mime.as_str()], Vec::new())?;
+            let output = self.run(&["read", "--type", mime.as_str()], Vec::new(), true)?;
             return Ok(ClipboardBlob::Bytes {
                 mime,
                 data: output.stdout,
             });
         }
 
-        let output = self.run(&["read", "--type", "text/plain"], Vec::new())?;
-        Ok(ClipboardBlob::Text(String::from_utf8(output.stdout).map_err(
-            |_| ClipError::clipboard("clipboard text is not valid UTF-8"),
-        )?))
+        let output = self.run(&["read", "--type", "text/plain"], Vec::new(), true)?;
+        Ok(ClipboardBlob::Text(
+            String::from_utf8(output.stdout)
+                .map_err(|_| ClipError::clipboard("clipboard text is not valid UTF-8"))?,
+        ))
     }
 
     fn write(&self, item: &ClipboardItem) -> Result<(), ClipError> {
         match item {
             ClipboardItem::Text(text) => {
-                self.run(&["write", "--type", "text/plain"], text.as_bytes().to_vec())?;
+                self.run(
+                    &["write", "--type", "text/plain"],
+                    text.as_bytes().to_vec(),
+                    false,
+                )?;
             }
             ClipboardItem::Bytes { mime, data } => {
                 if !Self::supports_mime(mime) {
                     return Err(Self::unsupported_type_error());
                 }
-                self.run(&["write", "--type", mime.as_str()], data.clone())?;
+                self.run(&["write", "--type", mime.as_str()], data.clone(), false)?;
             }
         }
         Ok(())
