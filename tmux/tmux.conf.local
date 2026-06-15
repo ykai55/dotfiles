@@ -411,10 +411,15 @@ bind m run "cut -c3- '#{TMUX_CONF}' | sh -s _toggle_mouse" \; display 'mouse #{?
 # move status line to top
 #set -g status-position top
 
-# show tmux status as two lines: windows above, details below
-set -g status 2
-set -g status-format[0] "#[fg=$tmux_conf_theme_colour_6,bg=$tmux_conf_theme_colour_9,bold] ❐ #S#[fg=$tmux_conf_theme_colour_9,bg=$tmux_conf_theme_status_bg,none] #{W:#{E:window-status-format},#{E:window-status-current-format}}#[default]"
-set -g status-format[1] "#[align=left fg=$tmux_conf_theme_colour_13,bg=$tmux_conf_theme_colour_16] #[fg=$tmux_conf_theme_status_fg,bg=$tmux_conf_theme_status_bg,$tmux_conf_theme_status_attr] #{?client_prefix,⌨ ,}#{?session_many_attached,⚇ ,}#{?pane_synchronized,⚏ ,}#{?battery_percentage, #{battery_percentage},}🔋 · 󰚩 #(~/dotfiles/bin/tmux-chatgpt-usage) ·  #(~/dotfiles/bin/tmux-docker-running-count) ·  #(~/dotfiles/bin/tmux-cpu-percent) ·  #(~/dotfiles/bin/tmux-mem-available-percent) #[default]#[align=right fg=$tmux_conf_theme_status_fg,bg=$tmux_conf_theme_status_bg,$tmux_conf_theme_status_attr]#(~/dotfiles/bin/tmux-date) %R #[default]"
+# show tmux status as one line on wide clients, two lines otherwise
+set -g @status_window_line "#[fg=$tmux_conf_theme_colour_6,bg=$tmux_conf_theme_colour_9,bold] ❐ #S#[fg=$tmux_conf_theme_colour_9,bg=$tmux_conf_theme_status_bg,none] #{W:#{E:window-status-format},#{E:window-status-current-format}}#[default]"
+set -g @status_detail_line "#[align=left fg=$tmux_conf_theme_colour_13,bg=$tmux_conf_theme_colour_16] #[fg=$tmux_conf_theme_status_fg,bg=$tmux_conf_theme_status_bg,$tmux_conf_theme_status_attr] #{?client_prefix,⌨ ,}#{?session_many_attached,⚇ ,}#{?pane_synchronized,⚏ ,}#{?battery_percentage, #{battery_percentage},}🔋 · 󰚩 #(~/dotfiles/bin/tmux-chatgpt-usage) ·  #(~/dotfiles/bin/tmux-docker-running-count) ·  #(~/dotfiles/bin/tmux-cpu-percent)  #(~/dotfiles/bin/tmux-mem-available-percent) 󰋊 #(~/dotfiles/bin/tmux-root-disk-usage) #[default]#[align=right fg=$tmux_conf_theme_status_fg,bg=$tmux_conf_theme_status_bg,$tmux_conf_theme_status_attr]#(~/dotfiles/bin/tmux-date) %R #[default]"
+set -g @status_wide_line "#{E:@status_window_line}#[align=right fg=$tmux_conf_theme_status_fg,bg=$tmux_conf_theme_status_bg,$tmux_conf_theme_status_attr]#{?client_prefix,⌨ ,}#{?session_many_attached,⚇ ,}#{?pane_synchronized,⚏ ,}#{?battery_percentage, #{battery_percentage} ,}🔋 · 󰚩 #(~/dotfiles/bin/tmux-chatgpt-usage) ·  #(~/dotfiles/bin/tmux-docker-running-count) ·  #(~/dotfiles/bin/tmux-cpu-percent)  #(~/dotfiles/bin/tmux-mem-available-percent) 󰋊 #(~/dotfiles/bin/tmux-root-disk-usage) · #(~/dotfiles/bin/tmux-date) %R #[default]"
+set -g status-format[0] "#{?#{e|>|:#{client_width},130},#{E:@status_wide_line},#{E:@status_window_line}}"
+set -g status-format[1] "#{E:@status_detail_line}"
+if -F '#{e|>|:#{client_width},130}' 'set status on' 'set status 2'
+set-hook -g client-attached "if -F '#{e|>|:#{client_width},130}' 'set status on' 'set status 2'"
+set-hook -g client-resized "if -F '#{e|>|:#{client_width},130}' 'set status on' 'set status 2'"
 
 # -- tpm -----------------------------------------------------------------------
 
