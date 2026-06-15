@@ -3,15 +3,25 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
+import hashlib
 import json
+import ntpath
 import os
+import platform
+import re
 import shutil
+import string
 import sys
+import tarfile
+import tempfile
+import urllib.request
+import zipfile
 from dataclasses import dataclass, field
 from typing import Sequence
 
 
 DEFAULT_MANIFEST = "dotfiles-map.json"
+ZERO_SHA256 = "0" * 64
 
 
 @dataclass
@@ -23,6 +33,19 @@ class Mapping:
     exclude: list[str] = field(default_factory=list)
     optional: bool = False
     platforms: list[str] = field(default_factory=list)
+
+
+@dataclass
+class DownloadTarget:
+    tool: str
+    version: str
+    target: str
+    platform: str
+    arch: str
+    url: str
+    sha256: str
+    archive: str
+    executable: str
 
 
 @dataclass
@@ -48,7 +71,18 @@ def current_platform() -> str:
         return "macos"
     if sys.platform.startswith("linux"):
         return "linux"
+    if sys.platform.startswith("win") or sys.platform.startswith(("cygwin", "msys")):
+        return "windows"
     return sys.platform
+
+
+def current_machine_arch() -> str:
+    machine = platform.machine().lower()
+    if machine in {"x86_64", "amd64"}:
+        return "x86_64"
+    if machine in {"arm64", "aarch64"}:
+        return "aarch64"
+    return machine
 
 
 def expand_target(path: str) -> str:
@@ -108,6 +142,116 @@ def load_manifest(path: str) -> list[Mapping]:
             )
         )
     return loaded
+
+
+def load_downloads_manifest(path: str) -> list[DownloadTarget]:
+    if not os.path.exists(path):
+        return []
+    with open(path, "r", encoding="utf-8") as f:
+        raw = json.load(f)
+
+    if not isinstance(raw, dict):
+        raise RuntimeError("Downloads manifest root must be a JSON object")
+    validate_object_keys(
+        raw,
+        {"$schema", "version", "tools"},
+        "Downloads manifest has unexpected fields",
+    )
+    schema = raw.get("$schema")
+    if not isinstance(schema, str) or not schema:
+        raise RuntimeError("Downloads manifest must contain a '$schema' string")
+    if raw.get("version") != 1:
+        raise RuntimeError("Downloads manifest must contain version 1")
+    tools = raw.get("tools")
+    if not isinstance(tools, list):
+        raise RuntimeError("Downloads manifest must contain a 'tools' array")
+
+    loaded: list[DownloadTarget] = []
+    for tool_index, tool in enumerate(tools, start=1):
+        if not isinstance(tool, dict):
+            raise RuntimeError(f"Download tool #{tool_index} must be an object")
+        validate_object_keys(
+            tool,
+            {"name", "version", "targets"},
+            f"Download tool #{tool_index} has unexpected fields",
+        )
+        name = tool.get("name")
+        version = tool.get("version")
+        targets = tool.get("targets")
+        if not isinstance(name, str) or not name:
+            raise RuntimeError(f"Download tool #{tool_index} has invalid 'name'")
+        if not isinstance(version, str) or not version:
+            raise RuntimeError(f"Download tool {name} has invalid 'version'")
+        validate_download_component(name, f"Download tool #{tool_index} has invalid 'name'")
+        validate_download_component(version, f"Download tool {name} has invalid 'version'")
+        if not isinstance(targets, list):
+            raise RuntimeError(f"Download tool {name} has invalid 'targets'")
+        for target_index, item in enumerate(targets, start=1):
+            if not isinstance(item, dict):
+                raise RuntimeError(
+                    f"Download target #{target_index} for {name} must be an object"
+                )
+            target_keys = {
+                "target",
+                "platform",
+                "arch",
+                "url",
+                "sha256",
+                "archive",
+                "executable",
+            }
+            validate_object_keys(
+                item,
+                target_keys,
+                f"Download target #{target_index} for {name} has unexpected fields",
+            )
+            values = {
+                key: item.get(key)
+                for key in target_keys
+            }
+            for key, value in values.items():
+                if not isinstance(value, str) or not value:
+                    raise RuntimeError(
+                        f"Download target #{target_index} for {name} has invalid '{key}'"
+                    )
+            if values["archive"] not in {"tar.gz", "zip"}:
+                raise RuntimeError(
+                    f"Download target #{target_index} for {name} has unsupported archive"
+                )
+            validate_download_component(
+                values["target"],
+                f"Download target #{target_index} for {name} has invalid 'target'",
+            )
+            validate_download_executable(
+                values["executable"],
+                f"Download target #{target_index} for {name} has invalid 'executable'",
+            )
+            if len(values["sha256"]) != 64 or any(
+                char not in string.hexdigits for char in values["sha256"]
+            ):
+                raise RuntimeError(
+                    f"Download target #{target_index} for {name} has invalid sha256"
+                )
+            loaded.append(DownloadTarget(tool=name, version=version, **values))
+    return loaded
+
+
+def validate_object_keys(value: dict[str, object], allowed: set[str], message: str) -> None:
+    if set(value) - allowed:
+        raise RuntimeError(message)
+
+
+def validate_download_component(value: str, message: str) -> None:
+    if value in {".", ".."} or os.path.isabs(value) or "/" in value or "\\" in value:
+        raise RuntimeError(message)
+
+
+def validate_download_executable(value: str, message: str) -> None:
+    if "\\" in value or os.path.isabs(value) or ntpath.isabs(value) or ntpath.splitdrive(value)[0]:
+        raise RuntimeError(message)
+    segments = value.split("/")
+    if any(segment in {"", ".."} for segment in segments):
+        raise RuntimeError(message)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -186,6 +330,222 @@ def remove_path(path: str, dry_run: bool, stats: Stats) -> None:
         else:
             shutil.rmtree(path)
     stats.removed += 1
+
+
+def download_root(actual_repo_root: str, target: DownloadTarget) -> str:
+    return os.path.join(actual_repo_root, "bin", ".downloads", target.tool)
+
+
+def download_target_dir(actual_repo_root: str, target: DownloadTarget) -> str:
+    return os.path.join(download_root(actual_repo_root, target), target.version, target.target)
+
+
+def download_executable_path(actual_repo_root: str, target: DownloadTarget) -> str:
+    return os.path.join(download_target_dir(actual_repo_root, target), target.executable)
+
+
+def download_marker_path(actual_repo_root: str, target: DownloadTarget) -> str:
+    return os.path.join(download_target_dir(actual_repo_root, target), ".download.json")
+
+
+def download_marker_payload(target: DownloadTarget, sha256: str | None = None) -> dict[str, str]:
+    return {
+        "tool": target.tool,
+        "version": target.version,
+        "target": target.target,
+        "url": target.url,
+        "sha256": (sha256 or target.sha256).lower(),
+        "archive": target.archive,
+        "executable": target.executable,
+    }
+
+
+def download_marker_matches(actual_repo_root: str, target: DownloadTarget) -> bool:
+    try:
+        with open(download_marker_path(actual_repo_root, target), "r", encoding="utf-8") as f:
+            marker = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return False
+    expected = download_marker_payload(target)
+    if target.sha256.lower() != ZERO_SHA256:
+        return marker == expected
+    for key in ("tool", "version", "target", "url", "archive", "executable"):
+        if marker.get(key) != expected[key]:
+            return False
+    marker_sha256 = marker.get("sha256")
+    return is_valid_nonzero_sha256(marker_sha256)
+
+
+def write_download_marker_at(marker_path: str, target: DownloadTarget, sha256: str) -> None:
+    with open(marker_path, "w", encoding="utf-8") as f:
+        json.dump(download_marker_payload(target, sha256), f, sort_keys=True)
+        f.write("\n")
+
+
+def is_valid_nonzero_sha256(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and value != ZERO_SHA256
+        and all(char in string.hexdigits for char in value)
+    )
+
+
+def file_sha256(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def download_file(url: str, output_path: str) -> None:
+    with urllib.request.urlopen(url) as response, open(output_path, "wb") as f:
+        shutil.copyfileobj(response, f)
+
+
+def fetch_sha256_file(url: str) -> str:
+    with urllib.request.urlopen(url) as response:
+        content = response.read().decode("utf-8", errors="replace")
+    match = re.search(r"[0-9a-fA-F]{64}", content)
+    if not match:
+        raise RuntimeError(f"No sha256 checksum found in {url}")
+    return match.group(0).lower()
+
+
+def resolve_download_sha256(target: DownloadTarget) -> str:
+    if target.sha256.lower() != ZERO_SHA256:
+        return target.sha256.lower()
+    return fetch_sha256_file(target.url + ".sha256")
+
+
+def safe_archive_path(target_dir: str, member_name: str) -> str:
+    target_real = os.path.realpath(target_dir)
+    member_path = os.path.realpath(os.path.join(target_dir, member_name))
+    if member_path == target_real or member_path.startswith(target_real + os.sep):
+        return member_path
+    raise RuntimeError(f"Archive contains unsafe path: {member_name}")
+
+
+def extract_archive(archive_path: str, archive_type: str, target_dir: str) -> None:
+    if archive_type == "tar.gz":
+        with tarfile.open(archive_path, "r:gz") as archive:
+            for member in archive.getmembers():
+                safe_archive_path(target_dir, member.name)
+                if member.issym() or member.islnk():
+                    raise RuntimeError(f"Archive contains unsafe link: {member.name}")
+                if not (member.isfile() or member.isdir()):
+                    raise RuntimeError(f"Archive contains unsafe tar member: {member.name}")
+            archive.extractall(target_dir)
+        return
+    if archive_type == "zip":
+        with zipfile.ZipFile(archive_path) as archive:
+            for member in archive.namelist():
+                safe_archive_path(target_dir, member)
+            archive.extractall(target_dir)
+        return
+    raise RuntimeError(f"Unsupported archive type: {archive_type}")
+
+
+def update_current_download_link(root: str, version: str) -> None:
+    current = os.path.join(root, "current")
+    tmp_link = os.path.join(root, ".current.tmp")
+    if os.path.lexists(tmp_link):
+        os.remove(tmp_link)
+    os.symlink(version, tmp_link)
+    os.replace(tmp_link, current)
+
+
+def promote_download_install(extract_dir: str, final_dir: str) -> None:
+    version_dir = os.path.dirname(final_dir)
+    temp_final = tempfile.mkdtemp(prefix=f".{os.path.basename(final_dir)}.", dir=version_dir)
+    shutil.rmtree(temp_final)
+    os.replace(extract_dir, temp_final)
+
+    backup_dir = ""
+    try:
+        if os.path.exists(final_dir):
+            backup_dir = tempfile.mkdtemp(
+                prefix=f".{os.path.basename(final_dir)}.backup.",
+                dir=version_dir,
+            )
+            shutil.rmtree(backup_dir)
+            os.replace(final_dir, backup_dir)
+        os.replace(temp_final, final_dir)
+    except Exception:
+        if backup_dir and os.path.exists(backup_dir) and not os.path.exists(final_dir):
+            os.replace(backup_dir, final_dir)
+        raise
+    finally:
+        if os.path.exists(temp_final):
+            shutil.rmtree(temp_final)
+        if backup_dir and os.path.exists(backup_dir):
+            shutil.rmtree(backup_dir)
+
+
+def ensure_download_target(
+    actual_repo_root: str,
+    target: DownloadTarget,
+    dry_run: bool,
+    stats: Stats,
+) -> None:
+    executable_path = download_executable_path(actual_repo_root, target)
+    root = download_root(actual_repo_root, target)
+    if (
+        os.path.isfile(executable_path)
+        and os.access(executable_path, os.X_OK)
+        and download_marker_matches(actual_repo_root, target)
+    ):
+        print_info(f"[ok] {target.tool} {target.target}")
+        if not dry_run:
+            update_current_download_link(root, target.version)
+        return
+
+    print_info(f"[download] {target.tool} {target.target} -> {executable_path}")
+    if dry_run:
+        return
+
+    os.makedirs(root, exist_ok=True)
+    version_dir = os.path.join(root, target.version)
+    final_dir = os.path.join(version_dir, target.target)
+    with tempfile.TemporaryDirectory(prefix=f".{target.tool}-download-", dir=root) as tmpdir:
+        archive_path = os.path.join(tmpdir, "asset")
+        extract_dir = os.path.join(tmpdir, "extract")
+        os.makedirs(extract_dir, exist_ok=True)
+        download_file(target.url, archive_path)
+        expected_sha256 = resolve_download_sha256(target)
+        actual_sha256 = file_sha256(archive_path)
+        if actual_sha256 != expected_sha256:
+            raise RuntimeError(
+                f"sha256 mismatch for {target.tool} {target.target}: "
+                f"expected {expected_sha256} got {actual_sha256}"
+            )
+        extract_archive(archive_path, target.archive, extract_dir)
+        extracted_executable = os.path.join(extract_dir, target.executable)
+        if not os.path.isfile(extracted_executable):
+            raise RuntimeError(
+                f"Archive for {target.tool} {target.target} is missing {target.executable}"
+            )
+        os.chmod(extracted_executable, os.stat(extracted_executable).st_mode | 0o755)
+        os.makedirs(version_dir, exist_ok=True)
+        write_download_marker_at(os.path.join(extract_dir, ".download.json"), target, expected_sha256)
+        promote_download_install(extract_dir, final_dir)
+    update_current_download_link(root, target.version)
+
+
+def ensure_managed_downloads(actual_repo_root: str, dry_run: bool, stats: Stats) -> None:
+    downloads_path = os.path.join(actual_repo_root, "downloads.json")
+    targets = load_downloads_manifest(downloads_path)
+    platform_name = current_platform()
+    arch_name = current_machine_arch()
+    for target in targets:
+        if target.platform != platform_name or target.arch != arch_name:
+            continue
+        try:
+            ensure_download_target(actual_repo_root, target, dry_run, stats)
+        except (OSError, RuntimeError, tarfile.TarError, zipfile.BadZipFile) as exc:
+            print_warning(f"[error] {target.tool}: {exc}")
+            stats.errors += 1
 
 
 def backup_path(path: str, dry_run: bool, stats: Stats) -> str:
@@ -382,6 +742,8 @@ def apply_manifest(
     if not ensure_home_dotfiles_link(actual_repo_root, force, dry_run, stats):
         return stats
 
+    ensure_managed_downloads(actual_repo_root, dry_run, stats)
+
     for mapping in mappings:
         if not should_include_mapping(mapping, include_optional):
             continue
@@ -396,6 +758,10 @@ def apply_manifest(
 def main() -> int:
     args = build_parser().parse_args()
     actual_repo_root = repo_root()
+    downloads_path = os.path.join(actual_repo_root, "downloads.json")
+    if not os.path.exists(downloads_path):
+        print_warning(f"[error] Missing downloads manifest: {downloads_path}")
+        return 1
     manifest_path = expand_target(args.manifest)
     try:
         stats = apply_manifest(

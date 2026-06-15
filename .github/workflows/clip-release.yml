@@ -1,0 +1,143 @@
+name: Build clip release assets
+
+on:
+  push:
+    tags:
+      - "clip-v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux:
+    name: Linux x86_64 musl
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust target
+        run: rustup target add x86_64-unknown-linux-musl
+
+      - name: Install musl tools
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends musl-tools
+
+      - name: Build
+        working-directory: clip
+        run: cargo build --release --target x86_64-unknown-linux-musl
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          mkdir -p dist/clip-linux-x86_64-musl
+          cp clip/target/x86_64-unknown-linux-musl/release/clip dist/clip-linux-x86_64-musl/clip
+          tar -C dist/clip-linux-x86_64-musl -czf dist/clip-linux-x86_64-musl.tar.gz clip
+          sha256sum dist/clip-linux-x86_64-musl.tar.gz > dist/clip-linux-x86_64-musl.tar.gz.sha256
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: clip-linux-x86_64-musl
+          path: |
+            dist/clip-linux-x86_64-musl.tar.gz
+            dist/clip-linux-x86_64-musl.tar.gz.sha256
+
+  build-macos:
+    name: macOS aarch64
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build Rust CLI
+        working-directory: clip
+        run: cargo build --release
+
+      - name: Build macOS helper
+        working-directory: clip/helpers/macos/clip-macos-helper
+        run: swift build -c release
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          mkdir -p dist/clip-macos-aarch64
+          cp clip/target/release/clip dist/clip-macos-aarch64/clip
+          cp clip/helpers/macos/clip-macos-helper/.build/release/clip-macos-helper dist/clip-macos-aarch64/clip-macos-helper
+          tar -C dist/clip-macos-aarch64 -czf dist/clip-macos-aarch64.tar.gz clip clip-macos-helper
+          shasum -a 256 dist/clip-macos-aarch64.tar.gz > dist/clip-macos-aarch64.tar.gz.sha256
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: clip-macos-aarch64
+          path: |
+            dist/clip-macos-aarch64.tar.gz
+            dist/clip-macos-aarch64.tar.gz.sha256
+
+  build-windows:
+    name: Windows x86_64 gnu
+    runs-on: windows-2022
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust target
+        run: rustup target add x86_64-pc-windows-gnu
+
+      - name: Install MinGW toolchain
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          path-type: inherit
+          install: mingw-w64-x86_64-gcc
+
+      - name: Check MinGW toolchain
+        run: gcc --version
+
+      - name: Build
+        working-directory: clip
+        run: cargo build --release --target x86_64-pc-windows-gnu
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist/clip-windows-x86_64-gnu | Out-Null
+          Copy-Item clip/target/x86_64-pc-windows-gnu/release/clip.exe dist/clip-windows-x86_64-gnu/clip.exe
+          Compress-Archive -Path dist/clip-windows-x86_64-gnu/clip.exe -DestinationPath dist/clip-windows-x86_64-gnu.zip -Force
+          $hash = (Get-FileHash dist/clip-windows-x86_64-gnu.zip -Algorithm SHA256).Hash.ToLower()
+          "$hash  dist/clip-windows-x86_64-gnu.zip" | Out-File -Encoding ascii dist/clip-windows-x86_64-gnu.zip.sha256
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: clip-windows-x86_64-gnu
+          path: |
+            dist/clip-windows-x86_64-gnu.zip
+            dist/clip-windows-x86_64-gnu.zip.sha256
+
+  release:
+    name: Publish GitHub Release assets
+    runs-on: ubuntu-24.04
+    needs:
+      - build-linux
+      - build-macos
+      - build-windows
+    if: startsWith(github.ref, 'refs/tags/clip-v')
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/clip-linux-x86_64-musl.tar.gz
+            dist/clip-linux-x86_64-musl.tar.gz.sha256
+            dist/clip-macos-aarch64.tar.gz
+            dist/clip-macos-aarch64.tar.gz.sha256
+            dist/clip-windows-x86_64-gnu.zip
+            dist/clip-windows-x86_64-gnu.zip.sha256

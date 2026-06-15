@@ -56,15 +56,21 @@ class ClipWrapperTests(unittest.TestCase):
 
     def install_fake_clip_binary(self, repo_root: pathlib.Path, relpath: str) -> None:
         write_executable(
-            repo_root / "clip" / "dist" / relpath,
+            repo_root / "bin" / ".downloads" / "clip" / "v1.0.0" / relpath,
             f"""#!/usr/bin/env bash
             set -euo pipefail
             printf 'TARGET={relpath}\\n'
+            if [[ -n "${{CLIP_MACOS_HELPER:-}}" ]]; then
+              printf 'HELPER=%s\\n' "$CLIP_MACOS_HELPER"
+            fi
             for arg in "$@"; do
               printf 'ARG=%s\\n' "$arg"
             done
             """,
         )
+        current = repo_root / "bin" / ".downloads" / "clip" / "current"
+        if not current.exists():
+            current.symlink_to("v1.0.0")
 
     def run_wrapper(
         self,
@@ -104,20 +110,45 @@ class ClipWrapperTests(unittest.TestCase):
             "hello world",
             "--type",
             "text/plain",
-            binaries=("macos-aarch64/clip",),
+            binaries=("macos-aarch64/clip", "macos-aarch64/clip-macos-helper"),
         )
 
         self.assertEqual(proc.returncode, 0)
+        lines = proc.stdout.splitlines()
+        self.assertTrue(
+            lines[1].endswith(
+                "bin/.downloads/clip/current/macos-aarch64/clip-macos-helper"
+            ),
+            lines[1],
+        )
         self.assertEqual(
-            proc.stdout.splitlines(),
+            lines,
             [
                 "TARGET=macos-aarch64/clip",
+                lines[1],
                 "ARG=set",
                 "ARG=hello world",
                 "ARG=--type",
                 "ARG=text/plain",
             ],
         )
+
+    def test_macos_missing_helper_reports_error(self):
+        proc = self.run_wrapper(
+            "Darwin",
+            "arm64",
+            "set",
+            binaries=("macos-aarch64/clip",),
+        )
+
+        self.assertEqual(proc.returncode, 1)
+        self.assertEqual(proc.stdout, "")
+        self.assertIn("clip wrapper: missing downloaded clip helper:", proc.stderr)
+        self.assertIn(
+            "bin/.downloads/clip/current/macos-aarch64/clip-macos-helper",
+            proc.stderr,
+        )
+        self.assertIn("run bin/dotfiles-apply", proc.stderr)
 
     def test_linux_wrapper_uses_linux_binary(self):
         proc = self.run_wrapper(
@@ -171,8 +202,9 @@ class ClipWrapperTests(unittest.TestCase):
 
         self.assertEqual(proc.returncode, 1)
         self.assertEqual(proc.stdout, "")
-        self.assertIn("clip wrapper: missing clip binary:", proc.stderr)
-        self.assertIn("macos-aarch64/clip", proc.stderr)
+        self.assertIn("clip wrapper: missing downloaded clip binary:", proc.stderr)
+        self.assertIn("bin/.downloads/clip/current/macos-aarch64/clip", proc.stderr)
+        self.assertIn("run bin/dotfiles-apply", proc.stderr)
 
 
 if __name__ == "__main__":
