@@ -1,9 +1,105 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-command_path=${TMUX_CPU_PERCENT_COMMAND:-/home/kai/.tmux/plugins/tmux-cpu/scripts/cpu_percentage.sh}
-raw_value=$("$command_path")
-percent=${raw_value%%%}
+cache_timeout=${TMUX_CPU_PERCENT_CACHE_SECONDS:-2}
+
+cache_dir() {
+  if [[ -n "${TMUX_CPU_PERCENT_CACHE_DIR:-}" ]]; then
+    printf "%s" "$TMUX_CPU_PERCENT_CACHE_DIR"
+  else
+    printf "%s/tmux-%s-cpu" "${TMPDIR:-/tmp}" "$EUID"
+  fi
+}
+
+cache_file() {
+  printf "%s/%s" "$(cache_dir)" "$1"
+}
+
+get_cached() {
+  local path now cached_at
+  path=$(cache_file "$1")
+  if [[ ! -f "$path" ]]; then
+    return 1
+  fi
+
+  IFS= read -r cached_at <"$path" || return 1
+  now=$(date +%s)
+  if awk -v now="$now" -v cached_at="$cached_at" -v timeout="$cache_timeout" 'BEGIN { exit !((now - cached_at) < timeout) }'; then
+    tail -n +2 "$path"
+    return 0
+  fi
+
+  return 1
+}
+
+put_cached() {
+  local key value path dir tmp
+  key=$1
+  value=$2
+  dir=$(cache_dir)
+  path=$(cache_file "$key")
+  mkdir -p "$dir"
+  chmod 0700 "$dir"
+  tmp=$(mktemp "$dir/$key.XXXXXX")
+  {
+    date +%s
+    printf "%s" "$value"
+  } >"$tmp"
+  mv "$tmp" "$path"
+  printf "%s" "$value"
+}
+
+cached_command() {
+  local key output
+  key=$1
+  shift
+  if output=$(get_cached "$key"); then
+    printf "%s" "$output"
+    return 0
+  fi
+  output=$("$@")
+  put_cached "$key" "$output"
+}
+
+if [[ -n "${TMUX_CPU_PERCENT_COMMAND:-}" ]]; then
+  raw_value=$("$TMUX_CPU_PERCENT_COMMAND")
+  percent=${raw_value%%%}
+elif command -v iostat >/dev/null 2>&1; then
+  case "$(uname -s)" in
+    Darwin)
+      percent=$(cached_command iostat-darwin iostat -c 2 disk0 | awk 'NF { line = $0 } END { split(line, fields); print 100 - fields[6] }')
+      ;;
+    Linux)
+      percent=$(cached_command iostat-linux iostat -c 1 2 | awk 'NF { line = $0 } END { split(line, fields); print 100 - fields[length(fields)] }')
+      ;;
+    *)
+      percent=$(cached_command iostat-other iostat -c 2 | awk 'NF { line = $0 } END { split(line, fields); print 100 - fields[length(fields)] }')
+      ;;
+  esac
+else
+  cpu_count=0
+  if command -v nproc >/dev/null 2>&1; then
+    cpu_count=$(nproc)
+  elif command -v sysctl >/dev/null 2>&1; then
+    cpu_count=$(sysctl -n hw.ncpu 2>/dev/null || printf "0")
+  elif command -v getconf >/dev/null 2>&1; then
+    cpu_count=$(getconf _NPROCESSORS_ONLN 2>/dev/null || printf "0")
+  fi
+
+  percent=$(cached_command ps ps -A -o %cpu= | awk -v cpu_count="$cpu_count" '
+    { total += $1 }
+    END {
+      if (cpu_count > 0) {
+        print total / cpu_count
+      }
+    }
+  ')
+fi
+
+if [[ -z "${percent:-}" ]]; then
+  printf -- "--"
+  exit 0
+fi
 
 awk -v percent="$percent" '
   BEGIN {
