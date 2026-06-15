@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if ! output=$(df -h / 2>/dev/null); then
+  printf -- "--"
+  exit 0
+fi
+
+percent=$(awk 'NR == 2 { print $5 }' <<<"$output")
+
+if [[ -z "$percent" ]]; then
+  printf -- "--"
+  exit 0
+fi
+
+printf "%s" "$percent"
