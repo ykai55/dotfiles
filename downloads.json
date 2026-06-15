@@ -4,13 +4,13 @@
   "tools": [
     {
       "name": "clip",
-      "version": "v1.0.0",
+      "version": "clip-latest",
       "targets": [
         {
           "target": "linux-x86_64-musl",
           "platform": "linux",
           "arch": "x86_64",
-          "url": "https://github.com/ykai55/dotfiles/releases/download/clip-v1.0.0/clip-linux-x86_64-musl.tar.gz",
+          "url": "https://github.com/ykai55/dotfiles/releases/download/clip-latest/clip-linux-x86_64-musl.tar.gz",
           "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
           "archive": "tar.gz",
           "executable": "clip"
@@ -19,7 +19,7 @@
           "target": "macos-aarch64",
           "platform": "macos",
           "arch": "aarch64",
-          "url": "https://github.com/ykai55/dotfiles/releases/download/clip-v1.0.0/clip-macos-aarch64.tar.gz",
+          "url": "https://github.com/ykai55/dotfiles/releases/download/clip-latest/clip-macos-aarch64.tar.gz",
           "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
           "archive": "tar.gz",
           "executable": "clip"

@@ -2,8 +2,8 @@ name: Build clip release assets
 
 on:
   push:
-    tags:
-      - "clip-v*"
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
@@ -81,7 +81,6 @@ jobs:
     needs:
       - build-linux
       - build-macos
-    if: startsWith(github.ref, 'refs/tags/clip-v')
     steps:
       - name: Download artifacts
         uses: actions/download-artifact@v4
@@ -92,6 +91,11 @@ jobs:
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: clip-latest
+          name: clip-latest
+          target_commitish: ${{ github.sha }}
+          make_latest: true
+          fail_on_unmatched_files: true
           files: |
             dist/clip-linux-x86_64-musl.tar.gz
             dist/clip-linux-x86_64-musl.tar.gz.sha256
