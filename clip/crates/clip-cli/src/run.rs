@@ -17,22 +17,12 @@ pub fn run(cli: Cli) -> Result<(), ClipError> {
 
     match cli.command {
         Command::Set(args) => {
-            let backend = resolve_backend(
-                &probe,
-                runner,
-                args.target,
-                macos_helper,
-            )?;
+            let backend = resolve_backend(&probe, runner, args.target, macos_helper)?;
             let item = load_item(&args)?;
             backend.write(&item)
         }
         Command::Get(args) => {
-            let backend = resolve_backend(
-                &probe,
-                runner,
-                args.target,
-                macos_helper,
-            )?;
+            let backend = resolve_backend(&probe, runner, args.target, macos_helper)?;
             let request = match args.mime.as_deref() {
                 Some(mime) => ReadRequest::typed(MimeType::new(mime)?),
                 None => ReadRequest::text(),
@@ -41,12 +31,7 @@ pub fn run(cli: Cli) -> Result<(), ClipError> {
             write_output(blob, args.output.as_deref())
         }
         Command::Types(args) => {
-            let backend = resolve_backend(
-                &probe,
-                runner,
-                args.target,
-                macos_helper,
-            )?;
+            let backend = resolve_backend(&probe, runner, args.target, macos_helper)?;
             for mime in backend.list_types()? {
                 println!("{}", mime.as_str());
             }

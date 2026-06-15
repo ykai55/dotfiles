@@ -8,7 +8,9 @@ use clip_platform::{resolve_macos_helper_path, MacOsBackend, ProcessCommandRunne
 
 #[test]
 fn helper_round_trips_text_and_html() {
-    let Ok(helper) = resolve_macos_helper_path(std::env::var_os("CLIP_MACOS_HELPER").map(Into::into)) else {
+    let Ok(helper) =
+        resolve_macos_helper_path(std::env::var_os("CLIP_MACOS_HELPER").map(Into::into))
+    else {
         eprintln!("skipping macOS host test because no built helper could be found");
         return;
     };

@@ -36,7 +36,10 @@ fn list_types_splits_wayland_output_lines() {
     let backend = WaylandBackend::new(runner);
 
     let types = backend.list_types().unwrap();
-    assert_eq!(types.iter().map(|item| item.as_str()).collect::<Vec<_>>(), vec!["text/plain", "text/html"]);
+    assert_eq!(
+        types.iter().map(|item| item.as_str()).collect::<Vec<_>>(),
+        vec!["text/plain", "text/html"]
+    );
 }
 
 #[test]
@@ -65,7 +68,10 @@ fn write_bytes_uses_wl_copy_with_explicit_type() {
     let backend = WaylandBackend::new(runner.clone());
 
     backend
-        .write(&ClipboardItem::bytes(MimeType::new("text/html").unwrap(), b"<b>hi</b>".to_vec()))
+        .write(&ClipboardItem::bytes(
+            MimeType::new("text/html").unwrap(),
+            b"<b>hi</b>".to_vec(),
+        ))
         .unwrap();
 
     let calls = runner.calls.lock().unwrap();
@@ -83,7 +89,10 @@ fn read_text_returns_text_blob() {
     });
     let backend = WaylandBackend::new(runner.clone());
 
-    assert_eq!(backend.read(ReadRequest::text()).unwrap(), ClipboardBlob::Text(String::from("hello")));
+    assert_eq!(
+        backend.read(ReadRequest::text()).unwrap(),
+        ClipboardBlob::Text(String::from("hello"))
+    );
 
     let calls = runner.calls.lock().unwrap();
     assert_eq!(calls[0].program, "wl-paste");

@@ -43,9 +43,9 @@ pub fn load_item(args: &SetArgs) -> Result<ClipboardItem, ClipError> {
     }
 
     if let Some(buffer) = stdin_bytes {
-        return Ok(ClipboardItem::text(String::from_utf8(buffer).map_err(|_| {
-            ClipError::config("input is not valid UTF-8; pass --type to read raw bytes")
-        })?));
+        return Ok(ClipboardItem::text(String::from_utf8(buffer).map_err(
+            |_| ClipError::config("input is not valid UTF-8; pass --type to read raw bytes"),
+        )?));
     }
 
     Err(ClipError::config(

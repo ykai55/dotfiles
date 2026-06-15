@@ -149,7 +149,10 @@ fn unique_temp_dir() -> PathBuf {
 
 #[test]
 fn capabilities_do_not_advertise_custom_mime_support() {
-    let backend = MacOsBackend::new(Arc::new(FakeRunner::default()), PathBuf::from("/tmp/clip-macos-helper"));
+    let backend = MacOsBackend::new(
+        Arc::new(FakeRunner::default()),
+        PathBuf::from("/tmp/clip-macos-helper"),
+    );
 
     assert!(!backend.capabilities().supports_custom_mime);
 }
@@ -160,7 +163,9 @@ fn typed_read_rejects_custom_mime_without_invoking_helper() {
     let backend = MacOsBackend::new(runner.clone(), PathBuf::from("/tmp/clip-macos-helper"));
 
     let error = backend
-        .read(ReadRequest::typed(MimeType::new("application/json").unwrap()))
+        .read(ReadRequest::typed(
+            MimeType::new("application/json").unwrap(),
+        ))
         .unwrap_err();
     assert_eq!(
         error.to_string(),
