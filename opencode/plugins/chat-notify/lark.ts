@@ -120,7 +120,7 @@ type SessionLookupRow = {
 }
 
 type PostElement = {
-  tag: "text" | "a" | "at" | "img" | "media" | "emotion" | "hr" | "br" | "code_block" | "md"
+  tag: "text" | "a" | "at" | "img" | "media" | "emotion" | "hr" | "code_block" | "md"
   text?: string
   style?: string[]
   language?: string
@@ -199,7 +199,7 @@ const post = (content: PostElement[][], title?: string): PostMessage => ({ type:
 
 const textNode = (text: string, style?: string[]): PostElement => ({ tag: "text", text, ...(style ? { style } : {}) })
 
-const br = (): PostElement => ({ tag: "br" })
+const br = () => textNode("\n")
 
 const codeBlock = (text: string, language?: string): PostElement => ({
   tag: "code_block",
@@ -211,7 +211,11 @@ const md = (text: string): PostElement => ({ tag: "md", text })
 
 const paragraph = (text: string, style?: string[]) => [textNode(text, style)]
 
-const quote = (text: string) => [textNode("▌ ", ["bold"]), textNode(text)]
+const markdown = (text: string) => [md(text)]
+
+const quote = (label: string, text: string) => markdown(`> **${label}:** ${text}`)
+
+const metaLine = (text: string) => markdown(`> ${text}`)
 
 const postContent = (value: string) => {
   const lines = value.split("\n")
@@ -580,17 +584,16 @@ export default (async (input, options) => {
             : compactNumber(current.contextTokens)
         }`
       : ""
-    const meta = `\n\n> tools ${current?.toolCalls.size ?? 0} · r/w/c ${current?.readFiles.size ?? 0}/${
+    const meta = `tools ${current?.toolCalls.size ?? 0} · r/w/c ${current?.readFiles.size ?? 0}/${
       current?.writtenFiles.size ?? 0
     }/${current?.changedFiles.size ?? 0}${context}`
     return post(
       [
-        ...(current?.userInput ? [quote(`user: ${truncateEnd(current.userInput, 200)}`), [br()]] : []),
+        ...(current?.userInput ? [quote("user", truncateEnd(current.userInput, 200)), [br()]] : []),
         ...postContent(output),
         [br()],
-        quote(meta.trim().replace(/^>\s*/, "")),
+        metaLine(meta),
       ],
-      "OpenCode output",
     )
   }
 
@@ -683,12 +686,9 @@ export default (async (input, options) => {
     current.rootMessagePromise = send(
       post(
         [
-          [textNode(sessionID, ["bold"]), textNode(" · "), textNode(input.directory)],
-          quote(`user: ${current.userInput || "(unknown input)"}`),
-          [br()],
-          paragraph("OpenCode session", ["bold"]),
+          markdown(`**${sessionID}** · ${input.directory}`),
+          quote("user", current.userInput || "(unknown input)"),
         ],
-        "OpenCode session",
       ),
     ).then((result) => {
       current.rootMessageID = result?.messageID
