@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  printf 'Usage: useenv [-i] [--fish-config PATH] [--] [COMMAND [ARG...]]\n' >&2
+}
+
+script_dir() {
+  local source dir link
+  source=${BASH_SOURCE[0]}
+  while [[ -L "$source" ]]; do
+    dir=$(cd -P "$(dirname "$source")" && pwd)
+    link=$(readlink "$source")
+    if [[ "$link" == /* ]]; then
+      source=$link
+    else
+      source=$dir/$link
+    fi
+  done
+  cd -P "$(dirname "$source")" && pwd
+}
+
+repo_root=$(cd "$(script_dir)/.." && pwd)
+fish_config="$repo_root/fish/config.fish"
+isolated=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -i)
+      isolated=1
+      shift
+      ;;
+    --fish-config)
+      shift
+      if [[ $# -eq 0 ]]; then
+        printf 'useenv: --fish-config requires a path\n' >&2
+        usage
+        exit 2
+      fi
+      fish_config=$1
+      shift
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    --)
+      shift
+      break
+      ;;
+    -*)
+      printf 'useenv: unknown option: %s\n' "$1" >&2
+      usage
+      exit 2
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+if [[ ! -f "$fish_config" ]]; then
+  printf 'useenv: fish config not found: %s\n' "$fish_config" >&2
+  exit 1
+fi
+
+mode=print
+if [[ $# -gt 0 ]]; then
+  mode=exec
+fi
+
+functions_dir="$repo_root/fish/functions"
+fish_bin=$(command -v fish)
+
+fish_command=(
+  "$fish_bin"
+  -N
+  -c
+  '
+  set -gx USEENV 1
+  set -l config_path $argv[1]
+  set -l functions_dir $argv[2]
+  set -l mode $argv[3]
+
+  if test -d "$functions_dir"
+    set fish_function_path "$functions_dir" $fish_function_path
+  end
+
+  source "$config_path"
+
+  if test "$mode" = print
+    env
+    exit $status
+  end
+
+  exec $argv[4..-1]
+'
+  "$fish_config"
+  "$functions_dir"
+  "$mode"
+  "$@"
+)
+
+if [[ "$isolated" -eq 1 ]]; then
+  exec env -i \
+    HOME="${HOME:-}" \
+    PATH="${PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" \
+    USER="${USER:-}" \
+    LOGNAME="${LOGNAME:-${USER:-}}" \
+    "${fish_command[@]}"
+fi
+
+exec "${fish_command[@]}"
