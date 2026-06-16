@@ -17,6 +17,8 @@ When sending a Lark message to me, prefix the message body with an @ mention of 
 
 Write thinking and intermediate files in English, but deliver the final answer to the user in Chinese.
 
+Do not use git worktrees by default unless the user explicitly mentions worktrees.
+
 For clearly scoped, procedural, token-heavy tasks such as running integration
 tests, prefer delegating to a subagent when doing so will not lose important
 context. Ask the subagent to report the command, working directory, exit status,
