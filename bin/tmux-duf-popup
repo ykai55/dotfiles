@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+content() {
+  local duf_width pager
+
+  duf_width=${TMUX_DUF_WIDTH:-80}
+  if ! [[ "$duf_width" =~ ^[0-9]+$ ]]; then
+    duf_width=80
+  fi
+  if ((duf_width < 20)); then
+    duf_width=20
+  fi
+
+  pager=${TMUX_DUF_POPUP_PAGER:-less -RS}
+
+  duf -only local -hide special,loops -output mountpoint,size,used,avail,usage -width "$duf_width" | $pager
+}
+
+popup() {
+  local client_width duf_width script_path
+
+  client_width=$(tmux display-message -p '#{client_width}' 2>/dev/null || printf "80")
+  if ! [[ "$client_width" =~ ^[0-9]+$ ]]; then
+    client_width=80
+  fi
+
+  duf_width=$((client_width * 80 / 100 - 2))
+  if ((duf_width < 20)); then
+    duf_width=20
+  fi
+
+  script_path=${BASH_SOURCE[0]}
+  tmux display-popup -w 80% -h 80% -e "TMUX_DUF_WIDTH=$duf_width" -EE "$script_path" --content
+}
+
+case "${1:-}" in
+  --content)
+    content
+    ;;
+  *)
+    popup
+    ;;
+esac
