@@ -3,6 +3,8 @@ import { mkdirSync } from "node:fs"
 import { dirname } from "node:path"
 import { fileURLToPath } from "node:url"
 import type { Plugin } from "@opencode-ai/plugin"
+import { NotificationComposer, contextLimitFrom, type DoneNotice, type SessionNotice } from "./composer"
+import { createDispatcher } from "./dispatcher"
 
 const readConfigFile = async (filePath: string) => {
   const file = Bun.file(filePath)
@@ -94,13 +96,6 @@ type SessionStats = {
   threadID: string | undefined
   sessionTitle: string | undefined
   userInput: string
-  userPartIDs: Set<string>
-  ignoredPartIDs: Set<string>
-  textByPart: Map<string, string>
-  toolCalls: Set<string>
-  readFiles: Set<string>
-  writtenFiles: Set<string>
-  changedFiles: Set<string>
   contextTokens: number | undefined
   contextLimit: number | undefined
 }
@@ -134,63 +129,11 @@ type PostMessage = {
 
 type LarkMessage = string | PostMessage
 
-const tokenCount = (tokens: unknown) => {
-  if (!record(tokens)) return
-  const cache = prop(tokens, "cache")
-  return (
-    (numberOption(prop(tokens, "input")) ?? 0) +
-    (numberOption(prop(tokens, "output")) ?? 0) +
-    (numberOption(prop(tokens, "reasoning")) ?? 0) +
-    (numberOption(prop(cache, "read")) ?? 0) +
-    (numberOption(prop(cache, "write")) ?? 0)
-  )
-}
-
-const contextLimitFrom = (value: unknown) =>
-  numberOption(prop(prop(value, "limit"), "context")) ??
-  numberOption(prop(value, "context")) ??
-  numberOption(prop(value, "contextLimit"))
-
 const modelRef = (value: unknown) => {
   const providerID = textOption(prop(value, "providerID"))
   const modelID = textOption(prop(value, "modelID") ?? prop(value, "id"))
   if (!providerID || !modelID) return
   return { providerID, modelID }
-}
-
-const toolInput = (part: unknown) => prop(prop(part, "state"), "input")
-
-const stringList = (value: unknown) => {
-  if (!Array.isArray(value)) return []
-  return value.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
-}
-
-const inputPaths = (input: unknown) =>
-  [
-    prop(input, "filePath"),
-    prop(input, "filepath"),
-    prop(input, "path"),
-    prop(input, "cwd"),
-    ...stringList(prop(input, "files")),
-    ...stringList(prop(input, "paths")),
-  ].filter((item): item is string => typeof item === "string" && item.trim().length > 0)
-
-const patchPaths = (input: unknown) => {
-  const patch = prop(input, "patch")
-  if (typeof patch !== "string") return []
-  return Array.from(patch.matchAll(/^\*\*\* (?:Add File|Update File|Delete File): (.+)$/gm), (match) => match[1])
-}
-
-const syntheticText = (value: string) => {
-  const text = value.trimStart()
-  return (
-    /^Called the .+ tool with the following input:/.test(text) ||
-    text.startsWith("<path>") ||
-    text.startsWith("<type>") ||
-    text.startsWith("<content>") ||
-    text.startsWith("Read tool failed to read") ||
-    text.startsWith("Referenced configured reference ")
-  )
 }
 
 const larkText = (text: string) => JSON.stringify({ text })
@@ -377,9 +320,6 @@ export default (async (input, options) => {
     WHERE id = 'lark-input' AND owner = ?
   `)
 
-  const activeSessions = new Set<string>()
-  const notifiedRequests = new Set<string>()
-  const pendingPermissionTimers = new Map<string, { sessionID: string; timer: ReturnType<typeof setTimeout> }>()
   const statsBySession = new Map<string, SessionStats>()
   const processedMessageIDs = new Set<string>()
   const pollOwner = `${input.project.id}:${input.directory}:${Math.random().toString(36).slice(2)}`
@@ -428,13 +368,6 @@ export default (async (input, options) => {
       threadID: row?.thread_id ?? undefined,
       sessionTitle: row?.session_title ?? undefined,
       userInput: "",
-      userPartIDs: new Set<string>(),
-      ignoredPartIDs: new Set<string>(),
-      textByPart: new Map<string, string>(),
-      toolCalls: new Set<string>(),
-      readFiles: new Set<string>(),
-      writtenFiles: new Set<string>(),
-      changedFiles: new Set<string>(),
       contextTokens: undefined,
       contextLimit: undefined,
     }
@@ -458,143 +391,28 @@ export default (async (input, options) => {
     )
   }
 
-  function clearRound(sessionID: string) {
-    const current = statsBySession.get(sessionID)
-    if (!current) return
-    current.userInput = ""
-    current.userPartIDs.clear()
-    current.ignoredPartIDs.clear()
-    current.textByPart.clear()
-    current.toolCalls.clear()
-    current.readFiles.clear()
-    current.writtenFiles.clear()
-    current.changedFiles.clear()
-    current.contextTokens = undefined
-    current.contextLimit = undefined
-    saveSession(sessionID)
+  function applySessionNotice(notice: SessionNotice) {
+    const current = stats(notice.sessionID)
+    current.userInput = notice.userInput
+    current.sessionTitle = notice.sessionTitle
+    current.contextTokens = notice.contextTokens
+    current.contextLimit = notice.contextLimit
   }
 
-  function muteSession(sessionID: string) {
-    const current = stats(sessionID)
-    current.muted = true
-    saveSession(sessionID)
-    clearSessionPermissionTimers(sessionID)
-  }
-
-  function isMuted(sessionID: unknown) {
-    return typeof sessionID === "string" && statsBySession.get(sessionID)?.muted === true
-  }
-
-  function trackUserParts(sessionID: string, parts: unknown) {
-    if (!Array.isArray(parts)) return ""
-    const current = stats(sessionID)
-    for (const part of parts) {
-      const id = prop(part, "id")
-      if (typeof id === "string") current.userPartIDs.add(id)
-    }
-    current.userInput = parts
-      .map((part) => prop(part, "text"))
-      .filter((text): text is string => typeof text === "string" && text.trim().length > 0)
-      .join("\n\n")
-      .trim()
-    return current.userInput
-  }
-
-  function trackTool(sessionID: string, part: unknown) {
-    const tool = prop(part, "tool")
-    const callID = prop(part, "callID")
-    if (typeof tool !== "string" || typeof callID !== "string") return
-    const current = stats(sessionID)
-    if (current.toolCalls.has(callID)) return
-    current.toolCalls.add(callID)
-    current.textByPart.clear()
-
-    const paths = [...inputPaths(toolInput(part)), ...patchPaths(toolInput(part))]
-    if (["read", "grep", "glob", "lsp"].includes(tool)) {
-      for (const file of paths) current.readFiles.add(file)
-      return
-    }
-    if (["write", "edit", "apply_patch"].includes(tool)) {
-      for (const file of paths) {
-        current.writtenFiles.add(file)
-        current.changedFiles.add(file)
-      }
-    }
-  }
-
-  function trackContext(sessionID: string, source: unknown) {
-    const current = stats(sessionID)
-    const tokens = tokenCount(prop(source, "tokens") ?? source)
-    if (tokens !== undefined && tokens > 0) current.contextTokens = tokens
-    current.contextLimit = contextLimitFrom(source) ?? current.contextLimit
-  }
-
-  function trackPart(sessionID: string, part: unknown) {
-    const partType = prop(part, "type")
-    const partID = prop(part, "id")
-    if ((partType === "reasoning" || prop(part, "synthetic") === true) && typeof partID === "string") {
-      const current = stats(sessionID)
-      current.ignoredPartIDs.add(partID)
-      current.textByPart.delete(partID)
-      return
-    }
-    if (partType === "text" && typeof partID === "string") {
-      const current = stats(sessionID)
-      if (current.userPartIDs.has(partID) || current.ignoredPartIDs.has(partID)) return
-      const text = prop(part, "text")
-      if (typeof text === "string") {
-        if (syntheticText(text)) {
-          current.ignoredPartIDs.add(partID)
-          current.textByPart.delete(partID)
-          return
-        }
-        current.textByPart.set(partID, text)
-      }
-      return
-    }
-    if (partType === "tool") {
-      trackTool(sessionID, part)
-      return
-    }
-    if (partType === "step-finish") {
-      trackContext(sessionID, part)
-      return
-    }
-    if (partType === "patch") {
-      for (const file of stringList(prop(part, "files"))) {
-        stats(sessionID).writtenFiles.add(file)
-        stats(sessionID).changedFiles.add(file)
-      }
-    }
-  }
-
-  function doneMessage(sessionID: string) {
-    const current = statsBySession.get(sessionID)
-    const output = truncate(
-      Array.from(current?.textByPart.values() ?? [])
-        .filter((text) => !syntheticText(text))
-        .join("\n\n")
-        .trim() || "(no text output)",
-      maxOutputChars,
-    )
-    const context = current?.contextTokens
+  function doneNoticeMessage(notice: DoneNotice) {
+    const context = notice.contextTokens
       ? ` · ${
-          current.contextLimit
-            ? `${Math.round((current.contextTokens / current.contextLimit) * 100)}%`
-            : compactNumber(current.contextTokens)
+          notice.contextLimit
+            ? `${Math.round((notice.contextTokens / notice.contextLimit) * 100)}%`
+            : compactNumber(notice.contextTokens)
         }`
       : ""
-    const meta = `tools ${current?.toolCalls.size ?? 0} · r/w/c ${current?.readFiles.size ?? 0}/${
-      current?.writtenFiles.size ?? 0
-    }/${current?.changedFiles.size ?? 0}${context}`
-    return post(
-      [
-        ...(current?.userInput ? [quote("user", truncateEnd(current.userInput, 200)), [br()]] : []),
-        ...postContent(output),
-        [br()],
-        metaLine(meta),
-      ],
-    )
+    return post([
+      ...(notice.userInput ? [quote("user", truncateEnd(notice.userInput, 200)), [br()]] : []),
+      ...postContent(notice.output),
+      [br()],
+      metaLine(`tools ${notice.tools} · r/w/c ${notice.read}/${notice.written}/${notice.changed}${context}`),
+    ])
   }
 
   async function tenantToken() {
@@ -711,21 +529,6 @@ export default (async (input, options) => {
     }
   }
 
-  function clearPermissionTimer(requestID: string) {
-    const pending = pendingPermissionTimers.get(requestID)
-    if (!pending) return
-    clearTimeout(pending.timer)
-    pendingPermissionTimers.delete(requestID)
-  }
-
-  function clearSessionPermissionTimers(sessionID: string) {
-    for (const [requestID, pending] of pendingPermissionTimers) {
-      if (pending.sessionID !== sessionID) continue
-      clearTimeout(pending.timer)
-      pendingPermissionTimers.delete(requestID)
-    }
-  }
-
   function sessionForLarkMessage(message: unknown) {
     const rootID = textOption(prop(message, "root_id") ?? prop(message, "parent_id"))
     if (rootID) {
@@ -819,155 +622,50 @@ export default (async (input, options) => {
 
   void pollLark()
 
-  return {
-    async "chat.message"(messageInput, output) {
-      stats(messageInput.sessionID).userInput = trackUserParts(messageInput.sessionID, output.parts)
-      if (!isMuted(messageInput.sessionID)) {
-        const limit = await modelContextLimit(messageInput.model)
-        if (limit !== undefined) stats(messageInput.sessionID).contextLimit = limit
-        await rootMessage(messageInput.sessionID)
-      }
+  return createDispatcher({
+    plugin: input,
+    composer: new NotificationComposer({ directory: input.directory, maxOutputChars }),
+    notifyDone,
+    notifyPermission,
+    notifyQuestion,
+    permissionNotifyDelay,
+    contextLimit: modelContextLimit,
+    sender: {
+      errorLabel: "lark-notify plugin",
+      async ensureSession(notice) {
+        applySessionNotice(notice)
+        await rootMessage(notice.sessionID)
+      },
+      async syncSessionTitle(notice) {
+        applySessionNotice(notice)
+        saveSession(notice.sessionID)
+      },
+      async sendDone(notice) {
+        applySessionNotice(notice)
+        await sendReply(notice.sessionID, doneNoticeMessage(notice))
+      },
+      async sendPermission(notice) {
+        await sendReply(
+          notice.sessionID,
+          post(
+            [
+              paragraph(`permission needed · ${shortID(notice.sessionID)}`, ["bold"]),
+              paragraph(`permission: ${notice.permission}`),
+              paragraph(`patterns: ${notice.patterns}`),
+            ],
+            "OpenCode permission",
+          ),
+        )
+      },
+      async sendQuestion(notice) {
+        await sendReply(
+          notice.sessionID,
+          post(
+            [paragraph("opencode is waiting for your answer", ["bold"]), paragraph(`session: ${shortID(notice.sessionID)}`)],
+            "OpenCode question",
+          ),
+        )
+      },
     },
-
-    async event(eventInput) {
-      const event = eventInput.event
-      const eventType = prop(event, "type")
-      const properties = prop(event, "properties")
-      const sessionID = prop(properties, "sessionID")
-
-      try {
-        if (eventType === "session.created" || eventType === "session.updated") {
-          const info = prop(properties, "info")
-          if (typeof sessionID !== "string") return
-          if (typeof prop(info, "parentID") === "string") {
-            muteSession(sessionID)
-            return
-          }
-          const sessionTitle = textOption(prop(info, "title"))
-          trackContext(sessionID, info)
-          const limit = await modelContextLimit(prop(info, "model"))
-          if (limit !== undefined) stats(sessionID).contextLimit = limit
-          if (sessionTitle) {
-            stats(sessionID).sessionTitle = sessionTitle
-            saveSession(sessionID)
-          }
-          return
-        }
-
-        if (eventType === "session.next.step.started") {
-          if (typeof sessionID !== "string") return
-          const limit = await modelContextLimit(prop(properties, "model"))
-          if (limit !== undefined) stats(sessionID).contextLimit = limit
-          return
-        }
-
-        if (eventType === "session.next.step.ended") {
-          if (typeof sessionID !== "string") return
-          trackContext(sessionID, properties)
-          return
-        }
-
-        if (eventType === "message.part.delta") {
-          const partID = prop(properties, "partID")
-          const field = prop(properties, "field")
-          const delta = prop(properties, "delta")
-          if (
-            typeof sessionID !== "string" ||
-            typeof partID !== "string" ||
-            field !== "text" ||
-            typeof delta !== "string"
-          )
-            return
-          const current = stats(sessionID)
-          if (current.userPartIDs.has(partID) || current.ignoredPartIDs.has(partID)) return
-          const next = `${current.textByPart.get(partID) ?? ""}${delta}`
-          if (syntheticText(next)) {
-            current.ignoredPartIDs.add(partID)
-            current.textByPart.delete(partID)
-            return
-          }
-          current.textByPart.set(partID, next)
-          return
-        }
-
-        if (eventType === "message.part.updated") {
-          if (typeof sessionID !== "string") return
-          trackPart(sessionID, prop(properties, "part"))
-          return
-        }
-
-        if (eventType === "session.status") {
-          const status = prop(properties, "status")
-          const statusType = prop(status, "type")
-          if (typeof sessionID !== "string") return
-          if (statusType === "busy" || statusType === "retry") {
-            activeSessions.add(sessionID)
-            return
-          }
-          clearSessionPermissionTimers(sessionID)
-          if (statusType !== "idle" || !activeSessions.delete(sessionID) || !notifyDone) return
-          if (isMuted(sessionID)) {
-            clearRound(sessionID)
-            return
-          }
-          await sendReply(sessionID, doneMessage(sessionID))
-          clearRound(sessionID)
-          return
-        }
-
-        if (eventType === "permission.replied") {
-          const requestID = prop(properties, "requestID")
-          if (typeof requestID !== "string") return
-          clearPermissionTimer(requestID)
-          return
-        }
-
-        if (eventType === "permission.asked" && notifyPermission) {
-          const requestID = prop(properties, "id")
-          if (typeof sessionID !== "string") return
-          if (isMuted(sessionID)) return
-          if (typeof requestID !== "string") return
-          const key = `permission:${sessionID}:${prop(properties, "permission")}:${patterns(prop(properties, "patterns"))}`
-          if (notifiedRequests.has(key)) return
-          notifiedRequests.add(key)
-          pendingPermissionTimers.set(requestID, {
-            sessionID,
-            timer: setTimeout(() => {
-              pendingPermissionTimers.delete(requestID)
-              void sendReply(
-                sessionID,
-                post(
-                  [
-                    paragraph(`permission needed · ${shortID(sessionID)}`, ["bold"]),
-                    paragraph(`permission: ${textOption(prop(properties, "permission"), "unknown")}`),
-                    paragraph(`patterns: ${patterns(prop(properties, "patterns")) || "unknown"}`),
-                  ],
-                  "OpenCode permission",
-                ),
-              )
-            }, permissionNotifyDelay),
-          })
-          return
-        }
-
-        if (eventType === "question.asked" && notifyQuestion) {
-          const requestID = prop(properties, "id")
-          if (typeof sessionID !== "string") return
-          if (isMuted(sessionID)) return
-          const key = `question:${requestID}`
-          if (notifiedRequests.has(key)) return
-          notifiedRequests.add(key)
-          await sendReply(
-            sessionID,
-            post(
-              [paragraph("opencode is waiting for your answer", ["bold"]), paragraph(`session: ${shortID(sessionID)}`)],
-              "OpenCode question",
-            ),
-          )
-        }
-      } catch (error) {
-        console.warn("lark-notify plugin:", error instanceof Error ? error.message : error)
-      }
-    },
-  }
+  })
 }) satisfies Plugin
