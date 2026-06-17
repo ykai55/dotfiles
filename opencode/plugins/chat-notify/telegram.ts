@@ -3,6 +3,8 @@ import { mkdirSync } from "node:fs"
 import { dirname } from "node:path"
 import { fileURLToPath } from "node:url"
 import type { Plugin } from "@opencode-ai/plugin"
+import { NotificationComposer, type CompactionNotice, type DoneNotice, type SessionNotice } from "./composer"
+import { createDispatcher } from "./dispatcher"
 
 const readConfigFile = async (filePath: string) => {
   const file = Bun.file(filePath)
@@ -192,18 +194,8 @@ type SessionStats = {
   threadName: string | undefined
   sessionTitle: string | undefined
   userInput: string
-  userPartIDs: Set<string>
-  ignoredPartIDs: Set<string>
-  textByPart: Map<string, string>
-  toolCalls: Set<string>
-  toolNames: Map<string, number>
-  readFiles: Set<string>
-  writtenFiles: Set<string>
-  changedFiles: Set<string>
   contextTokens: number | undefined
   contextLimit: number | undefined
-  compactionBeforeTokens: number | undefined
-  compactionBeforeLimit: number | undefined
 }
 
 type SessionRow = {
@@ -229,18 +221,6 @@ type PermissionLookupRow = {
   message_id: number | null
 }
 
-const tokenCount = (tokens: unknown) => {
-  if (!record(tokens)) return
-  const cache = prop(tokens, "cache")
-  return (
-    (numberOption(prop(tokens, "input")) ?? 0) +
-    (numberOption(prop(tokens, "output")) ?? 0) +
-    (numberOption(prop(tokens, "reasoning")) ?? 0) +
-    (numberOption(prop(cache, "read")) ?? 0) +
-    (numberOption(prop(cache, "write")) ?? 0)
-  )
-}
-
 const contextLimitFrom = (value: unknown) =>
   numberOption(prop(prop(value, "limit"), "context")) ??
   numberOption(prop(value, "context")) ??
@@ -261,41 +241,6 @@ const contextLabel = (tokens: number | undefined, limit: number | undefined, app
 
 const estimateTextTokens = (value: unknown) =>
   typeof value === "string" && value.trim().length > 0 ? Math.ceil(Array.from(value).length / 3) : 0
-
-const toolInput = (part: unknown) => prop(prop(part, "state"), "input")
-
-const stringList = (value: unknown) => {
-  if (!Array.isArray(value)) return []
-  return value.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
-}
-
-const inputPaths = (input: unknown) =>
-  [
-    prop(input, "filePath"),
-    prop(input, "filepath"),
-    prop(input, "path"),
-    prop(input, "cwd"),
-    ...stringList(prop(input, "files")),
-    ...stringList(prop(input, "paths")),
-  ].filter((item): item is string => typeof item === "string" && item.trim().length > 0)
-
-const patchPaths = (input: unknown) => {
-  const patch = prop(input, "patch")
-  if (typeof patch !== "string") return []
-  return Array.from(patch.matchAll(/^\*\*\* (?:Add File|Update File|Delete File): (.+)$/gm), (match) => match[1])
-}
-
-const syntheticText = (value: string) => {
-  const text = value.trimStart()
-  return (
-    /^Called the .+ tool with the following input:/.test(text) ||
-    text.startsWith("<path>") ||
-    text.startsWith("<type>") ||
-    text.startsWith("<content>") ||
-    text.startsWith("Read tool failed to read") ||
-    text.startsWith("Referenced configured reference ")
-  )
-}
 
 export default (async (input, options) => {
   const config = await readPluginConfig()
@@ -420,9 +365,6 @@ export default (async (input, options) => {
     DELETE FROM permission_request
     WHERE request_id = ?
   `)
-  const activeSessions = new Set<string>()
-  const notifiedRequests = new Set<string>()
-  const pendingPermissionTimers = new Map<string, { sessionID: string; timer: ReturnType<typeof setTimeout> }>()
   const statsBySession = new Map<string, SessionStats>()
   const telegramUpdateIDs = new Set<number>()
   const pollOwner = `${input.project.id}:${input.directory}:${Math.random().toString(36).slice(2)}`
@@ -512,18 +454,8 @@ export default (async (input, options) => {
       threadName: row?.thread_name ?? undefined,
       sessionTitle: row?.session_title ?? undefined,
       userInput: "",
-      userPartIDs: new Set<string>(),
-      ignoredPartIDs: new Set<string>(),
-      textByPart: new Map<string, string>(),
-      toolCalls: new Set<string>(),
-      toolNames: new Map<string, number>(),
-      readFiles: new Set<string>(),
-      writtenFiles: new Set<string>(),
-      changedFiles: new Set<string>(),
       contextTokens: undefined,
       contextLimit: undefined,
-      compactionBeforeTokens: undefined,
-      compactionBeforeLimit: undefined,
     }
     statsBySession.set(sessionID, next)
     return next
@@ -546,144 +478,45 @@ export default (async (input, options) => {
     )
   }
 
-  function clearRound(sessionID: string) {
-    const current = statsBySession.get(sessionID)
-    if (!current) return
-    current.userInput = ""
-    current.userPartIDs.clear()
-    current.ignoredPartIDs.clear()
-    current.textByPart.clear()
-    current.toolCalls.clear()
-    current.toolNames.clear()
-    current.readFiles.clear()
-    current.writtenFiles.clear()
-    current.changedFiles.clear()
-    current.contextTokens = undefined
-    current.contextLimit = undefined
-    current.compactionBeforeTokens = undefined
-    current.compactionBeforeLimit = undefined
-    saveSession(sessionID)
+  function applySessionNotice(notice: SessionNotice) {
+    const current = stats(notice.sessionID)
+    current.userInput = notice.userInput
+    current.sessionTitle = notice.sessionTitle
+    current.contextTokens = notice.contextTokens
+    current.contextLimit = notice.contextLimit
   }
 
-  function muteSession(sessionID: string) {
-    const current = stats(sessionID)
-    current.muted = true
-    saveSession(sessionID)
-    clearSessionPermissionTimers(sessionID)
-  }
-
-  function isMuted(sessionID: unknown) {
-    return typeof sessionID === "string" && statsBySession.get(sessionID)?.muted === true
-  }
-
-  function trackUserParts(sessionID: string, parts: unknown) {
-    if (!Array.isArray(parts)) return ""
-    const current = stats(sessionID)
-    for (const part of parts) {
-      const id = prop(part, "id")
-      if (typeof id === "string") current.userPartIDs.add(id)
-    }
-    current.userInput = parts
-      .map((part) => prop(part, "text"))
-      .filter((text): text is string => typeof text === "string" && text.trim().length > 0)
-      .join("\n\n")
-      .trim()
-    return current.userInput
-  }
-
-  function trackTool(sessionID: string, part: unknown) {
-    const tool = prop(part, "tool")
-    const callID = prop(part, "callID")
-    if (typeof tool !== "string" || typeof callID !== "string") return
-    const current = stats(sessionID)
-    if (current.toolCalls.has(callID)) return
-    current.toolCalls.add(callID)
-    current.toolNames.set(tool, (current.toolNames.get(tool) ?? 0) + 1)
-    current.textByPart.clear()
-
-    const paths = [...inputPaths(toolInput(part)), ...patchPaths(toolInput(part))]
-    if (["read", "grep", "glob", "lsp"].includes(tool)) {
-      for (const file of paths) current.readFiles.add(file)
-      return
-    }
-    if (["write", "edit", "apply_patch"].includes(tool)) {
-      for (const file of paths) {
-        current.writtenFiles.add(file)
-        current.changedFiles.add(file)
-      }
-    }
-  }
-
-  function trackContext(sessionID: string, source: unknown) {
-    const current = stats(sessionID)
-    const tokens = tokenCount(prop(source, "tokens") ?? source)
-    if (tokens !== undefined && tokens > 0) current.contextTokens = tokens
-    current.contextLimit = contextLimitFrom(source) ?? current.contextLimit
-  }
-
-  function trackPart(sessionID: string, part: unknown) {
-    const partType = prop(part, "type")
-    const partID = prop(part, "id")
-    if ((partType === "reasoning" || prop(part, "synthetic") === true) && typeof partID === "string") {
-      const current = stats(sessionID)
-      current.ignoredPartIDs.add(partID)
-      current.textByPart.delete(partID)
-      return
-    }
-    if (partType === "text" && typeof partID === "string") {
-      const current = stats(sessionID)
-      if (current.userPartIDs.has(partID) || current.ignoredPartIDs.has(partID)) return
-      const text = prop(part, "text")
-      if (typeof text === "string") {
-        if (syntheticText(text)) {
-          current.ignoredPartIDs.add(partID)
-          current.textByPart.delete(partID)
-          return
-        }
-        current.textByPart.set(partID, text)
-      }
-      return
-    }
-    if (partType === "tool") {
-      trackTool(sessionID, part)
-      return
-    }
-    if (partType === "step-finish") {
-      trackContext(sessionID, part)
-      return
-    }
-    if (partType === "patch") {
-      for (const file of stringList(prop(part, "files"))) {
-        stats(sessionID).writtenFiles.add(file)
-        stats(sessionID).changedFiles.add(file)
-      }
-    }
-  }
-
-  function doneMessage(sessionID: string) {
-    const current = statsBySession.get(sessionID)
-    const user = current?.userInput
-      ? `<blockquote expandable>${html(`user: ${truncateEnd(current.userInput, 200)}`)}</blockquote>`
+  function doneNoticeMessage(notice: DoneNotice) {
+    const user = notice.userInput
+      ? `<blockquote expandable>${html(`user: ${truncateEnd(notice.userInput, 200)}`)}</blockquote>`
       : ""
-    const output = truncate(
-      Array.from(current?.textByPart.values() ?? [])
-        .filter((text) => !syntheticText(text))
-        .join("\n\n")
-        .trim() || "(no text output)",
-      maxOutputChars,
-    )
-    const context = current?.contextTokens
+    const context = notice.contextTokens
       ? ` · ${
-          current.contextLimit
-            ? `${Math.round((current.contextTokens / current.contextLimit) * 100)}%`
-            : compactNumber(current.contextTokens)
+          notice.contextLimit
+            ? `${Math.round((notice.contextTokens / notice.contextLimit) * 100)}%`
+            : compactNumber(notice.contextTokens)
         }`
       : ""
-    const meta = `tools ${current?.toolCalls.size ?? 0} · r/w/c ${current?.readFiles.size ?? 0}/${
-      current?.writtenFiles.size ?? 0
-    }/${current?.changedFiles.size ?? 0}${context}`
-    return [user, markdown(output), "", `<blockquote expandable>${html(meta)}</blockquote>`].filter(Boolean).join("\n")
+    return [
+      user,
+      markdown(notice.output),
+      "",
+      `<blockquote expandable>${html(
+        `tools ${notice.tools} · r/w/c ${notice.read}/${notice.written}/${notice.changed}${context}`,
+      )}</blockquote>`,
+    ]
+      .filter(Boolean)
+      .join("\n")
   }
+
+  const compactionMessage = (notice: CompactionNotice) =>
+    html(
+      `compacted · ${contextLabel(notice.beforeTokens, notice.beforeLimit)} -> ${contextLabel(
+        notice.afterTokens,
+        notice.afterLimit,
+        notice.afterTokens !== undefined,
+      )}`,
+    )
 
   async function sendIntro(sessionID: string, target: { replyTo?: number; threadID?: number }) {
     const current = stats(sessionID)
@@ -985,21 +818,6 @@ export default (async (input, options) => {
     )
   }
 
-  function clearPermissionTimer(requestID: string) {
-    const pending = pendingPermissionTimers.get(requestID)
-    if (!pending) return
-    clearTimeout(pending.timer)
-    pendingPermissionTimers.delete(requestID)
-  }
-
-  function clearSessionPermissionTimers(sessionID: string) {
-    for (const [requestID, pending] of pendingPermissionTimers) {
-      if (pending.sessionID !== sessionID) continue
-      clearTimeout(pending.timer)
-      pendingPermissionTimers.delete(requestID)
-    }
-  }
-
   async function rootMessage(sessionID: string) {
     const current = stats(sessionID)
     if (current.muted) return
@@ -1059,201 +877,74 @@ export default (async (input, options) => {
 
   void pollTelegram()
 
-  return {
-    async "chat.message"(messageInput, output) {
-      stats(messageInput.sessionID).userInput = trackUserParts(messageInput.sessionID, output.parts)
-      if (!isMuted(messageInput.sessionID)) {
-        const limit = await modelContextLimit(messageInput.model)
-        if (limit !== undefined) stats(messageInput.sessionID).contextLimit = limit
-        const target = await sessionTarget(messageInput.sessionID)
-        if (forumTopics && target.threadID !== undefined) await sendIntro(messageInput.sessionID, target)
-      }
+  return createDispatcher({
+    plugin: input,
+    composer: new NotificationComposer({ directory: input.directory, maxOutputChars }),
+    notifyDone,
+    notifyPermission,
+    notifyQuestion,
+    permissionNotifyDelay,
+    contextLimit: modelContextLimit,
+    activeContextTokens,
+    sender: {
+      errorLabel: "telegram-notify plugin",
+      async ensureSession(notice) {
+        applySessionNotice(notice)
+        const target = await sessionTarget(notice.sessionID)
+        if (forumTopics && target.threadID !== undefined) await sendIntro(notice.sessionID, target)
+      },
+      async syncSessionTitle(notice) {
+        applySessionNotice(notice)
+        saveSession(notice.sessionID)
+        await syncTopicTitle(notice.sessionID)
+      },
+      async sendDone(notice) {
+        applySessionNotice(notice)
+        await send(doneNoticeMessage(notice), await sessionTarget(notice.sessionID))
+      },
+      async sendCompaction(notice) {
+        await send(compactionMessage(notice), await sessionTarget(notice.sessionID))
+      },
+      async sendPermission(notice) {
+        const target = await sessionTarget(notice.sessionID)
+        const messageID = await send(
+          html(
+            [
+              `permission needed · ${shortID(notice.sessionID)}`,
+              `permission: ${notice.permission}`,
+              `patterns: ${notice.patterns}`,
+            ].join("\n"),
+          ),
+          {
+            ...target,
+            replyMarkup: {
+              inline_keyboard: [
+                [
+                  { text: "Allow once", callback_data: `op:perm:once:${notice.requestID}` },
+                  { text: "Always", callback_data: `op:perm:always:${notice.requestID}` },
+                  { text: "Deny", callback_data: `op:perm:reject:${notice.requestID}` },
+                ],
+              ],
+            },
+          },
+        )
+        upsertPermission.run(
+          notice.requestID,
+          notice.sessionID,
+          input.directory,
+          target.threadID ?? null,
+          messageID ?? null,
+          Date.now(),
+        )
+      },
+      async clearPermission(requestID) {
+        const row = selectPermission.get(requestID) as PermissionLookupRow | null
+        if (row?.message_id) await editReplyMarkup(row.message_id, row.thread_id ?? undefined)
+        deletePermission.run(requestID)
+      },
+      async sendQuestion(notice) {
+        await send(html(title("opencode is waiting for your answer", notice.sessionID)), await sessionTarget(notice.sessionID))
+      },
     },
-
-    async event(eventInput) {
-      const event = eventInput.event
-      const eventType = prop(event, "type")
-      const properties = prop(event, "properties")
-      const sessionID = prop(properties, "sessionID")
-
-      try {
-        if (eventType === "session.created" || eventType === "session.updated") {
-          const info = prop(properties, "info")
-          if (typeof sessionID !== "string") return
-          if (typeof prop(info, "parentID") === "string") {
-            muteSession(sessionID)
-            return
-          }
-          const sessionTitle = textOption(prop(info, "title"))
-          trackContext(sessionID, info)
-          const limit = await modelContextLimit(prop(info, "model"))
-          if (limit !== undefined) stats(sessionID).contextLimit = limit
-          if (sessionTitle) {
-            stats(sessionID).sessionTitle = sessionTitle
-            saveSession(sessionID)
-            await syncTopicTitle(sessionID)
-          }
-          return
-        }
-
-        if (eventType === "session.next.step.started") {
-          if (typeof sessionID !== "string") return
-          const limit = await modelContextLimit(prop(properties, "model"))
-          if (limit !== undefined) stats(sessionID).contextLimit = limit
-          return
-        }
-
-        if (eventType === "session.next.step.ended") {
-          if (typeof sessionID !== "string") return
-          trackContext(sessionID, properties)
-          return
-        }
-
-        if (eventType === "session.next.compaction.started") {
-          if (typeof sessionID !== "string") return
-          const current = stats(sessionID)
-          current.compactionBeforeTokens = current.contextTokens
-          current.compactionBeforeLimit = current.contextLimit
-          return
-        }
-
-        if (eventType === "session.next.compaction.ended") {
-          if (typeof sessionID !== "string") return
-          if (isMuted(sessionID)) return
-          const current = stats(sessionID)
-          const afterTokens = await activeContextTokens(sessionID)
-          current.contextTokens = afterTokens
-          await send(
-            html(
-              `compacted · ${contextLabel(current.compactionBeforeTokens, current.compactionBeforeLimit)} -> ${contextLabel(
-                afterTokens,
-                current.compactionBeforeLimit,
-                afterTokens !== undefined,
-              )}`,
-            ),
-            await sessionTarget(sessionID),
-          )
-          return
-        }
-
-        if (eventType === "message.part.delta") {
-          const partID = prop(properties, "partID")
-          const field = prop(properties, "field")
-          const delta = prop(properties, "delta")
-          if (
-            typeof sessionID !== "string" ||
-            typeof partID !== "string" ||
-            field !== "text" ||
-            typeof delta !== "string"
-          )
-            return
-          const current = stats(sessionID)
-          if (current.userPartIDs.has(partID) || current.ignoredPartIDs.has(partID)) return
-          const next = `${current.textByPart.get(partID) ?? ""}${delta}`
-          if (syntheticText(next)) {
-            current.ignoredPartIDs.add(partID)
-            current.textByPart.delete(partID)
-            return
-          }
-          current.textByPart.set(partID, next)
-          return
-        }
-
-        if (eventType === "message.part.updated") {
-          if (typeof sessionID !== "string") return
-          trackPart(sessionID, prop(properties, "part"))
-          return
-        }
-
-        if (eventType === "session.status") {
-          const status = prop(properties, "status")
-          const statusType = prop(status, "type")
-          if (typeof sessionID !== "string") return
-          if (statusType === "busy" || statusType === "retry") {
-            activeSessions.add(sessionID)
-            return
-          }
-          clearSessionPermissionTimers(sessionID)
-          if (statusType !== "idle" || !activeSessions.delete(sessionID) || !notifyDone) return
-          if (isMuted(sessionID)) {
-            clearRound(sessionID)
-            return
-          }
-          await send(doneMessage(sessionID), await sessionTarget(sessionID))
-          clearRound(sessionID)
-          return
-        }
-
-        if (eventType === "permission.replied") {
-          const requestID = prop(properties, "requestID")
-          if (typeof requestID !== "string") return
-          clearPermissionTimer(requestID)
-          const row = selectPermission.get(requestID) as PermissionLookupRow | null
-          if (row?.message_id) await editReplyMarkup(row.message_id, row.thread_id ?? undefined)
-          deletePermission.run(requestID)
-          return
-        }
-
-        if (eventType === "permission.asked" && notifyPermission) {
-          const requestID = prop(properties, "id")
-          if (typeof sessionID !== "string") return
-          if (isMuted(sessionID)) return
-          if (typeof requestID !== "string") return
-          const key = `permission:${sessionID}:${prop(properties, "permission")}:${patterns(prop(properties, "patterns"))}`
-          if (notifiedRequests.has(key)) return
-          notifiedRequests.add(key)
-          pendingPermissionTimers.set(requestID, {
-            sessionID,
-            timer: setTimeout(() => {
-              pendingPermissionTimers.delete(requestID)
-              void sessionTarget(sessionID).then(async (target) => {
-                const messageID = await send(
-                  html(
-                    [
-                      `permission needed · ${shortID(sessionID)}`,
-                      `permission: ${textOption(prop(properties, "permission"), "unknown")}`,
-                      `patterns: ${patterns(prop(properties, "patterns")) || "unknown"}`,
-                    ].join("\n"),
-                  ),
-                  {
-                    ...target,
-                    replyMarkup: {
-                      inline_keyboard: [
-                        [
-                          { text: "Allow once", callback_data: `op:perm:once:${requestID}` },
-                          { text: "Always", callback_data: `op:perm:always:${requestID}` },
-                          { text: "Deny", callback_data: `op:perm:reject:${requestID}` },
-                        ],
-                      ],
-                    },
-                  },
-                )
-                upsertPermission.run(
-                  requestID,
-                  sessionID,
-                  input.directory,
-                  target.threadID ?? null,
-                  messageID ?? null,
-                  Date.now(),
-                )
-              })
-            }, permissionNotifyDelay),
-          })
-          return
-        }
-
-        if (eventType === "question.asked" && notifyQuestion) {
-          const requestID = prop(properties, "id")
-          if (typeof sessionID !== "string") return
-          if (isMuted(sessionID)) return
-          const key = `question:${requestID}`
-          if (notifiedRequests.has(key)) return
-          notifiedRequests.add(key)
-          await send(html(title("opencode is waiting for your answer", sessionID)), await sessionTarget(sessionID))
-        }
-      } catch (error) {
-        console.warn("telegram-notify plugin:", error instanceof Error ? error.message : error)
-      }
-    },
-  }
+  })
 }) satisfies Plugin
