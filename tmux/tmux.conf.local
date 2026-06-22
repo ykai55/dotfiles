@@ -407,7 +407,7 @@ tmux_conf_urlscan_options="--compact --dedupe"
 
 # display a message after toggling mouse support
 bind m run "cut -c3- '#{TMUX_CONF}' | sh -s _toggle_mouse" \; display 'mouse #{?#{mouse},on,off}'
-bind -T root DoubleClick1Status if -F '#{||:#{==:#{mouse_status_range},cpu},#{==:#{mouse_status_range},mem}}' 'popup -w 80% -h 80% -E htop' 'if -F "#{==:#{mouse_status_range},disk}" "run-shell -b ~/dotfiles/bin/tmux-duf-popup"'
+bind -T root DoubleClick1Status if -F '#{==:#{mouse_status_range},cpu}' 'popup -w 80% -h 80% -E "htop --sort-key=PERCENT_CPU"' 'if -F "#{==:#{mouse_status_range},mem}" "popup -w 80% -h 80% -E \"htop --sort-key=PERCENT_MEM\"" "if -F \"#{==:#{mouse_status_range},disk}\" \"run-shell -b ~/dotfiles/bin/tmux-duf-popup\""'
 
 # move status line to top
 #set -g status-position top
