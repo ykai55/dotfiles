@@ -119,6 +119,8 @@ type PostElement = {
   text?: string
   style?: string[]
   language?: string
+  user_id?: string
+  user_name?: string
 }
 
 type PostMessage = {
@@ -143,6 +145,8 @@ const post = (content: PostElement[][], title?: string): PostMessage => ({ type:
 const textNode = (text: string, style?: string[]): PostElement => ({ tag: "text", text, ...(style ? { style } : {}) })
 
 const br = () => textNode("\n")
+
+const atNode = (userID: string): PostElement => ({ tag: "at", user_id: userID, user_name: "你" })
 
 const codeBlock = (text: string, language?: string): PostElement => ({
   tag: "code_block",
@@ -219,6 +223,7 @@ export default (async (input, options) => {
   const appID = textOption(options?.appID, conf(config, "LARK_APP_ID"))
   const appSecret = textOption(options?.appSecret, conf(config, "LARK_APP_SECRET"))
   const chatID = textOption(options?.chatID, conf(config, "LARK_CHAT_ID"))
+  const mentionEmail = textOption(options?.mentionEmail, conf(config, "LARK_MENTION_EMAIL"))
   const notifyDone = boolOption(options?.notifyDone, true)
   const notifyPermission = boolOption(options?.notifyPermission, true)
   const notifyQuestion = boolOption(options?.notifyQuestion, true)
@@ -457,6 +462,27 @@ export default (async (input, options) => {
     console.warn(`lark-notify plugin: ${path} failed (${response.status}) ${data.msg ?? JSON.stringify(data)}`)
   }
 
+  let mentionUserIDPromise: Promise<string | undefined> | undefined
+
+  async function mentionUserID() {
+    if (!mentionEmail) return
+    if (mentionUserIDPromise) return mentionUserIDPromise
+    mentionUserIDPromise = larkAPI(
+      "POST",
+      "/contact/v3/users/batch_get_id",
+      { user_id_type: "open_id" },
+      { emails: [mentionEmail] },
+    ).then((data) => {
+      const users = prop(data, "user_list")
+      if (!Array.isArray(users)) return
+      const user = users.find((item) => textOption(prop(item, "email")) === mentionEmail) ?? users[0]
+      const userID = textOption(prop(user, "user_id") ?? prop(user, "open_id"))
+      if (!userID) console.warn(`lark-notify plugin: cannot resolve LARK_MENTION_EMAIL ${mentionEmail}`)
+      return userID
+    })
+    return mentionUserIDPromise
+  }
+
   function larkBody(message: LarkMessage) {
     if (typeof message === "string") return { msg_type: "text", content: larkText(message) }
     return {
@@ -501,12 +527,15 @@ export default (async (input, options) => {
     if (current.muted) return
     if (current.rootMessageID) return current.rootMessageID
     if (current.rootMessagePromise) return current.rootMessagePromise
-    current.rootMessagePromise = send(
-      post(
-        [
-          markdown(`**${sessionID}** · ${input.directory}`),
-          quote("user", current.userInput || "(unknown input)"),
-        ],
+    current.rootMessagePromise = mentionUserID().then((userID) =>
+      send(
+        post(
+          [
+            ...(userID ? [[atNode(userID)]] : []),
+            markdown(`**${sessionID}** · ${input.directory}`),
+            quote("user", current.userInput || "(unknown input)"),
+          ],
+        ),
       ),
     ).then((result) => {
       current.rootMessageID = result?.messageID
