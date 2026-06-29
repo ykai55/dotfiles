@@ -98,6 +98,7 @@ type SessionStats = {
   userInput: string
   contextTokens: number | undefined
   contextLimit: number | undefined
+  lastMessageID: string | undefined
 }
 
 type SessionRow = {
@@ -106,12 +107,19 @@ type SessionRow = {
   root_message_id: string | null
   thread_id: string | null
   session_title: string | null
+  last_message_id: string | null
 }
 
 type SessionLookupRow = {
   session_id: string
   directory: string | null
   muted: number | null
+}
+
+type LastMessageRow = {
+  session_id: string
+  directory: string | null
+  last_message_id: string | null
 }
 
 type PostElement = {
@@ -249,13 +257,23 @@ export default (async (input, options) => {
       root_message_id TEXT,
       thread_id TEXT,
       session_title TEXT,
+      last_message_id TEXT,
       updated_at INTEGER NOT NULL,
       PRIMARY KEY (project_id, session_id)
     )
   `)
+  const sessionColumns = db.query("PRAGMA table_info(session_state)").all() as Array<{ name: string }>
+  if (!sessionColumns.some((column) => column.name === "last_message_id"))
+    db.run("ALTER TABLE session_state ADD COLUMN last_message_id TEXT")
   db.run(`
     CREATE TABLE IF NOT EXISTS sent_message (
       message_id TEXT PRIMARY KEY,
+      updated_at INTEGER NOT NULL
+    )
+  `)
+  db.run(`
+    CREATE TABLE IF NOT EXISTS reaction_input (
+      reaction_key TEXT PRIMARY KEY,
       updated_at INTEGER NOT NULL
     )
   `)
@@ -267,7 +285,7 @@ export default (async (input, options) => {
     )
   `)
   const selectSession = db.query(`
-    SELECT muted, intro_sent, root_message_id, thread_id, session_title
+    SELECT muted, intro_sent, root_message_id, thread_id, session_title, last_message_id
     FROM session_state
     WHERE project_id = ? AND session_id = ?
   `)
@@ -290,10 +308,15 @@ export default (async (input, options) => {
     FROM session_state
     WHERE thread_id IS NOT NULL AND muted = 0
   `)
+  const selectLastMessages = db.query(`
+    SELECT session_id, directory, last_message_id
+    FROM session_state
+    WHERE last_message_id IS NOT NULL AND muted = 0
+  `)
   const upsertSession = db.query(`
     INSERT INTO session_state (
-      project_id, session_id, directory, muted, intro_sent, root_message_id, thread_id, session_title, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      project_id, session_id, directory, muted, intro_sent, root_message_id, thread_id, session_title, last_message_id, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(project_id, session_id) DO UPDATE SET
       directory = excluded.directory,
       muted = excluded.muted,
@@ -301,6 +324,7 @@ export default (async (input, options) => {
       root_message_id = excluded.root_message_id,
       thread_id = excluded.thread_id,
       session_title = excluded.session_title,
+      last_message_id = excluded.last_message_id,
       updated_at = excluded.updated_at
   `)
   const insertSentMessage = db.query(`
@@ -311,6 +335,10 @@ export default (async (input, options) => {
     SELECT message_id
     FROM sent_message
     WHERE message_id = ?
+  `)
+  const insertReactionInput = db.query(`
+    INSERT OR IGNORE INTO reaction_input (reaction_key, updated_at)
+    VALUES (?, ?)
   `)
   const upsertPollLock = db.query(`
     INSERT INTO lark_poll_lock (id, owner, expires_at)
@@ -328,6 +356,7 @@ export default (async (input, options) => {
   const statsBySession = new Map<string, SessionStats>()
   const processedMessageIDs = new Set<string>()
   const pollOwner = `${input.project.id}:${input.directory}:${Math.random().toString(36).slice(2)}`
+  const pollStartedAt = Date.now()
   let providerListPromise: Promise<unknown[] | undefined> | undefined
   let token: { value: string; expiresAt: number } | undefined
 
@@ -375,6 +404,7 @@ export default (async (input, options) => {
       userInput: "",
       contextTokens: undefined,
       contextLimit: undefined,
+      lastMessageID: row?.last_message_id ?? undefined,
     }
     statsBySession.set(sessionID, next)
     return next
@@ -392,6 +422,7 @@ export default (async (input, options) => {
       current.rootMessageID ?? null,
       current.threadID ?? null,
       current.sessionTitle ?? null,
+      current.lastMessageID ?? null,
       Date.now(),
     )
   }
@@ -540,6 +571,7 @@ export default (async (input, options) => {
     ).then((result) => {
       current.rootMessageID = result?.messageID
       current.threadID = result?.threadID
+      current.lastMessageID = result?.messageID
       current.rootMessagePromise = undefined
       current.introSent = true
       saveSession(sessionID)
@@ -554,8 +586,9 @@ export default (async (input, options) => {
     const result = await send(message, rootID)
     if (result?.threadID) {
       stats(sessionID).threadID = result.threadID
-      saveSession(sessionID)
     }
+    if (result?.messageID) stats(sessionID).lastMessageID = result.messageID
+    if (result?.threadID || result?.messageID) saveSession(sessionID)
   }
 
   function sessionForLarkMessage(message: unknown) {
@@ -592,6 +625,49 @@ export default (async (input, options) => {
       body: { parts: [{ type: "text", text }] },
     })
     if (prop(result, "error")) console.warn("lark-notify plugin: failed to forward Lark message", prop(result, "error"))
+  }
+
+  async function handleOKReaction(row: LastMessageRow, reaction: unknown) {
+    const messageID = row.last_message_id
+    if (!messageID) return
+    const reactionType = textOption(prop(prop(reaction, "reaction_type"), "emoji_type") ?? prop(reaction, "emoji_type"))
+    if (reactionType !== "OK") return
+    const operator = prop(reaction, "operator")
+    if (prop(operator, "operator_type") === "app") return
+    const actionTime = numberOption(prop(reaction, "action_time"))
+    if (actionTime !== undefined && actionTime < pollStartedAt) return
+    const reactionID = textOption(prop(reaction, "reaction_id"))
+    const operatorID = textOption(prop(operator, "operator_id"), "unknown") ?? "unknown"
+    const key = reactionID ? `${messageID}:${reactionID}` : `${messageID}:${operatorID}:${actionTime ?? "unknown"}`
+
+    insertReactionInput.run(key, Date.now())
+    if ((db.query("SELECT changes() AS count").get() as { count: number }).count !== 1) return
+    const result = await input.client.session.promptAsync({
+      path: { id: row.session_id },
+      query: { directory: row.directory ?? input.directory },
+      body: { parts: [{ type: "text", text: "OK" }] },
+    })
+    if (prop(result, "error")) console.warn("lark-notify plugin: failed to forward Lark OK reaction", prop(result, "error"))
+  }
+
+  async function pollOKReactions(row: LastMessageRow) {
+    const messageID = row.last_message_id
+    if (!messageID) return
+    let pageToken: string | undefined
+    do {
+      const data = await larkAPI("GET", `/im/v1/messages/${encodeURIComponent(messageID)}/reactions`, {
+        reaction_type: "OK",
+        user_id_type: "open_id",
+        page_size: "50",
+        ...(pageToken ? { page_token: pageToken } : {}),
+      })
+      const items = prop(data, "items")
+      if (Array.isArray(items)) {
+        for (const item of items) await handleOKReaction(row, item)
+      }
+      pageToken = textOption(prop(data, "page_token"))
+      if (prop(data, "has_more") !== true) return
+    } while (pageToken)
   }
 
   function acquirePollLock(ttl = 35_000) {
@@ -639,6 +715,7 @@ export default (async (input, options) => {
           for (const row of selectThreads.all() as Array<{ thread_id: string | null }>) {
             if (row.thread_id) await pollMessages("thread", row.thread_id, cursor, now)
           }
+          for (const row of selectLastMessages.all() as LastMessageRow[]) await pollOKReactions(row)
           cursor = now
         }
       } catch (error) {
