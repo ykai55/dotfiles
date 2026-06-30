@@ -4,6 +4,7 @@
   "tools": [
     {
       "name": "clip",
+      "type": "archive",
       "version": "clip-latest",
       "targets": [
         {
@@ -25,6 +26,13 @@
           "executable": "clip"
         }
       ]
+    },
+    {
+      "name": "tide",
+      "type": "git",
+      "url": "git@github.com:ykai55/tide.git",
+      "ref": "stale-git-prompt",
+      "target": ".managed/tide"
     }
   ]
 }

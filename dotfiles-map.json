@@ -8,6 +8,7 @@
       "target": "~/.config/fish",
       "mode": "link_children",
       "exclude": [
+        ".DS_Store",
         ".gitignore",
         "fish_variables*",
         "fishd.tmp*"

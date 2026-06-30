@@ -6,3 +6,6 @@ __pycache__/
 target/
 ha_helper/config.toml
 bin/.downloads/
+.managed/
+
+.DS_Store

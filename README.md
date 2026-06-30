@@ -17,6 +17,10 @@ Apply the default user-level mappings from `dotfiles-map.json`:
 ~/dotfiles/bin/dotfiles-apply
 ```
 
+`dotfiles-apply` also clones git downloads from `downloads.json`.
+Tide is managed this way and fish will prefer
+`~/dotfiles/.managed/tide` when it is present.
+
 Replace conflicting local files with backed-up copies:
 
 ```bash
@@ -27,6 +31,12 @@ Include optional platform-specific mappings such as `niri` or `keyd`:
 
 ```bash
 ~/dotfiles/bin/dotfiles-apply --include-optional
+```
+
+Refresh existing downloads and git repositories:
+
+```bash
+~/dotfiles/bin/dotfiles-apply --downloads always
 ```
 
 The manifest is JSON and declares the source/target mapping for each config.
