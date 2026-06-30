@@ -81,8 +81,7 @@
       "mode": "symlink",
       "platforms": [
         "linux"
-      ],
-      "optional": true
+      ]
     },
     {
       "name": "ironbar",
@@ -91,8 +90,7 @@
       "mode": "symlink",
       "platforms": [
         "linux"
-      ],
-      "optional": true
+      ]
     },
     {
       "name": "keyd",
@@ -101,8 +99,7 @@
       "mode": "symlink",
       "platforms": [
         "linux"
-      ],
-      "optional": true
+      ]
     }
   ]
 }

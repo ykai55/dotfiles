@@ -31,7 +31,7 @@
       "name": "tide",
       "type": "git",
       "url": "git@github.com:ykai55/tide.git",
-      "ref": "stale-git-prompt",
+      "ref": "main",
       "target": ".managed/tide"
     }
   ]

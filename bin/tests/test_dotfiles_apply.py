@@ -277,9 +277,15 @@ class DotfilesApplyTests(CapturingTestCase):
             self.assertEqual(
                 [call.args[0] for call in run_mock.call_args_list],
                 [
-                    ["git", "fetch", "--depth", "1", "origin", "stale-git-prompt"],
-                    ["git", "checkout", "stale-git-prompt"],
-                    ["git", "pull", "--ff-only", "origin", "stale-git-prompt"],
+                    [
+                        "git",
+                        "fetch",
+                        "--depth",
+                        "1",
+                        "origin",
+                        "refs/heads/stale-git-prompt:refs/remotes/origin/stale-git-prompt",
+                    ],
+                    ["git", "checkout", "-B", "stale-git-prompt", "origin/stale-git-prompt"],
                 ],
             )
 
@@ -916,10 +922,68 @@ class DotfilesApplyTests(CapturingTestCase):
         parser = self.dotfiles_apply.build_parser()
 
         default_args = parser.parse_args([])
+        apply_args = parser.parse_args(["--apply"])
         never_args = parser.parse_args(["--downloads", "never"])
 
+        self.assertFalse(default_args.apply)
+        self.assertTrue(apply_args.apply)
         self.assertEqual(default_args.downloads, "auto")
         self.assertEqual(never_args.downloads, "never")
+
+    def test_main_defaults_to_dry_run_and_prints_apply_hint(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = os.path.join(tmpdir, "repo")
+            os.makedirs(repo, exist_ok=True)
+            self.write_json(os.path.join(repo, "downloads.json"), {"tools": []})
+
+            captured = {}
+
+            def fake_apply_manifest(*args, **kwargs):
+                captured.update(kwargs)
+                return self.dotfiles_apply.Stats()
+
+            with mock.patch.object(self.dotfiles_apply.sys, "argv", ["dotfiles-apply"]), mock.patch.object(
+                self.dotfiles_apply,
+                "repo_root",
+                return_value=repo,
+            ), mock.patch.object(
+                self.dotfiles_apply,
+                "apply_manifest",
+                side_effect=fake_apply_manifest,
+            ):
+                exit_code = self.dotfiles_apply.main()
+
+            self.assertEqual(exit_code, 0)
+            self.assertTrue(captured["dry_run"])
+            self.assertIn("DRY RUN: no changes were made", self._stdout_buffer.getvalue())
+            self.assertIn("--apply", self._stdout_buffer.getvalue())
+
+    def test_main_apply_disables_dry_run_hint(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = os.path.join(tmpdir, "repo")
+            os.makedirs(repo, exist_ok=True)
+            self.write_json(os.path.join(repo, "downloads.json"), {"tools": []})
+
+            captured = {}
+
+            def fake_apply_manifest(*args, **kwargs):
+                captured.update(kwargs)
+                return self.dotfiles_apply.Stats()
+
+            with mock.patch.object(self.dotfiles_apply.sys, "argv", ["dotfiles-apply", "--apply"]), mock.patch.object(
+                self.dotfiles_apply,
+                "repo_root",
+                return_value=repo,
+            ), mock.patch.object(
+                self.dotfiles_apply,
+                "apply_manifest",
+                side_effect=fake_apply_manifest,
+            ):
+                exit_code = self.dotfiles_apply.main()
+
+            self.assertEqual(exit_code, 0)
+            self.assertFalse(captured["dry_run"])
+            self.assertNotIn("DRY RUN: no changes were made", self._stdout_buffer.getvalue())
 
     def test_repo_downloads_manifest_targets_linux_and_macos_only(self):
         manifest_path = pathlib.Path(__file__).resolve().parents[2] / "downloads.json"
@@ -962,7 +1026,6 @@ class DotfilesApplyTests(CapturingTestCase):
         for name in ("niri", "ironbar", "keyd"):
             if name in mappings_by_name:
                 self.assertEqual(mappings_by_name[name].platforms, ["linux"])
-                self.assertTrue(mappings_by_name[name].optional)
 
     def test_repo_opencode_user_service_runs_requested_command(self):
         service_path = (

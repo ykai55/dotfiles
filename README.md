@@ -8,13 +8,13 @@ The repo assumes it is reachable as `~/dotfiles`. If you cloned it somewhere els
 Preview the changes:
 
 ```bash
-~/dotfiles/bin/dotfiles-apply --dry-run
+~/dotfiles/bin/dotfiles-apply
 ```
 
 Apply the default user-level mappings from `dotfiles-map.json`:
 
 ```bash
-~/dotfiles/bin/dotfiles-apply
+~/dotfiles/bin/dotfiles-apply --apply
 ```
 
 `dotfiles-apply` also clones git downloads from `downloads.json`.
@@ -24,19 +24,13 @@ Tide is managed this way and fish will prefer
 Replace conflicting local files with backed-up copies:
 
 ```bash
-~/dotfiles/bin/dotfiles-apply --force
-```
-
-Include optional platform-specific mappings such as `niri` or `keyd`:
-
-```bash
-~/dotfiles/bin/dotfiles-apply --include-optional
+~/dotfiles/bin/dotfiles-apply --apply --force
 ```
 
 Refresh existing downloads and git repositories:
 
 ```bash
-~/dotfiles/bin/dotfiles-apply --downloads always
+~/dotfiles/bin/dotfiles-apply --apply --downloads always
 ```
 
 The manifest is JSON and declares the source/target mapping for each config.
@@ -54,7 +48,6 @@ Supported manifest fields:
 - `target`: destination path
 - `mode`: `symlink` or `link_children`
 - `exclude`: glob patterns skipped under `link_children`
-- `optional`: only applied with `--include-optional`
 - `platforms`: only apply on matching platforms such as `linux` or `macos`
 
 Example Linux-only mapping:
@@ -65,8 +58,7 @@ Example Linux-only mapping:
   "source": "niri/config.kdl",
   "target": "~/.config/niri/config.kdl",
   "mode": "symlink",
-  "platforms": ["linux"],
-  "optional": true
+  "platforms": ["linux"]
 }
 ```
 
