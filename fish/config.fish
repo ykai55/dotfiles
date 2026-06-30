@@ -76,6 +76,7 @@ if test -x
 end
 
 set -gx tide_git_truncation_length 40
+set -gx tide_git_color_stale brblack
 
 add_path '~/.local/opt/*/bin' ~/.local/bin ~/scripts ~/script /usr/local/bin ~/bin
 add_path ~/src/emsdk/ ~/src/emsdk/upstream/emscripten/
