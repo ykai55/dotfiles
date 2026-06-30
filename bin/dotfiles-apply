@@ -32,7 +32,6 @@ class Mapping:
     target: str
     mode: str = "symlink"
     exclude: list[str] = field(default_factory=list)
-    optional: bool = False
     platforms: list[str] = field(default_factory=list)
 
 
@@ -133,15 +132,12 @@ def load_manifest(path: str) -> list[Mapping]:
             )
         exclude = item.get("exclude", [])
         platforms = item.get("platforms", [])
-        optional = item.get("optional", False)
         if not isinstance(exclude, list) or not all(isinstance(v, str) for v in exclude):
             raise RuntimeError(f"Mapping #{index} has invalid 'exclude' patterns")
         if not isinstance(platforms, list) or not all(
             isinstance(v, str) for v in platforms
         ):
             raise RuntimeError(f"Mapping #{index} has invalid 'platforms'")
-        if not isinstance(optional, bool):
-            raise RuntimeError(f"Mapping #{index} has invalid 'optional' value")
         name = item.get("name", source)
         if not isinstance(name, str) or not name:
             raise RuntimeError(f"Mapping #{index} has invalid 'name'")
@@ -152,7 +148,6 @@ def load_manifest(path: str) -> list[Mapping]:
                 target=target,
                 mode=mode,
                 exclude=exclude,
-                optional=optional,
                 platforms=platforms,
             )
         )
@@ -313,10 +308,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=os.path.join(repo_root(), DEFAULT_MANIFEST),
         help="Path to the JSON manifest. Defaults to dotfiles-map.json in the repo root.",
     )
-    parser.add_argument(
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument(
+        "--apply",
+        action="store_true",
+        help="Apply changes. The default is to preview planned changes only.",
+    )
+    mode_group.add_argument(
         "--dry-run",
         action="store_true",
-        help="Print planned changes without modifying the filesystem.",
+        help="Preview planned changes without modifying the filesystem. This is the default.",
     )
     parser.add_argument(
         "--force",
@@ -327,11 +328,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--prune",
         action="store_true",
         help="Remove stale managed child links for link_children mappings.",
-    )
-    parser.add_argument(
-        "--include-optional",
-        action="store_true",
-        help="Apply mappings marked as optional in the manifest.",
     )
     parser.add_argument(
         "--downloads",
@@ -652,9 +648,9 @@ def ensure_git_download(
         print_info(f"[update] {repo.name} -> {target}")
         if dry_run:
             return
-        run_git(["fetch", "--depth", "1", "origin", repo.ref], cwd=target)
-        run_git(["checkout", repo.ref], cwd=target)
-        run_git(["pull", "--ff-only", "origin", repo.ref], cwd=target)
+        remote_ref = f"refs/heads/{repo.ref}:refs/remotes/origin/{repo.ref}"
+        run_git(["fetch", "--depth", "1", "origin", remote_ref], cwd=target)
+        run_git(["checkout", "-B", repo.ref, f"origin/{repo.ref}"], cwd=target)
         return
 
     if path_exists(target):
@@ -718,9 +714,7 @@ def ensure_home_dotfiles_link(
     return True
 
 
-def should_include_mapping(mapping: Mapping, include_optional: bool) -> bool:
-    if mapping.optional and not include_optional:
-        return False
+def should_include_mapping(mapping: Mapping) -> bool:
     if mapping.platforms and current_platform() not in mapping.platforms:
         return False
     return True
@@ -861,7 +855,6 @@ def apply_mapping(
 def apply_manifest(
     actual_repo_root: str,
     manifest_path: str,
-    include_optional: bool = False,
     force: bool = False,
     dry_run: bool = False,
     prune: bool = False,
@@ -876,7 +869,7 @@ def apply_manifest(
     ensure_managed_downloads(actual_repo_root, dry_run, stats, download_mode)
 
     for mapping in mappings:
-        if not should_include_mapping(mapping, include_optional):
+        if not should_include_mapping(mapping):
             continue
         try:
             apply_mapping(mapping, actual_repo_root, force, dry_run, prune, stats)
@@ -895,12 +888,12 @@ def main() -> int:
         return 1
     manifest_path = expand_target(args.manifest)
     try:
+        dry_run = not args.apply
         stats = apply_manifest(
             actual_repo_root,
             manifest_path,
-            include_optional=args.include_optional,
             force=args.force,
-            dry_run=args.dry_run,
+            dry_run=dry_run,
             prune=args.prune,
             download_mode=args.downloads,
         )
@@ -912,6 +905,11 @@ def main() -> int:
         f"linked={stats.linked} backed_up={stats.backed_up} removed={stats.removed} "
         f"skipped={stats.skipped} errors={stats.errors}"
     )
+    if dry_run:
+        print_info(
+            "\033[1;33mDRY RUN: no changes were made. "
+            "Run again with --apply to make these changes.\033[0m"
+        )
     return 1 if stats.errors else 0
 
 

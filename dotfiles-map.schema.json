@@ -57,9 +57,6 @@
             "type": "string"
           }
         },
-        "optional": {
-          "type": "boolean"
-        },
         "platforms": {
           "type": "array",
           "items": {
