@@ -78,6 +78,18 @@ end
 set -gx tide_git_truncation_length 40
 set -gx tide_git_color_stale brblack
 
+set -l tide_managed_dir ~/dotfiles/.managed/tide
+if test -d $tide_managed_dir
+  contains -- $tide_managed_dir/functions $fish_function_path
+    or set -p fish_function_path $tide_managed_dir/functions
+  contains -- $tide_managed_dir/completions $fish_complete_path
+    or set -p fish_complete_path $tide_managed_dir/completions
+
+  for tide_conf in $tide_managed_dir/conf.d/*.fish
+    test -f $tide_conf; and source $tide_conf
+  end
+end
+
 add_path '~/.local/opt/*/bin' ~/.local/bin ~/scripts ~/script /usr/local/bin ~/bin
 add_path ~/src/emsdk/ ~/src/emsdk/upstream/emscripten/
 add_path ~/.ghcup/bin

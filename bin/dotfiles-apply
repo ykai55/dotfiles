@@ -11,6 +11,7 @@ import platform
 import re
 import shutil
 import string
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -46,6 +47,20 @@ class DownloadTarget:
     sha256: str
     archive: str
     executable: str
+
+
+@dataclass
+class GitDownload:
+    name: str
+    url: str
+    ref: str
+    target: str
+
+
+@dataclass
+class DownloadsManifest:
+    targets: list[DownloadTarget] = field(default_factory=list)
+    git_repos: list[GitDownload] = field(default_factory=list)
 
 
 @dataclass
@@ -144,9 +159,9 @@ def load_manifest(path: str) -> list[Mapping]:
     return loaded
 
 
-def load_downloads_manifest(path: str) -> list[DownloadTarget]:
+def parse_downloads_manifest(path: str) -> DownloadsManifest:
     if not os.path.exists(path):
-        return []
+        return DownloadsManifest()
     with open(path, "r", encoding="utf-8") as f:
         raw = json.load(f)
 
@@ -166,13 +181,19 @@ def load_downloads_manifest(path: str) -> list[DownloadTarget]:
     if not isinstance(tools, list):
         raise RuntimeError("Downloads manifest must contain a 'tools' array")
 
-    loaded: list[DownloadTarget] = []
+    loaded = DownloadsManifest()
     for tool_index, tool in enumerate(tools, start=1):
         if not isinstance(tool, dict):
             raise RuntimeError(f"Download tool #{tool_index} must be an object")
+        tool_type = tool.get("type", "archive")
+        if tool_type == "git":
+            loaded.git_repos.append(load_git_download(tool_index, tool))
+            continue
+        if tool_type != "archive":
+            raise RuntimeError(f"Download tool #{tool_index} has unsupported type")
         validate_object_keys(
             tool,
-            {"name", "version", "targets"},
+            {"name", "type", "version", "targets"},
             f"Download tool #{tool_index} has unexpected fields",
         )
         name = tool.get("name")
@@ -232,8 +253,29 @@ def load_downloads_manifest(path: str) -> list[DownloadTarget]:
                 raise RuntimeError(
                     f"Download target #{target_index} for {name} has invalid sha256"
                 )
-            loaded.append(DownloadTarget(tool=name, version=version, **values))
+            loaded.targets.append(DownloadTarget(tool=name, version=version, **values))
     return loaded
+
+
+def load_git_download(tool_index: int, tool: dict[str, object]) -> GitDownload:
+    validate_object_keys(
+        tool,
+        {"name", "type", "url", "ref", "target"},
+        f"Download tool #{tool_index} has unexpected fields",
+    )
+    values = {key: tool.get(key) for key in ("name", "url", "ref", "target")}
+    for key, value in values.items():
+        if not isinstance(value, str) or not value:
+            raise RuntimeError(f"Download tool #{tool_index} has invalid '{key}'")
+    validate_git_download_target(
+        values["target"],
+        f"Download tool #{tool_index} has invalid 'target'",
+    )
+    return GitDownload(**values)
+
+
+def load_downloads_manifest(path: str) -> list[DownloadTarget]:
+    return parse_downloads_manifest(path).targets
 
 
 def validate_object_keys(value: dict[str, object], allowed: set[str], message: str) -> None:
@@ -251,6 +293,14 @@ def validate_download_executable(value: str, message: str) -> None:
         raise RuntimeError(message)
     segments = value.split("/")
     if any(segment in {"", ".."} for segment in segments):
+        raise RuntimeError(message)
+
+
+def validate_git_download_target(value: str, message: str) -> None:
+    if os.path.isabs(value) or ntpath.isabs(value) or ntpath.splitdrive(value)[0]:
+        raise RuntimeError(message)
+    segments = value.split("/")
+    if any(segment in {"", ".", ".."} for segment in segments):
         raise RuntimeError(message)
 
 
@@ -555,10 +605,10 @@ def ensure_managed_downloads(
     if download_mode == "never":
         return
     downloads_path = os.path.join(actual_repo_root, "downloads.json")
-    targets = load_downloads_manifest(downloads_path)
+    downloads = parse_downloads_manifest(downloads_path)
     platform_name = current_platform()
     arch_name = current_machine_arch()
-    for target in targets:
+    for target in downloads.targets:
         if target.platform != platform_name or target.arch != arch_name:
             continue
         try:
@@ -566,6 +616,66 @@ def ensure_managed_downloads(
         except (OSError, RuntimeError, tarfile.TarError, zipfile.BadZipFile) as exc:
             print_warning(f"[error] {target.tool}: {exc}")
             stats.errors += 1
+    for repo in downloads.git_repos:
+        try:
+            ensure_git_download(actual_repo_root, repo, dry_run, download_mode)
+        except (OSError, RuntimeError) as exc:
+            print_warning(f"[error] {repo.name}: {exc}")
+            stats.errors += 1
+
+
+def run_git(args: Sequence[str], cwd: str | None = None) -> None:
+    proc = subprocess.run(
+        ["git", *args],
+        cwd=cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if proc.returncode != 0:
+        detail = proc.stderr.strip() or proc.stdout.strip()
+        raise RuntimeError(detail or f"git {' '.join(args)} failed")
+
+
+def ensure_git_download(
+    actual_repo_root: str,
+    repo: GitDownload,
+    dry_run: bool,
+    download_mode: str = "auto",
+) -> None:
+    target = os.path.join(actual_repo_root, repo.target)
+    git_dir = os.path.join(target, ".git")
+    if os.path.isdir(git_dir):
+        if download_mode != "always":
+            print_info(f"[ok] {repo.name} -> {target}")
+            return
+        print_info(f"[update] {repo.name} -> {target}")
+        if dry_run:
+            return
+        run_git(["fetch", "--depth", "1", "origin", repo.ref], cwd=target)
+        run_git(["checkout", repo.ref], cwd=target)
+        run_git(["pull", "--ff-only", "origin", repo.ref], cwd=target)
+        return
+
+    if path_exists(target):
+        raise RuntimeError(f"{target} exists and is not a git download")
+
+    print_info(f"[clone] {repo.name} -> {target}")
+    if dry_run:
+        return
+    ensure_parent_dir(target, dry_run)
+    run_git(
+        [
+            "clone",
+            "--depth",
+            "1",
+            "--branch",
+            repo.ref,
+            "--single-branch",
+            repo.url,
+            target,
+        ]
+    )
 
 
 def backup_path(path: str, dry_run: bool, stats: Stats) -> str:

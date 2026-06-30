@@ -26,6 +26,16 @@
   },
   "$defs": {
     "tool": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/archiveTool"
+        },
+        {
+          "$ref": "#/$defs/gitTool"
+        }
+      ]
+    },
+    "archiveTool": {
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -39,6 +49,10 @@
           "minLength": 1,
           "pattern": "^(?!\\.\\.?$)[^/\\\\]+$"
         },
+        "type": {
+          "type": "string",
+          "const": "archive"
+        },
         "version": {
           "type": "string",
           "minLength": 1,
@@ -50,6 +64,40 @@
           "items": {
             "$ref": "#/$defs/target"
           }
+        }
+      }
+    },
+    "gitTool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "type",
+        "url",
+        "ref",
+        "target"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "type": {
+          "type": "string",
+          "const": "git"
+        },
+        "url": {
+          "type": "string",
+          "minLength": 1
+        },
+        "ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "target": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^(?!/)(?![A-Za-z]:)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*(?:^|/)\\.(?:/|$))(?!.*//)[^/]+(?:/[^/]+)*$"
         }
       }
     },

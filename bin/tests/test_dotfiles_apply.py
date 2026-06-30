@@ -6,6 +6,7 @@ import json
 import os
 import pathlib
 import stat
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -110,6 +111,31 @@ class DotfilesApplyTests(CapturingTestCase):
         self.write_json(manifest_path, payload)
         return manifest_path
 
+    def write_empty_manifest(self, repo):
+        manifest_path = os.path.join(repo, "manifest.json")
+        self.write_json(manifest_path, {"mappings": []})
+        return manifest_path
+
+    def write_git_download_manifest(self, repo):
+        manifest_path = os.path.join(repo, "downloads.json")
+        self.write_json(
+            manifest_path,
+            {
+                "$schema": "./downloads.schema.json",
+                "version": 1,
+                "tools": [
+                    {
+                        "name": "tide",
+                        "type": "git",
+                        "url": "git@github.com:ykai55/tide.git",
+                        "ref": "stale-git-prompt",
+                        "target": ".managed/tide",
+                    }
+                ],
+            },
+        )
+        return manifest_path
+
     def apply_managed_download(self, home, repo, manifest_path):
         with mock.patch.dict(os.environ, {"HOME": home}, clear=False), mock.patch.object(
             self.dotfiles_apply,
@@ -151,6 +177,111 @@ class DotfilesApplyTests(CapturingTestCase):
             self.assertEqual(stats.errors, 0)
             self.assertFalse(os.path.exists(os.path.join(repo, "bin", ".downloads")))
             self.assertIn("[download] clip linux-x86_64-musl", self._stdout_buffer.getvalue())
+
+    def test_git_download_dry_run_does_not_clone(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = os.path.join(tmpdir, "home")
+            repo = os.path.join(tmpdir, "repo")
+            os.makedirs(home, exist_ok=True)
+            os.makedirs(repo, exist_ok=True)
+            manifest_path = self.write_empty_manifest(repo)
+            self.write_git_download_manifest(repo)
+
+            with mock.patch.dict(os.environ, {"HOME": home}, clear=False), mock.patch.object(
+                self.dotfiles_apply.subprocess,
+                "run",
+                side_effect=AssertionError("git should not run"),
+            ):
+                stats = self.dotfiles_apply.apply_manifest(repo, manifest_path, dry_run=True)
+
+            self.assertEqual(stats.errors, 0)
+            self.assertFalse(os.path.exists(os.path.join(repo, ".managed")))
+            self.assertIn("[clone] tide", self._stdout_buffer.getvalue())
+
+    def test_git_download_clones_missing_repo(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = os.path.join(tmpdir, "home")
+            repo = os.path.join(tmpdir, "repo")
+            os.makedirs(home, exist_ok=True)
+            os.makedirs(repo, exist_ok=True)
+            manifest_path = self.write_empty_manifest(repo)
+            self.write_git_download_manifest(repo)
+
+            completed = subprocess.CompletedProcess(["git"], 0, "", "")
+            with mock.patch.dict(os.environ, {"HOME": home}, clear=False), mock.patch.object(
+                self.dotfiles_apply.subprocess,
+                "run",
+                return_value=completed,
+            ) as run_mock:
+                stats = self.dotfiles_apply.apply_manifest(repo, manifest_path)
+
+            self.assertEqual(stats.errors, 0)
+            run_mock.assert_called_once_with(
+                [
+                    "git",
+                    "clone",
+                    "--depth",
+                    "1",
+                    "--branch",
+                    "stale-git-prompt",
+                    "--single-branch",
+                    "git@github.com:ykai55/tide.git",
+                    os.path.join(repo, ".managed", "tide"),
+                ],
+                cwd=None,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+    def test_git_download_auto_keeps_existing_clone_without_fetching(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = os.path.join(tmpdir, "home")
+            repo = os.path.join(tmpdir, "repo")
+            os.makedirs(home, exist_ok=True)
+            os.makedirs(os.path.join(repo, ".managed", "tide", ".git"), exist_ok=True)
+            manifest_path = self.write_empty_manifest(repo)
+            self.write_git_download_manifest(repo)
+
+            with mock.patch.dict(os.environ, {"HOME": home}, clear=False), mock.patch.object(
+                self.dotfiles_apply.subprocess,
+                "run",
+                side_effect=AssertionError("git should not run"),
+            ):
+                stats = self.dotfiles_apply.apply_manifest(repo, manifest_path)
+
+            self.assertEqual(stats.errors, 0)
+            self.assertIn("[ok] tide", self._stdout_buffer.getvalue())
+
+    def test_git_download_always_updates_existing_clone(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = os.path.join(tmpdir, "repo")
+            os.makedirs(os.path.join(repo, ".managed", "tide", ".git"), exist_ok=True)
+            self.write_git_download_manifest(repo)
+
+            completed = subprocess.CompletedProcess(["git"], 0, "", "")
+            with mock.patch.object(
+                self.dotfiles_apply.subprocess,
+                "run",
+                return_value=completed,
+            ) as run_mock:
+                stats = self.dotfiles_apply.Stats()
+                self.dotfiles_apply.ensure_managed_downloads(
+                    repo,
+                    dry_run=False,
+                    stats=stats,
+                    download_mode="always",
+                )
+
+            self.assertEqual(stats.errors, 0)
+            self.assertEqual(
+                [call.args[0] for call in run_mock.call_args_list],
+                [
+                    ["git", "fetch", "--depth", "1", "origin", "stale-git-prompt"],
+                    ["git", "checkout", "stale-git-prompt"],
+                    ["git", "pull", "--ff-only", "origin", "stale-git-prompt"],
+                ],
+            )
 
     def test_managed_download_installs_verified_archive(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -793,7 +924,8 @@ class DotfilesApplyTests(CapturingTestCase):
     def test_repo_downloads_manifest_targets_linux_and_macos_only(self):
         manifest_path = pathlib.Path(__file__).resolve().parents[2] / "downloads.json"
 
-        targets = self.dotfiles_apply.load_downloads_manifest(str(manifest_path))
+        downloads = self.dotfiles_apply.parse_downloads_manifest(str(manifest_path))
+        targets = downloads.targets
 
         self.assertEqual(
             [target.target for target in targets],
@@ -801,6 +933,8 @@ class DotfilesApplyTests(CapturingTestCase):
         )
         self.assertTrue(all("clip-latest" in target.url for target in targets))
         self.assertTrue(all("clip-v1.0.0" not in target.url for target in targets))
+        self.assertEqual([repo.name for repo in downloads.git_repos], ["tide"])
+        self.assertEqual(downloads.git_repos[0].target, ".managed/tide")
 
     def test_repo_default_manifest_is_valid(self):
         manifest_path = pathlib.Path(__file__).resolve().parents[2] / "dotfiles-map.json"
