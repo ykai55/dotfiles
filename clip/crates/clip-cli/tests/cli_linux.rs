@@ -196,6 +196,70 @@ fn set_accepts_empty_piped_stdin_for_text() {
 }
 
 #[test]
+fn no_args_with_piped_stdin_sets_text() {
+    let temp = TempDir::new().unwrap();
+    write_script(
+        &temp,
+        "wl-copy",
+        "#!/usr/bin/env bash\nprintf '%s\n' \"$*\" > \"$CLIP_TEST_ARGS\"\ncat > \"$CLIP_TEST_STDIN\"\n",
+    );
+    write_script(&temp, "wl-paste", "#!/usr/bin/env bash\nexit 0\n");
+
+    let args_path = temp.path().join("args.txt");
+    let stdin_path = temp.path().join("stdin.txt");
+    let path = format!(
+        "{}:{}",
+        temp.path().display(),
+        std::env::var("PATH").unwrap()
+    );
+
+    Command::cargo_bin("clip")
+        .unwrap()
+        .args(["--target", "wayland"])
+        .env("WAYLAND_DISPLAY", "wayland-0")
+        .env("PATH", path)
+        .env("CLIP_TEST_ARGS", &args_path)
+        .env("CLIP_TEST_STDIN", &stdin_path)
+        .write_stdin("abc\n")
+        .assert()
+        .success();
+
+    assert_eq!(
+        fs::read_to_string(args_path).unwrap(),
+        "--type text/plain\n"
+    );
+    assert_eq!(fs::read_to_string(stdin_path).unwrap(), "abc\n");
+}
+
+#[test]
+fn no_args_with_terminal_stdin_gets_text() {
+    let temp = TempDir::new().unwrap();
+    write_script(&temp, "wl-copy", "#!/usr/bin/env bash\nexit 0\n");
+    write_script(
+        &temp,
+        "wl-paste",
+        "#!/usr/bin/env bash\nprintf '%s\n' \"$*\" > \"$CLIP_TEST_ARGS\"\nprintf 'abc\\n'\n",
+    );
+
+    let args_path = temp.path().join("args.txt");
+    let path = format!(
+        "{}:{}",
+        temp.path().display(),
+        std::env::var("PATH").unwrap()
+    );
+
+    command_with_tty(&temp, "get-default", &["--target", "wayland"])
+        .env("WAYLAND_DISPLAY", "wayland-0")
+        .env("PATH", path)
+        .env("CLIP_TEST_ARGS", &args_path)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("abc"));
+
+    assert_eq!(fs::read_to_string(args_path).unwrap(), "--no-newline\n");
+}
+
+#[test]
 fn set_accepts_empty_piped_stdin_for_typed_bytes() {
     let temp = TempDir::new().unwrap();
     write_script(

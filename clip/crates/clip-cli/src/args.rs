@@ -1,3 +1,4 @@
+use std::io::IsTerminal;
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
@@ -6,8 +7,10 @@ use clip_core::{ClipError, TargetKind};
 #[derive(Debug, Parser)]
 #[command(name = "clip")]
 pub struct Cli {
+    #[arg(short = 'T', long, value_parser = parse_target_kind)]
+    pub target: Option<TargetKind>,
     #[command(subcommand)]
-    pub command: Command,
+    pub command: Option<Command>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -52,7 +55,20 @@ pub struct TargetsArgs {
 }
 
 pub fn validate(cli: &Cli) -> Result<(), ClipError> {
-    match &cli.command {
+    if cli.target.is_some() && cli.command.is_some() {
+        return Err(ClipError::config(
+            "--target before a subcommand is only supported in auto mode",
+        ));
+    }
+
+    if let Some(command) = &cli.command {
+        validate_command(command)?;
+    }
+    Ok(())
+}
+
+pub fn validate_command(command: &Command) -> Result<(), ClipError> {
+    match command {
         Command::Get(_) => {}
         Command::Set(args) => {
             let mut explicit_sources = 0;
@@ -72,6 +88,23 @@ pub fn validate(cli: &Cli) -> Result<(), ClipError> {
         Command::Targets(_) => {}
     }
     Ok(())
+}
+
+pub fn command_or_default(cli: Cli) -> Command {
+    match cli.command {
+        Some(command) => command,
+        None if std::io::stdin().is_terminal() => Command::Get(GetArgs {
+            mime: None,
+            output: None,
+            target: cli.target,
+        }),
+        None => Command::Set(SetArgs {
+            text: None,
+            mime: None,
+            input: None,
+            target: cli.target,
+        }),
+    }
 }
 
 fn parse_target_kind(value: &str) -> Result<TargetKind, String> {

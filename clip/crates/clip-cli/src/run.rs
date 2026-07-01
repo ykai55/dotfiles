@@ -4,18 +4,20 @@ use clap::Parser;
 use clip_core::{ClipError, MimeType, ReadRequest};
 use clip_platform::{available_targets, resolve_backend, ProcessCommandRunner, RealEnvProbe};
 
-use crate::args::{Cli, Command};
+use crate::args::{command_or_default, validate_command, Cli, Command};
 use crate::input::load_item;
 use crate::output::write_output;
 
 pub fn run(cli: Cli) -> Result<(), ClipError> {
     crate::args::validate(&cli)?;
+    let command = command_or_default(cli);
+    validate_command(&command)?;
 
     let probe = RealEnvProbe;
     let runner = Arc::new(ProcessCommandRunner);
     let macos_helper = std::env::var_os("CLIP_MACOS_HELPER").map(Into::into);
 
-    match cli.command {
+    match command {
         Command::Set(args) => {
             let backend = resolve_backend(&probe, runner, args.target, macos_helper)?;
             let item = load_item(&args)?;
