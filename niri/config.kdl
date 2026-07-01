@@ -341,6 +341,11 @@ window-rule {
     default-column-width {}
 }
 
+window-rule {
+    match app-id=r#"^firefox$"#
+    default-column-width { proportion 0.8; }
+}
+
 // Open the Firefox picture-in-picture player as floating by default.
 window-rule {
     // This app-id regular expression will work for both:
