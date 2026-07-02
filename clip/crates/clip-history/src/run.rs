@@ -95,7 +95,7 @@ fn print_entries(store_dir: &PathBuf, query: Option<&str>, limit: usize) -> Resu
             "{}\t{}\t{}\t{}",
             short_id(&entry.id),
             entry.primary_mime.as_str(),
-            entry.variants.len(),
+            entry.variant_count,
             preview
         );
         printed += 1;
