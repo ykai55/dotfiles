@@ -43,7 +43,6 @@ class DownloadTarget:
     platform: str
     arch: str
     url: str
-    sha256: str
     archive: str
     executable: str
 
@@ -212,7 +211,6 @@ def parse_downloads_manifest(path: str) -> DownloadsManifest:
                 "platform",
                 "arch",
                 "url",
-                "sha256",
                 "archive",
                 "executable",
             }
@@ -242,12 +240,6 @@ def parse_downloads_manifest(path: str) -> DownloadsManifest:
                 values["executable"],
                 f"Download target #{target_index} for {name} has invalid 'executable'",
             )
-            if len(values["sha256"]) != 64 or any(
-                char not in string.hexdigits for char in values["sha256"]
-            ):
-                raise RuntimeError(
-                    f"Download target #{target_index} for {name} has invalid sha256"
-                )
             loaded.targets.append(DownloadTarget(tool=name, version=version, **values))
     return loaded
 
@@ -401,15 +393,17 @@ def download_marker_path(actual_repo_root: str, target: DownloadTarget) -> str:
 
 
 def download_marker_payload(target: DownloadTarget, sha256: str | None = None) -> dict[str, str]:
-    return {
+    payload = {
         "tool": target.tool,
         "version": target.version,
         "target": target.target,
         "url": target.url,
-        "sha256": (sha256 or target.sha256).lower(),
         "archive": target.archive,
         "executable": target.executable,
     }
+    if sha256 is not None:
+        payload["sha256"] = sha256.lower()
+    return payload
 
 
 def download_marker_matches(
@@ -423,7 +417,7 @@ def download_marker_matches(
     except (OSError, json.JSONDecodeError):
         return False
     expected = download_marker_payload(target, expected_sha256)
-    if expected_sha256 is not None or target.sha256.lower() != ZERO_SHA256:
+    if expected_sha256 is not None:
         return marker == expected
     for key in ("tool", "version", "target", "url", "archive", "executable"):
         if marker.get(key) != expected[key]:
@@ -470,8 +464,6 @@ def fetch_sha256_file(url: str) -> str:
 
 
 def resolve_download_sha256(target: DownloadTarget) -> str:
-    if target.sha256.lower() != ZERO_SHA256:
-        return target.sha256.lower()
     return fetch_sha256_file(target.url + ".sha256")
 
 
@@ -550,9 +542,7 @@ def ensure_download_target(
     root = download_root(actual_repo_root, target)
     if download_mode != "always" and os.path.isfile(executable_path) and os.access(executable_path, os.X_OK):
         expected_sha256 = None
-        if target.sha256.lower() != ZERO_SHA256:
-            expected_sha256 = target.sha256.lower()
-        elif not dry_run:
+        if not dry_run:
             expected_sha256 = resolve_download_sha256(target)
         if download_marker_matches(actual_repo_root, target, expected_sha256):
             print_info(f"[ok] {target.tool} {target.target}")
@@ -571,8 +561,8 @@ def ensure_download_target(
         archive_path = os.path.join(tmpdir, "asset")
         extract_dir = os.path.join(tmpdir, "extract")
         os.makedirs(extract_dir, exist_ok=True)
-        download_file(target.url, archive_path)
         expected_sha256 = resolve_download_sha256(target)
+        download_file(target.url, archive_path)
         actual_sha256 = file_sha256(archive_path)
         if actual_sha256 != expected_sha256:
             raise RuntimeError(

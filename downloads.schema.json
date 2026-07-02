@@ -109,7 +109,6 @@
         "platform",
         "arch",
         "url",
-        "sha256",
         "archive",
         "executable"
       ],
@@ -130,10 +129,6 @@
         "url": {
           "type": "string",
           "minLength": 1
-        },
-        "sha256": {
-          "type": "string",
-          "pattern": "^[0-9A-Fa-f]{64}$"
         },
         "archive": {
           "type": "string",

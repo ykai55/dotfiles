@@ -46,7 +46,7 @@ class DotfilesApplyTests(CapturingTestCase):
         with open(path, "w", encoding="utf-8") as f:
             json.dump(payload, f)
 
-    def write_clip_download_manifest(self, repo, archive_path, sha256):
+    def write_clip_download_manifest(self, repo, archive_path, sha256=None):
         manifest_path = os.path.join(repo, "downloads.json")
         self.write_json(
             manifest_path,
@@ -63,7 +63,6 @@ class DotfilesApplyTests(CapturingTestCase):
                                 "platform": "linux",
                                 "arch": "x86_64",
                                 "url": "file://" + archive_path,
-                                "sha256": sha256,
                                 "archive": "tar.gz",
                                 "executable": "clip",
                             }
@@ -72,6 +71,9 @@ class DotfilesApplyTests(CapturingTestCase):
                 ],
             },
         )
+        if sha256 is not None:
+            with open(archive_path + ".sha256", "w", encoding="utf-8") as f:
+                f.write(f"{sha256}  {os.path.basename(archive_path)}\n")
         return manifest_path
 
     def clip_download_marker(self, archive_path, sha256):
@@ -327,7 +329,7 @@ class DotfilesApplyTests(CapturingTestCase):
             self.assertTrue(os.path.islink(current))
             self.assertEqual(os.readlink(current), "v1.0.0")
 
-    def test_managed_download_zero_sha256_fetches_sibling_checksum(self):
+    def test_managed_download_fetches_sibling_checksum(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             home = os.path.join(tmpdir, "home")
             repo = os.path.join(tmpdir, "repo")
@@ -358,7 +360,7 @@ class DotfilesApplyTests(CapturingTestCase):
                 marker = json.load(f)
             self.assertEqual(marker["sha256"], sha256)
 
-    def test_managed_download_zero_sha256_rejects_invalid_checksum_file(self):
+    def test_managed_download_rejects_invalid_checksum_file(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             home = os.path.join(tmpdir, "home")
             repo = os.path.join(tmpdir, "repo")
@@ -378,7 +380,38 @@ class DotfilesApplyTests(CapturingTestCase):
             self.assertFalse(os.path.exists(installed))
             self.assertIn("No sha256 checksum found", self._stderr_buffer.getvalue())
 
-    def test_managed_download_zero_sha256_dry_run_does_not_fetch_checksum(self):
+    def test_managed_download_checks_hash_before_archive_download(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = os.path.join(tmpdir, "home")
+            repo = os.path.join(tmpdir, "repo")
+            os.makedirs(home, exist_ok=True)
+            os.makedirs(repo, exist_ok=True)
+            archive_path, _sha256 = self.make_clip_archive(tmpdir)
+            self.write_clip_download_manifest(repo, archive_path, "0" * 64)
+            with open(archive_path + ".sha256", "w", encoding="utf-8") as f:
+                f.write("no checksum here\n")
+            manifest_path = os.path.join(repo, "manifest.json")
+            self.write_json(manifest_path, {"mappings": []})
+
+            with mock.patch.dict(os.environ, {"HOME": home}, clear=False), mock.patch.object(
+                self.dotfiles_apply,
+                "current_platform",
+                return_value="linux",
+            ), mock.patch.object(
+                self.dotfiles_apply,
+                "current_machine_arch",
+                return_value="x86_64",
+            ), mock.patch.object(
+                self.dotfiles_apply,
+                "download_file",
+                side_effect=AssertionError("archive should not download before checksum"),
+            ):
+                stats = self.dotfiles_apply.apply_manifest(repo, manifest_path)
+
+            self.assertEqual(stats.errors, 1)
+            self.assertIn("No sha256 checksum found", self._stderr_buffer.getvalue())
+
+    def test_managed_download_dry_run_does_not_fetch_checksum(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             home = os.path.join(tmpdir, "home")
             repo = os.path.join(tmpdir, "repo")
@@ -408,7 +441,7 @@ class DotfilesApplyTests(CapturingTestCase):
             self.assertFalse(os.path.exists(os.path.join(repo, "bin", ".downloads")))
             self.assertIn("[download] clip linux-x86_64-musl", self._stdout_buffer.getvalue())
 
-    def test_managed_download_zero_sha256_accepts_cached_binary_with_resolved_marker(self):
+    def test_managed_download_accepts_cached_binary_with_resolved_marker(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             home = os.path.join(tmpdir, "home")
             repo = os.path.join(tmpdir, "repo")
@@ -448,7 +481,7 @@ class DotfilesApplyTests(CapturingTestCase):
             self.assertEqual(stats.errors, 0)
             self.assertIn("[ok] clip linux-x86_64-musl", self._stdout_buffer.getvalue())
 
-    def test_managed_download_zero_sha256_refreshes_stale_cached_binary(self):
+    def test_managed_download_refreshes_stale_cached_binary(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             home = os.path.join(tmpdir, "home")
             repo = os.path.join(tmpdir, "repo")
@@ -509,9 +542,9 @@ class DotfilesApplyTests(CapturingTestCase):
                 "current_machine_arch",
                 return_value="x86_64",
             ), mock.patch.object(
-                self.dotfiles_apply.urllib.request,
-                "urlopen",
-                side_effect=AssertionError("download should not run"),
+                self.dotfiles_apply,
+                "download_file",
+                side_effect=AssertionError("archive should not download"),
             ):
                 stats = self.dotfiles_apply.apply_manifest(repo, manifest_path)
 
@@ -674,7 +707,6 @@ class DotfilesApplyTests(CapturingTestCase):
                 ("executable-backslash", ["tools", 0, "targets", 0, "executable"], "bin\\clip"),
                 ("executable-drive-relative", ["tools", 0, "targets", 0, "executable"], "C:clip.exe"),
                 ("executable-windows-absolute", ["tools", 0, "targets", 0, "executable"], "C:/clip.exe"),
-                ("sha256", ["tools", 0, "targets", 0, "sha256"], "g" * 64),
             )
             for key, path, value in cases:
                 with self.subTest(key=key):
