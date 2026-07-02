@@ -32,7 +32,8 @@ jobs:
           set -euo pipefail
           mkdir -p dist/clip-linux-x86_64-musl
           cp clip/target/x86_64-unknown-linux-musl/release/clip dist/clip-linux-x86_64-musl/clip
-          tar -C dist/clip-linux-x86_64-musl -czf dist/clip-linux-x86_64-musl.tar.gz clip
+          cp clip/target/x86_64-unknown-linux-musl/release/clip-history dist/clip-linux-x86_64-musl/clip-history
+          tar -C dist/clip-linux-x86_64-musl -czf dist/clip-linux-x86_64-musl.tar.gz clip clip-history
           sha256sum dist/clip-linux-x86_64-musl.tar.gz > dist/clip-linux-x86_64-musl.tar.gz.sha256
 
       - name: Upload build artifact
@@ -63,8 +64,9 @@ jobs:
           set -euo pipefail
           mkdir -p dist/clip-macos-aarch64
           cp clip/target/release/clip dist/clip-macos-aarch64/clip
+          cp clip/target/release/clip-history dist/clip-macos-aarch64/clip-history
           cp clip/helpers/macos/clip-macos-helper/.build/release/clip-macos-helper dist/clip-macos-aarch64/clip-macos-helper
-          tar -C dist/clip-macos-aarch64 -czf dist/clip-macos-aarch64.tar.gz clip clip-macos-helper
+          tar -C dist/clip-macos-aarch64 -czf dist/clip-macos-aarch64.tar.gz clip clip-history clip-macos-helper
           shasum -a 256 dist/clip-macos-aarch64.tar.gz > dist/clip-macos-aarch64.tar.gz.sha256
 
       - name: Upload build artifact

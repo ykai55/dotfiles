@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+fail() {
+  echo "clip-history wrapper: $1" >&2
+  exit 1
+}
+
+resolve_clip_history_binary() {
+  local script_dir repo_root system arch target_dir binary_name clip_history_bin local_clip_history_bin
+
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  repo_root="$(cd "$script_dir/.." && pwd)"
+  system="$(uname -s)"
+  arch="$(uname -m)"
+  binary_name="clip-history"
+
+  case "$system" in
+    Darwin)
+      case "$arch" in
+        arm64|aarch64)
+          target_dir="macos-aarch64"
+          ;;
+        *)
+          fail "unsupported macOS architecture: $arch"
+          ;;
+      esac
+      ;;
+    Linux)
+      case "$arch" in
+        x86_64|amd64)
+          target_dir="linux-x86_64-musl"
+          ;;
+        *)
+          fail "unsupported Linux architecture: $arch"
+          ;;
+      esac
+      ;;
+    CYGWIN*|MINGW*|MSYS*)
+      case "$arch" in
+        x86_64|amd64)
+          target_dir="windows-x86_64-gnu"
+          binary_name="clip-history.exe"
+          ;;
+        *)
+          fail "unsupported Windows architecture: $arch"
+          ;;
+      esac
+      ;;
+    *)
+      fail "unsupported platform: $system"
+      ;;
+  esac
+
+  local_clip_history_bin="$repo_root/clip/target/release/$binary_name"
+  if [[ -x "$local_clip_history_bin" ]]; then
+    clip_history_bin="$local_clip_history_bin"
+  else
+    clip_history_bin="$repo_root/bin/.downloads/clip/current/$target_dir/$binary_name"
+  fi
+  if [[ ! -x "$clip_history_bin" ]]; then
+    fail "missing downloaded clip-history binary: $clip_history_bin; run bin/dotfiles-apply"
+  fi
+
+  RESOLVED_REPO_ROOT="$repo_root"
+  RESOLVED_TARGET_DIR="$target_dir"
+  RESOLVED_CLIP_HISTORY_BIN="$clip_history_bin"
+}
+
+main() {
+  local helper_path
+
+  resolve_clip_history_binary
+
+  if [[ "$RESOLVED_TARGET_DIR" == "macos-aarch64" ]]; then
+    helper_path="$RESOLVED_REPO_ROOT/bin/.downloads/clip/current/$RESOLVED_TARGET_DIR/clip-macos-helper"
+    if [[ ! -x "$helper_path" ]]; then
+      fail "missing downloaded clip helper: $helper_path; run bin/dotfiles-apply"
+    fi
+    export CLIP_MACOS_HELPER="$helper_path"
+  fi
+
+  exec "$RESOLVED_CLIP_HISTORY_BIN" "$@"
+}
+
+main "$@"

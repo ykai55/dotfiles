@@ -171,6 +171,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "clip-history"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "clip-core",
+ "clip-platform",
+ "tempfile",
+]
+
+[[package]]
 name = "clip-platform"
 version = "0.1.0"
 dependencies = [
