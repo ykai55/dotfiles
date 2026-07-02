@@ -32,6 +32,11 @@
       "~/dotfiles/**": "allow",
     }
   },
+  "agent": {
+    "compaction": {
+      "model": "openai/gpt-5.3-codex-spark"
+    }
+  },
   "provider": {
   }
 }
