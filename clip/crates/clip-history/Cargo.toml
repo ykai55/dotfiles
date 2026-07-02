@@ -1,0 +1,16 @@
+[package]
+name = "clip-history"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "clip-history"
+path = "src/main.rs"
+
+[dependencies]
+clap = { workspace = true }
+clip-core = { path = "../clip-core" }
+clip-platform = { path = "../clip-platform" }
+
+[dev-dependencies]
+tempfile = { workspace = true }

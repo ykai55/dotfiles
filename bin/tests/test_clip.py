@@ -9,6 +9,7 @@ import unittest
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 SOURCE_CLIP = REPO_ROOT / "bin" / "clip"
+SOURCE_CLIP_HISTORY = REPO_ROOT / "bin" / "clip-history"
 
 
 def write_executable(path: pathlib.Path, content: str) -> None:
@@ -25,6 +26,11 @@ class ClipWrapperTests(unittest.TestCase):
         clip_path.parent.mkdir(parents=True, exist_ok=True)
         clip_path.write_text(SOURCE_CLIP.read_text(encoding="utf-8"), encoding="utf-8")
         clip_path.chmod(clip_path.stat().st_mode | stat.S_IXUSR)
+        history_path = repo_root / "bin" / "clip-history"
+        history_path.write_text(
+            SOURCE_CLIP_HISTORY.read_text(encoding="utf-8"), encoding="utf-8"
+        )
+        history_path.chmod(history_path.stat().st_mode | stat.S_IXUSR)
         return repo_root
 
     def tearDown(self) -> None:
@@ -78,6 +84,7 @@ class ClipWrapperTests(unittest.TestCase):
         arch: str,
         *args: str,
         binaries: tuple[str, ...] = (),
+        wrapper: str = "clip",
     ) -> subprocess.CompletedProcess[str]:
         repo_root = self.make_temp_repo()
         bindir = pathlib.Path(self.tempdir.name) / "bin"
@@ -95,7 +102,7 @@ class ClipWrapperTests(unittest.TestCase):
             }
         )
         return subprocess.run(
-            [str(repo_root / "bin" / "clip"), *args],
+            [str(repo_root / "bin" / wrapper), *args],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -204,6 +211,47 @@ class ClipWrapperTests(unittest.TestCase):
         self.assertEqual(proc.stdout, "")
         self.assertIn("clip wrapper: missing downloaded clip binary:", proc.stderr)
         self.assertIn("bin/.downloads/clip/current/macos-aarch64/clip", proc.stderr)
+        self.assertIn("run bin/dotfiles-apply", proc.stderr)
+
+    def test_clip_history_wrapper_uses_downloaded_binary_and_helper(self):
+        proc = self.run_wrapper(
+            "Darwin",
+            "arm64",
+            "list",
+            binaries=(
+                "macos-aarch64/clip-history",
+                "macos-aarch64/clip-macos-helper",
+            ),
+            wrapper="clip-history",
+        )
+
+        self.assertEqual(proc.returncode, 0)
+        lines = proc.stdout.splitlines()
+        self.assertTrue(
+            lines[1].endswith(
+                "bin/.downloads/clip/current/macos-aarch64/clip-macos-helper"
+            ),
+            lines[1],
+        )
+        self.assertEqual(
+            lines,
+            [
+                "TARGET=macos-aarch64/clip-history",
+                lines[1],
+                "ARG=list",
+            ],
+        )
+
+    def test_clip_history_missing_binary_reports_error(self):
+        proc = self.run_wrapper("Linux", "x86_64", "list", wrapper="clip-history")
+
+        self.assertEqual(proc.returncode, 1)
+        self.assertEqual(proc.stdout, "")
+        self.assertIn("clip-history wrapper: missing downloaded clip-history binary:", proc.stderr)
+        self.assertIn(
+            "bin/.downloads/clip/current/linux-x86_64-musl/clip-history",
+            proc.stderr,
+        )
         self.assertIn("run bin/dotfiles-apply", proc.stderr)
 
 
