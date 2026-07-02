@@ -1,0 +1,27 @@
+font=Source Han Sans CN Medium 11
+width=420
+height=120
+margin=16
+padding=12
+border-size=2
+border-radius=12
+max-icon-size=48
+default-timeout=7000
+ignore-timeout=1
+
+background-color=#1e1e2ef0
+text-color=#cdd6f4
+border-color=#89b4fa
+progress-color=over #313244
+
+[urgency=low]
+border-color=#94e2d5
+
+[urgency=normal]
+border-color=#89b4fa
+
+[urgency=high]
+background-color=#2a1f2ef0
+text-color=#cdd6f4
+border-color=#f38ba8
+default-timeout=0

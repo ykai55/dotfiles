@@ -93,6 +93,15 @@
       ]
     },
     {
+      "name": "mako",
+      "source": "mako/config",
+      "target": "~/.config/mako/config",
+      "mode": "symlink",
+      "platforms": [
+        "linux"
+      ]
+    },
+    {
       "name": "keyd",
       "source": "keyd/default.conf",
       "target": "/etc/keyd/default.conf",
