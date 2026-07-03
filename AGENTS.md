@@ -2,8 +2,8 @@
 
 This repository is a personal dotfiles collection. Most tooling lives in
 standalone scripts under `bin/` (bash, Python, perl), with a few focused
-subprojects such as `ha_helper/` and `opencode/`. There is no centralized build
-system or lint configuration.
+subprojects such as `ha_helper/`, `rproxy/`, and `opencode/`. There is no
+centralized build system or lint configuration.
 
 ## Build / Lint / Test
 
@@ -25,6 +25,8 @@ Tests (Python)
 Tests (Rust)
 - `ha_helper/` is an independent Rust crate. After Rust changes, run:
   `cargo test --manifest-path ha_helper/Cargo.toml`
+- `rproxy/` is an independent Rust crate. After Rust changes, run:
+  `cargo test --manifest-path rproxy/Cargo.toml`
 
 Subdirectory instructions
 - More specific `AGENTS.md` files exist under some subdirectories. Follow the
@@ -45,6 +47,7 @@ Subdirectory instructions
   and schema used by `bin/dotfiles-apply`.
 - `opencode/`: opencode config, plugins, skills, and service/container helpers.
 - `ha_helper/`: independent Rust crate for OpenWrt WiFi presence to MQTT.
+- `rproxy/`: independent Rust crate for an HTTP/TCP reverse proxy CLI.
 - `scripts/`: helper scripts for building static tools.
 - `tmux-box.md`: tbox usage and workflow documentation.
 

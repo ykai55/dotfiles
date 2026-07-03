@@ -1,5 +1,6 @@
 use clap::{Args, Parser, Subcommand};
 use std::net::SocketAddr;
+use tracing_subscriber::EnvFilter;
 
 #[derive(Debug, Parser)]
 #[command(name = "rproxy")]
@@ -62,11 +63,22 @@ pub struct TcpArgs {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    init_logging();
     let cli = Cli::parse();
     match cli.command {
         Command::Server(args) => rproxy::server::run(server_config(args)).await,
         Command::Client(args) => rproxy::client::run(client_config(args)).await,
     }
+}
+
+fn init_logging() {
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(false)
+        .with_level(false)
+        .without_time()
+        .init();
 }
 
 fn server_config(args: ServerArgs) -> rproxy::server::ServerConfig {
