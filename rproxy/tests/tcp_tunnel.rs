@@ -87,7 +87,7 @@ async fn tcp_registration_fails_when_remote_port_cannot_bind() {
     let local_tcp = start_echo_tcp().await;
     let control_listen = free_addr();
     let http_listen = free_addr();
-    let occupied = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let occupied = TcpListener::bind("0.0.0.0:0").await.unwrap();
     let remote_port = occupied.local_addr().unwrap().port();
 
     let server = tokio::spawn(rproxy::server::run(ServerConfig {
