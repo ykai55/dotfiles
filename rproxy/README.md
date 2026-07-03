@@ -112,9 +112,10 @@ original `Host` header.
 
 ## Development
 
-Runtime logs are written to stderr with `[rproxy server]` or `[rproxy client]`
-prefixes. The default log level is `info`. Set `RUST_LOG=debug` for more detail
-as the logging grows.
+Runtime logs are written to stderr with tracing levels and stable
+`[rproxy server]` or `[rproxy client]` prefixes. The default log level is
+`info`; per-connection traffic logs use `debug`, and recoverable failures use
+`warn`. Set `RUST_LOG=debug` to show detailed connection activity.
 
 Run tests:
 

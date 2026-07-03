@@ -54,8 +54,26 @@ fn client_log_line(message: &str) -> String {
     format!("[rproxy client] {message}")
 }
 
-fn log_client(message: &str) {
+fn log_client_info(message: &str) {
     tracing::info!("{}", client_log_line(message));
+}
+
+fn log_client_debug(message: &str) {
+    debug_assert_eq!(data_connection_log_level(), tracing::Level::DEBUG);
+    tracing::debug!("{}", client_log_line(message));
+}
+
+fn log_client_warn(message: &str) {
+    debug_assert_eq!(recoverable_failure_log_level(), tracing::Level::WARN);
+    tracing::warn!("{}", client_log_line(message));
+}
+
+fn data_connection_log_level() -> tracing::Level {
+    tracing::Level::DEBUG
+}
+
+fn recoverable_failure_log_level() -> tracing::Level {
+    tracing::Level::WARN
 }
 
 pub async fn run(config: ClientConfig) -> anyhow::Result<()> {
@@ -65,7 +83,7 @@ pub async fn run(config: ClientConfig) -> anyhow::Result<()> {
             validate_local_addr(local)?;
         }
     }
-    log_client(&format!("connecting control websocket: {control_url}"));
+    log_client_info(&format!("connecting control websocket: {control_url}"));
     let service = match &config.service {
         ClientServiceConfig::Http { local, subdomain } => ServiceRequest::Http {
             local: local.clone(),
@@ -78,7 +96,7 @@ pub async fn run(config: ClientConfig) -> anyhow::Result<()> {
     };
 
     let (mut socket, _) = connect_async(&control_url).await?;
-    log_client("control websocket connected");
+    log_client_info("control websocket connected");
     socket
         .send(Message::Text(serde_json::to_string(
             &ClientHello::Control {
@@ -87,7 +105,7 @@ pub async fn run(config: ClientConfig) -> anyhow::Result<()> {
             },
         )?))
         .await?;
-    log_client("registration request sent");
+    log_client_info("registration request sent");
 
     while let Some(message) = socket.next().await {
         let message = message?;
@@ -97,16 +115,16 @@ pub async fn run(config: ClientConfig) -> anyhow::Result<()> {
         match serde_json::from_str::<ServerMessage>(&text)? {
             ServerMessage::Registered { public, .. } => match &config.service {
                 ClientServiceConfig::Http { local, .. } => {
-                    log_client(&format!("registered HTTP tunnel: {public} -> {local}"));
+                    log_client_info(&format!("registered HTTP tunnel: {public} -> {local}"));
                     println!("HTTP tunnel ready: {public} -> {local}");
                 }
                 ClientServiceConfig::Tcp { local, .. } => {
-                    log_client(&format!("registered TCP tunnel: {public} -> {local}"));
+                    log_client_info(&format!("registered TCP tunnel: {public} -> {local}"));
                     println!("TCP tunnel ready: {public} -> {local}");
                 }
             },
             ServerMessage::Open { connection_id } => {
-                log_client(&format!("opening data connection: {connection_id}"));
+                log_client_debug(&format!("opening data connection: {connection_id}"));
                 let token = config.token.clone();
                 let control_url = control_url.clone();
                 let local = match &config.service {
@@ -118,17 +136,14 @@ pub async fn run(config: ClientConfig) -> anyhow::Result<()> {
                     if let Err(error) =
                         handle_data_connection(control_url, token, connection_id, local).await
                     {
-                        tracing::warn!(
-                            "{}",
-                            client_log_line(&format!(
-                                "data connection {logged_connection_id} failed: {error}"
-                            ))
-                        );
+                        log_client_warn(&format!(
+                            "data connection {logged_connection_id} failed: {error}"
+                        ));
                     }
                 });
             }
             ServerMessage::Error { code, message } => {
-                log_client(&format!("server rejected request: {code:?}: {message}"));
+                log_client_warn(&format!("server rejected request: {code:?}: {message}"));
                 anyhow::bail!("server error {code:?}: {message}");
             }
         }
@@ -143,7 +158,7 @@ async fn handle_data_connection(
     connection_id: String,
     local: String,
 ) -> anyhow::Result<()> {
-    log_client(&format!("connecting data websocket: {connection_id}"));
+    log_client_debug(&format!("connecting data websocket: {connection_id}"));
     let (mut socket, _) = connect_async(&control_url).await?;
     let logged_connection_id = connection_id.clone();
     socket
@@ -152,9 +167,9 @@ async fn handle_data_connection(
             connection_id,
         })?))
         .await?;
-    log_client(&format!("connecting local target: {local}"));
+    log_client_debug(&format!("connecting local target: {local}"));
     let local = TcpStream::connect(local).await?;
-    log_client(&format!("data connection ready: {logged_connection_id}"));
+    log_client_debug(&format!("data connection ready: {logged_connection_id}"));
     proxy_local_with_websocket(local, socket).await
 }
 
@@ -253,5 +268,15 @@ mod tests {
             client_log_line("connecting to ws://127.0.0.1:7000/_rproxy"),
             "[rproxy client] connecting to ws://127.0.0.1:7000/_rproxy"
         );
+    }
+
+    #[test]
+    fn data_connection_logs_are_debug() {
+        assert_eq!(data_connection_log_level(), tracing::Level::DEBUG);
+    }
+
+    #[test]
+    fn recoverable_failures_are_warn() {
+        assert_eq!(recoverable_failure_log_level(), tracing::Level::WARN);
     }
 }

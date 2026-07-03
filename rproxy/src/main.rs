@@ -76,9 +76,13 @@ fn init_logging() {
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(false)
-        .with_level(false)
+        .with_level(show_log_levels())
         .without_time()
         .init();
+}
+
+fn show_log_levels() -> bool {
+    true
 }
 
 fn server_config(args: ServerArgs) -> rproxy::server::ServerConfig {
@@ -196,5 +200,10 @@ mod tests {
         assert_eq!(args.control_listen.to_string(), "127.0.0.1:7000");
         assert_eq!(args.http_listen.to_string(), "127.0.0.1:8080");
         assert_eq!(args.tcp_port_range, "20000-20010");
+    }
+
+    #[test]
+    fn logging_shows_levels() {
+        assert!(show_log_levels());
     }
 }

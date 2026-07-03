@@ -60,8 +60,26 @@ fn server_log_line(message: &str) -> String {
     format!("[rproxy server] {message}")
 }
 
-fn log_server(message: &str) {
+fn log_server_info(message: &str) {
     tracing::info!("{}", server_log_line(message));
+}
+
+fn log_server_debug(message: &str) {
+    debug_assert_eq!(connection_traffic_log_level(), tracing::Level::DEBUG);
+    tracing::debug!("{}", server_log_line(message));
+}
+
+fn log_server_warn(message: &str) {
+    debug_assert_eq!(recoverable_failure_log_level(), tracing::Level::WARN);
+    tracing::warn!("{}", server_log_line(message));
+}
+
+fn connection_traffic_log_level() -> tracing::Level {
+    tracing::Level::DEBUG
+}
+
+fn recoverable_failure_log_level() -> tracing::Level {
+    tracing::Level::WARN
 }
 
 #[derive(Debug, Clone)]
@@ -348,6 +366,16 @@ mod tests {
             "[rproxy server] control listening on 127.0.0.1:7000"
         );
     }
+
+    #[test]
+    fn connection_traffic_logs_are_debug() {
+        assert_eq!(connection_traffic_log_level(), tracing::Level::DEBUG);
+    }
+
+    #[test]
+    fn recoverable_failures_are_warn() {
+        assert_eq!(recoverable_failure_log_level(), tracing::Level::WARN);
+    }
 }
 
 #[derive(Debug)]
@@ -369,12 +397,12 @@ pub async fn run(config: ServerConfig) -> anyhow::Result<()> {
     };
 
     let control_listener = TcpListener::bind(config.control_listen).await?;
-    log_server(&format!(
+    log_server_info(&format!(
         "control listening on {} for domain {domain}",
         config.control_listen
     ));
     let http_listener = TcpListener::bind(config.http_listen).await?;
-    log_server(&format!("http listening on {}", config.http_listen));
+    log_server_info(&format!("http listening on {}", config.http_listen));
     let app = Router::new()
         .route("/_rproxy", get(control_ws))
         .with_state(app_state);
@@ -402,11 +430,11 @@ async fn control_ws(State(app): State<AppState>, ws: WebSocketUpgrade) -> axum::
 
 async fn handle_control_socket(app: AppState, mut socket: WebSocket) {
     let Some(Ok(Message::Text(text))) = socket.recv().await else {
-        log_server("control websocket closed before hello");
+        log_server_warn("control websocket closed before hello");
         return;
     };
     let Ok(hello) = serde_json::from_str::<ClientHello>(&text) else {
-        log_server("invalid hello message received");
+        log_server_warn("invalid hello message received");
         let _ = send_error(socket, ServerErrorCode::InvalidRequest, "invalid hello").await;
         return;
     };
@@ -414,12 +442,12 @@ async fn handle_control_socket(app: AppState, mut socket: WebSocket) {
     match hello {
         ClientHello::Control { token, service } => {
             if token != app.token {
-                log_server("control authentication failed");
+                log_server_warn("control authentication failed");
                 let _ =
                     send_error(socket, ServerErrorCode::AuthFailed, "authentication failed").await;
                 return;
             }
-            log_server("control authentication succeeded");
+            log_server_info("control authentication succeeded");
             handle_registered_control(app.state, socket, service).await;
         }
         ClientHello::Data {
@@ -427,7 +455,7 @@ async fn handle_control_socket(app: AppState, mut socket: WebSocket) {
             connection_id,
         } => {
             if token != app.token {
-                log_server(&format!("data authentication failed: {connection_id}"));
+                log_server_warn(&format!("data authentication failed: {connection_id}"));
                 let _ =
                     send_error(socket, ServerErrorCode::AuthFailed, "authentication failed").await;
                 return;
@@ -437,9 +465,9 @@ async fn handle_control_socket(app: AppState, mut socket: WebSocket) {
                 .attach_data_connection(&connection_id, socket)
                 .await
             {
-                log_server(&format!("data websocket attached: {connection_id}"));
+                log_server_debug(&format!("data websocket attached: {connection_id}"));
             } else {
-                log_server(&format!(
+                log_server_debug(&format!(
                     "data websocket has no pending connection: {connection_id}"
                 ));
             }
@@ -464,7 +492,7 @@ async fn handle_registered_control(state: ServerState, socket: WebSocket, servic
                 ServerStateError::PortRangeExhausted => ServerErrorCode::PortRangeExhausted,
                 ServerStateError::InvalidPortRange => ServerErrorCode::InvalidRequest,
             };
-            log_server(&format!("registration failed: {error}"));
+            log_server_warn(&format!("registration failed: {error}"));
             let _ = send_error(socket, code, &error.to_string()).await;
             return;
         }
@@ -477,7 +505,7 @@ async fn handle_registered_control(state: ServerState, socket: WebSocket, servic
                 Ok(listener) => listener,
                 Err(error) => {
                     state.release_client(&client_id).await;
-                    log_server(&format!("failed to listen on TCP port {port}: {error}"));
+                    log_server_warn(&format!("failed to listen on TCP port {port}: {error}"));
                     let _ = send_error(
                         socket,
                         ServerErrorCode::PortUnavailable,
@@ -487,7 +515,7 @@ async fn handle_registered_control(state: ServerState, socket: WebSocket, servic
                     return;
                 }
             };
-            log_server(&format!("tcp listening on 0.0.0.0:{port}"));
+            log_server_info(&format!("tcp listening on 0.0.0.0:{port}"));
             let state_for_tcp = state.clone();
             tcp_listener_task = Some(tokio::spawn(async move {
                 let _ = run_tcp_port_listener(state_for_tcp, port, listener).await;
@@ -501,7 +529,7 @@ async fn handle_registered_control(state: ServerState, socket: WebSocket, servic
         subdomain: registered.subdomain,
         remote_port: registered.remote_port,
     };
-    log_server(&format!(
+    log_server_info(&format!(
         "registered tunnel for client {client_id}: {}",
         message_public(&message)
     ));
@@ -533,7 +561,7 @@ async fn handle_registered_control(state: ServerState, socket: WebSocket, servic
     }
 
     state.release_client(&client_id).await;
-    log_server(&format!("released client resources: {client_id}"));
+    log_server_info(&format!("released client resources: {client_id}"));
     if let Some(task) = tcp_listener_task {
         task.abort();
     }
@@ -587,12 +615,12 @@ async fn run_tcp_port_listener(
 
 async fn handle_tcp_stream(state: ServerState, port: u16, stream: TcpStream) -> anyhow::Result<()> {
     let Some(tunnel) = state.tcp_tunnel_for_port(port).await else {
-        log_server(&format!(
+        log_server_debug(&format!(
             "tcp connection ignored without tunnel: port {port}"
         ));
         return Ok(());
     };
-    log_server(&format!(
+    log_server_debug(&format!(
         "tcp connection accepted: port {port} -> {}",
         tunnel.local
     ));
@@ -604,21 +632,21 @@ async fn handle_tcp_stream(state: ServerState, port: u16, stream: TcpStream) -> 
 async fn handle_http_stream(state: ServerState, mut stream: TcpStream) -> anyhow::Result<()> {
     let initial = read_http_headers(&mut stream).await?;
     let Some(host) = http_host(&initial) else {
-        log_server("http request rejected without Host header");
+        log_server_debug("http request rejected without Host header");
         stream
             .write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n")
             .await?;
         return Ok(());
     };
     let Some(tunnel) = state.http_tunnel_for_host(&host).await else {
-        log_server(&format!("http request has no tunnel: host {host}"));
+        log_server_debug(&format!("http request has no tunnel: host {host}"));
         stream
             .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
             .await?;
         return Ok(());
     };
 
-    log_server(&format!(
+    log_server_debug(&format!(
         "http request accepted: host {host} -> {}",
         tunnel.local
     ));
