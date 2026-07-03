@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+fail() {
+  echo "rproxy wrapper: $1" >&2
+  exit 1
+}
+
+resolve_rproxy_binary() {
+  local script_dir repo_root system arch target_dir rproxy_bin
+
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  repo_root="$(cd "$script_dir/.." && pwd)"
+  system="$(uname -s)"
+  arch="$(uname -m)"
+
+  case "$system" in
+    Darwin)
+      case "$arch" in
+        arm64|aarch64)
+          target_dir="macos-aarch64"
+          ;;
+        *)
+          fail "unsupported macOS architecture: $arch"
+          ;;
+      esac
+      ;;
+    Linux)
+      case "$arch" in
+        x86_64|amd64)
+          target_dir="linux-x86_64-gnu"
+          ;;
+        *)
+          fail "unsupported Linux architecture: $arch"
+          ;;
+      esac
+      ;;
+    *)
+      fail "unsupported platform: $system"
+      ;;
+  esac
+
+  rproxy_bin="$repo_root/bin/.downloads/rproxy/current/$target_dir/rproxy"
+  if [[ ! -x "$rproxy_bin" ]]; then
+    fail "missing downloaded rproxy binary: $rproxy_bin; run bin/dotfiles-apply"
+  fi
+
+  RESOLVED_RPROXY_BIN="$rproxy_bin"
+}
+
+main() {
+  resolve_rproxy_binary
+  exec "$RESOLVED_RPROXY_BIN" "$@"
+}
+
+main "$@"

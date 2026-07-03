@@ -1,0 +1,94 @@
+name: rproxy release
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "rproxy/**"
+      - ".github/workflows/rproxy-release.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.asset_target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            rust_target: x86_64-unknown-linux-gnu
+            asset_target: linux-x86_64-gnu
+          - os: macos-14
+            rust_target: aarch64-apple-darwin
+            asset_target: macos-aarch64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust target
+        run: rustup target add ${{ matrix.rust_target }}
+
+      - name: Test rproxy
+        run: cargo test --manifest-path rproxy/Cargo.toml
+
+      - name: Build rproxy
+        run: cargo build --release --locked --manifest-path rproxy/Cargo.toml --target ${{ matrix.rust_target }}
+
+      - name: Package rproxy
+        run: |
+          set -euo pipefail
+          asset="rproxy-${{ matrix.asset_target }}.tar.gz"
+          staging="target/package/${{ matrix.asset_target }}"
+          mkdir -p "$staging"
+          cp "rproxy/target/${{ matrix.rust_target }}/release/rproxy" "$staging/rproxy"
+          chmod +x "$staging/rproxy"
+          tar -C "$staging" -czf "$asset" rproxy
+          shasum -a 256 "$asset" > "$asset.sha256"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rproxy-${{ matrix.asset_target }}
+          path: |
+            rproxy-${{ matrix.asset_target }}.tar.gz
+            rproxy-${{ matrix.asset_target }}.tar.gz.sha256
+
+  release:
+    name: Publish rproxy-latest
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download workflow artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: rproxy-*
+          merge-multiple: true
+
+      - name: Move latest tag
+        run: |
+          set -euo pipefail
+          git tag -f rproxy-latest "$GITHUB_SHA"
+          git push -f origin rproxy-latest
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: rproxy-latest
+          name: rproxy latest
+          files: |
+            rproxy-*.tar.gz
+            rproxy-*.tar.gz.sha256
+          make_latest: false
+          prerelease: true

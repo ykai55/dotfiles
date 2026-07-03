@@ -1022,13 +1022,31 @@ class DotfilesApplyTests(CapturingTestCase):
 
         downloads = self.dotfiles_apply.parse_downloads_manifest(str(manifest_path))
         targets = downloads.targets
+        targets_by_tool = {}
+        for target in targets:
+            targets_by_tool.setdefault(target.tool, []).append(target)
 
         self.assertEqual(
-            [target.target for target in targets],
+            [target.target for target in targets_by_tool["clip"]],
             ["linux-x86_64-musl", "macos-aarch64"],
         )
-        self.assertTrue(all("clip-latest" in target.url for target in targets))
-        self.assertTrue(all("clip-v1.0.0" not in target.url for target in targets))
+        self.assertTrue(
+            all("clip-latest" in target.url for target in targets_by_tool["clip"])
+        )
+        self.assertTrue(
+            all("clip-v1.0.0" not in target.url for target in targets_by_tool["clip"])
+        )
+        self.assertEqual(
+            [target.target for target in targets_by_tool["rproxy"]],
+            ["linux-x86_64-gnu", "macos-aarch64"],
+        )
+        self.assertTrue(
+            all("rproxy-latest" in target.url for target in targets_by_tool["rproxy"])
+        )
+        self.assertEqual(
+            [target.executable for target in targets_by_tool["rproxy"]],
+            ["rproxy", "rproxy"],
+        )
         self.assertEqual([repo.name for repo in downloads.git_repos], ["tide"])
         self.assertEqual(downloads.git_repos[0].target, ".managed/tide")
 

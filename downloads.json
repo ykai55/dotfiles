@@ -26,6 +26,29 @@
       ]
     },
     {
+      "name": "rproxy",
+      "type": "archive",
+      "version": "rproxy-latest",
+      "targets": [
+        {
+          "target": "linux-x86_64-gnu",
+          "platform": "linux",
+          "arch": "x86_64",
+          "url": "https://github.com/ykai55/dotfiles/releases/download/rproxy-latest/rproxy-linux-x86_64-gnu.tar.gz",
+          "archive": "tar.gz",
+          "executable": "rproxy"
+        },
+        {
+          "target": "macos-aarch64",
+          "platform": "macos",
+          "arch": "aarch64",
+          "url": "https://github.com/ykai55/dotfiles/releases/download/rproxy-latest/rproxy-macos-aarch64.tar.gz",
+          "archive": "tar.gz",
+          "executable": "rproxy"
+        }
+      ]
+    },
+    {
       "name": "tide",
       "type": "git",
       "url": "git@github.com:ykai55/tide.git",
