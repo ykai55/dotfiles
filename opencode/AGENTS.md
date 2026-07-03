@@ -65,6 +65,8 @@ Favor removing abstractions that do not improve reuse, readability, or domain cl
 
 # Communication
 
+- For Feishu/Lark related tasks, use `larkcli` by default instead of `bytedcli` unless the user explicitly requests `bytedcli` or `larkcli` cannot satisfy the task.
+
 - When sending a Lark message on the user's behalf, always prefix the message body with an `@` mention of the user's own Lark account.
 
 # Workflow
