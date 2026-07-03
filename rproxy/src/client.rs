@@ -76,6 +76,10 @@ fn recoverable_failure_log_level() -> tracing::Level {
     tracing::Level::WARN
 }
 
+fn ready_status_log_level() -> tracing::Level {
+    tracing::Level::INFO
+}
+
 pub async fn run(config: ClientConfig) -> anyhow::Result<()> {
     let control_url = control_url(&config.server)?;
     match &config.service {
@@ -115,12 +119,12 @@ pub async fn run(config: ClientConfig) -> anyhow::Result<()> {
         match serde_json::from_str::<ServerMessage>(&text)? {
             ServerMessage::Registered { public, .. } => match &config.service {
                 ClientServiceConfig::Http { local, .. } => {
+                    debug_assert_eq!(ready_status_log_level(), tracing::Level::INFO);
                     log_client_info(&format!("registered HTTP tunnel: {public} -> {local}"));
-                    println!("HTTP tunnel ready: {public} -> {local}");
                 }
                 ClientServiceConfig::Tcp { local, .. } => {
+                    debug_assert_eq!(ready_status_log_level(), tracing::Level::INFO);
                     log_client_info(&format!("registered TCP tunnel: {public} -> {local}"));
-                    println!("TCP tunnel ready: {public} -> {local}");
                 }
             },
             ServerMessage::Open { connection_id } => {
@@ -278,5 +282,10 @@ mod tests {
     #[test]
     fn recoverable_failures_are_warn() {
         assert_eq!(recoverable_failure_log_level(), tracing::Level::WARN);
+    }
+
+    #[test]
+    fn ready_status_logs_are_info() {
+        assert_eq!(ready_status_log_level(), tracing::Level::INFO);
     }
 }
