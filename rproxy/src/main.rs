@@ -67,12 +67,17 @@ pub struct TcpArgs {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    init_crypto_provider();
     init_logging();
     let cli = Cli::parse();
     match cli.command {
         Command::Server(args) => rproxy::server::run(server_config(args)).await,
         Command::Client(args) => rproxy::client::run(client_config(args)).await,
     }
+}
+
+fn init_crypto_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
 fn init_logging() {
@@ -235,5 +240,11 @@ mod tests {
     #[test]
     fn logging_shows_levels() {
         assert!(show_log_levels());
+    }
+
+    #[test]
+    fn initializes_rustls_crypto_provider() {
+        init_crypto_provider();
+        init_crypto_provider();
     }
 }
