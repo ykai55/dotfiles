@@ -127,6 +127,55 @@ With a client subdomain of `foo`, the advertised URL is
 `https://foo.rp.ykai.cc:444`. Routing still uses the HTTP `Host` header
 `foo.rp.ykai.cc` after TLS termination.
 
+## Performance Notes
+
+The current data path favors deployment simplicity over maximum throughput. Each
+external HTTP or TCP connection creates one data WebSocket back from the client
+to the server. The connection is then proxied as raw bytes over WebSocket binary
+frames.
+
+This has a few important costs compared with a local reverse proxy such as
+nginx:
+
+- Every new external connection waits for the server to notify the client and
+  for the client to open a data WebSocket.
+- Data is wrapped in WebSocket frames instead of flowing over a raw TCP data
+  channel.
+- HTTP routing reads the first request headers on a connection to choose the
+  tunnel, then treats the rest of that connection as raw TCP. It does not parse
+  every keep-alive request like a full HTTP reverse proxy.
+- Server state currently uses shared in-memory maps guarded by a mutex. This is
+  simple but may become a hot path under high concurrency.
+
+Potential optimization directions:
+
+1. Instrument the data path first. Track accept-to-data-attached latency, local
+   connect latency, bytes transferred, and connection duration. This identifies
+   whether time is spent in tunnel setup, local connection setup, or byte
+   forwarding.
+2. Add a raw TCP idle data pool. The client would pre-open N data TCP
+   connections to the server. When an external request arrives, the server takes
+   an idle connection and immediately starts piping bytes. The simplest version
+   uses each data TCP connection for one external connection, then closes it and
+   lets the client replenish the pool.
+3. Consider sequential reuse of raw data TCP connections only with explicit
+   framing. Reusing one data TCP connection for multiple external connections
+   requires in-band boundaries such as begin/data/fin/reset messages; a separate
+   control WebSocket cannot safely mark a raw byte stream idle because data and
+   control ordering are not guaranteed across different channels.
+4. Consider long-lived multiplexed data channels if higher throughput is needed.
+   This would use a small number of persistent data connections and carry many
+   logical streams over them. It removes per-connection setup costs but requires
+   stream IDs, framing, flow control, half-close handling, and error isolation.
+5. Revisit HTTP semantics if correctness across HTTP keep-alive requests with
+   different `Host` headers becomes important. A conservative approach is to
+   close HTTP connections after one routed request. A more complete approach is
+   to implement request-level HTTP proxying and route each request separately.
+
+The most practical next step is usually instrumentation, followed by a raw TCP
+idle data pool. Multiplexing should wait until measurements show the simpler
+pool model is not enough.
+
 ## Development
 
 Runtime logs are written to stderr with tracing levels and stable
