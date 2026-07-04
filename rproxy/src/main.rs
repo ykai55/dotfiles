@@ -27,6 +27,10 @@ pub struct ServerArgs {
     pub http_listen: SocketAddr,
     #[arg(short = 'r', long, default_value = "20000-30000")]
     pub tcp_port_range: String,
+    #[arg(long, default_value = "http")]
+    pub http_public_scheme: String,
+    #[arg(long)]
+    pub http_public_port: Option<u16>,
 }
 
 #[derive(Debug, Args)]
@@ -92,6 +96,8 @@ fn server_config(args: ServerArgs) -> rproxy::server::ServerConfig {
         control_listen: args.control_listen,
         http_listen: args.http_listen,
         tcp_port_range: args.tcp_port_range,
+        http_public_scheme: args.http_public_scheme,
+        http_public_port: args.http_public_port,
     }
 }
 
@@ -200,6 +206,30 @@ mod tests {
         assert_eq!(args.control_listen.to_string(), "127.0.0.1:7000");
         assert_eq!(args.http_listen.to_string(), "127.0.0.1:8080");
         assert_eq!(args.tcp_port_range, "20000-20010");
+        assert_eq!(args.http_public_scheme, "http");
+        assert_eq!(args.http_public_port, None);
+    }
+
+    #[test]
+    fn parses_server_http_public_url_flags() {
+        let cli = Cli::parse_from([
+            "rproxy",
+            "server",
+            "--domain",
+            "a.com",
+            "--token",
+            "secret",
+            "--http-public-scheme",
+            "https",
+            "--http-public-port",
+            "444",
+        ]);
+
+        let Command::Server(args) = cli.command else {
+            panic!("expected server command");
+        };
+        assert_eq!(args.http_public_scheme, "https");
+        assert_eq!(args.http_public_port, Some(444));
     }
 
     #[test]

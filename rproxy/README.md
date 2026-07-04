@@ -110,6 +110,23 @@ For HTTP service exposure, route HTTP traffic for `*.a.com` to the server
 before forwarding the decrypted HTTP request to `rproxy server`, preserving the
 original `Host` header.
 
+When the public HTTP entrypoint differs from the internal listener, configure the
+URL advertised to HTTP tunnel clients:
+
+```bash
+rproxy server \
+  --domain rp.ykai.cc \
+  --token "$RPROXY_TOKEN" \
+  --control-listen 127.0.0.1:7000 \
+  --http-listen 127.0.0.1:8080 \
+  --http-public-scheme https \
+  --http-public-port 444
+```
+
+With a client subdomain of `foo`, the advertised URL is
+`https://foo.rp.ykai.cc:444`. Routing still uses the HTTP `Host` header
+`foo.rp.ykai.cc` after TLS termination.
+
 ## Development
 
 Runtime logs are written to stderr with tracing levels and stable

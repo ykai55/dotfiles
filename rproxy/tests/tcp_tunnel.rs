@@ -51,6 +51,8 @@ async fn proxies_tcp_bytes_through_requested_port() {
         control_listen,
         http_listen,
         tcp_port_range: format!("{remote_port}-{remote_port}"),
+        http_public_scheme: "http".into(),
+        http_public_port: None,
     }));
 
     sleep(Duration::from_millis(100)).await;
@@ -96,6 +98,8 @@ async fn tcp_registration_fails_when_remote_port_cannot_bind() {
         control_listen,
         http_listen,
         tcp_port_range: format!("{remote_port}-{remote_port}"),
+        http_public_scheme: "http".into(),
+        http_public_port: None,
     }));
 
     sleep(Duration::from_millis(100)).await;
@@ -136,6 +140,8 @@ async fn tcp_listener_is_released_after_client_disconnects() {
         control_listen,
         http_listen,
         tcp_port_range: format!("{remote_port}-{remote_port}"),
+        http_public_scheme: "http".into(),
+        http_public_port: None,
     }));
 
     sleep(Duration::from_millis(100)).await;

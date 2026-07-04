@@ -82,6 +82,20 @@ fn recoverable_failure_log_level() -> tracing::Level {
     tracing::Level::WARN
 }
 
+fn http_public_url(scheme: &str, port: Option<u16>, subdomain: &str, domain: &str) -> String {
+    match port {
+        Some(port) => format!("{scheme}://{subdomain}.{domain}:{port}"),
+        None => format!("{scheme}://{subdomain}.{domain}"),
+    }
+}
+
+fn validate_http_public_scheme(scheme: &str) -> anyhow::Result<()> {
+    match scheme {
+        "http" | "https" => Ok(()),
+        _ => anyhow::bail!("--http-public-scheme must be http or https"),
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ServerState {
     inner: Arc<Mutex<InnerState>>,
@@ -90,6 +104,8 @@ pub struct ServerState {
 #[derive(Debug)]
 struct InnerState {
     domain: String,
+    http_public_scheme: String,
+    http_public_port: Option<u16>,
     ports: PortAllocator,
     subdomains: SubdomainAllocator,
     http_tunnels: HashMap<String, TunnelHandle>,
@@ -105,10 +121,18 @@ enum ClientResource {
 }
 
 impl ServerState {
-    pub fn new(domain: String, _token: String, port_allocator: PortAllocator) -> Self {
+    pub fn new(
+        domain: String,
+        _token: String,
+        port_allocator: PortAllocator,
+        http_public_scheme: String,
+        http_public_port: Option<u16>,
+    ) -> Self {
         Self {
             inner: Arc::new(Mutex::new(InnerState {
                 domain,
+                http_public_scheme,
+                http_public_port,
                 ports: port_allocator,
                 subdomains: SubdomainAllocator::new(),
                 http_tunnels: HashMap::new(),
@@ -140,8 +164,14 @@ impl ServerState {
                     .entry(client_id)
                     .or_default()
                     .push(ClientResource::HttpSubdomain(subdomain.clone()));
+                let public = http_public_url(
+                    &inner.http_public_scheme,
+                    inner.http_public_port,
+                    &subdomain,
+                    &inner.domain,
+                );
                 Ok(RegisteredTunnel {
-                    public: format!("http://{}.{}", subdomain, inner.domain),
+                    public,
                     subdomain: Some(subdomain),
                     remote_port: None,
                 })
@@ -244,6 +274,8 @@ mod tests {
             "a.com".into(),
             "secret".into(),
             PortAllocator::new(20000, 20002).unwrap(),
+            "http".into(),
+            None,
         )
     }
 
@@ -368,6 +400,28 @@ mod tests {
     }
 
     #[test]
+    fn formats_http_public_url_without_port() {
+        assert_eq!(
+            http_public_url("http", None, "foo", "rp.ykai.cc"),
+            "http://foo.rp.ykai.cc"
+        );
+    }
+
+    #[test]
+    fn formats_http_public_url_with_port() {
+        assert_eq!(
+            http_public_url("https", Some(444), "foo", "rp.ykai.cc"),
+            "https://foo.rp.ykai.cc:444"
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_http_public_scheme() {
+        assert!(validate_http_public_scheme("ftp").is_err());
+        assert!(validate_http_public_scheme("").is_err());
+    }
+
+    #[test]
     fn connection_traffic_logs_are_debug() {
         assert_eq!(connection_traffic_log_level(), tracing::Level::DEBUG);
     }
@@ -385,12 +439,21 @@ pub struct ServerConfig {
     pub control_listen: SocketAddr,
     pub http_listen: SocketAddr,
     pub tcp_port_range: String,
+    pub http_public_scheme: String,
+    pub http_public_port: Option<u16>,
 }
 
 pub async fn run(config: ServerConfig) -> anyhow::Result<()> {
+    validate_http_public_scheme(&config.http_public_scheme)?;
     let ports = PortAllocator::parse_range(&config.tcp_port_range)?;
     let domain = config.domain.clone();
-    let state = ServerState::new(config.domain, config.token.clone(), ports);
+    let state = ServerState::new(
+        config.domain,
+        config.token.clone(),
+        ports,
+        config.http_public_scheme,
+        config.http_public_port,
+    );
     let app_state = AppState {
         state: state.clone(),
         token: config.token,
