@@ -4,6 +4,7 @@ use std::net::{SocketAddr, ToSocketAddrs};
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::time::{sleep, Duration};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -32,6 +33,14 @@ pub enum ClientError {
     InvalidServerUrl,
     #[error("--local must be a host:port address, got {0:?}; try 127.0.0.1:{0}")]
     InvalidLocalAddress(String),
+}
+
+#[derive(Debug, Error)]
+enum ControlConnectionError {
+    #[error(transparent)]
+    Disconnected(#[from] anyhow::Error),
+    #[error("server error {0:?}: {1}")]
+    Rejected(crate::protocol::ServerErrorCode, String),
 }
 
 pub fn control_url(server: &str) -> Result<String, ClientError> {
@@ -80,6 +89,10 @@ fn ready_status_log_level() -> tracing::Level {
     tracing::Level::INFO
 }
 
+fn control_reconnect_delay() -> Duration {
+    Duration::from_secs(1)
+}
+
 pub async fn run(config: ClientConfig) -> anyhow::Result<()> {
     let control_url = control_url(&config.server)?;
     match &config.service {
@@ -87,7 +100,6 @@ pub async fn run(config: ClientConfig) -> anyhow::Result<()> {
             validate_local_addr(local)?;
         }
     }
-    log_client_info(&format!("connecting control websocket: {control_url}"));
     let service = match &config.service {
         ClientServiceConfig::Http { local, subdomain } => ServiceRequest::Http {
             local: local.clone(),
@@ -99,24 +111,50 @@ pub async fn run(config: ClientConfig) -> anyhow::Result<()> {
         },
     };
 
-    let (mut socket, _) = connect_async(&control_url).await?;
+    loop {
+        match run_control_connection(&control_url, &config, service.clone()).await {
+            Ok(()) => {}
+            Err(ControlConnectionError::Disconnected(error)) => {
+                log_client_warn(&format!("control websocket disconnected: {error}"));
+            }
+            Err(ControlConnectionError::Rejected(code, message)) => {
+                log_client_warn(&format!("server rejected request: {code:?}: {message}"));
+                anyhow::bail!("server error {code:?}: {message}");
+            }
+        }
+        sleep(control_reconnect_delay()).await;
+        log_client_info("reconnecting control websocket");
+    }
+}
+
+async fn run_control_connection(
+    control_url: &str,
+    config: &ClientConfig,
+    service: ServiceRequest,
+) -> Result<(), ControlConnectionError> {
+    log_client_info(&format!("connecting control websocket: {control_url}"));
+    let (mut socket, _) = connect_async(control_url)
+        .await
+        .map_err(anyhow::Error::from)?;
     log_client_info("control websocket connected");
     socket
-        .send(Message::Text(serde_json::to_string(
-            &ClientHello::Control {
+        .send(Message::Text(
+            serde_json::to_string(&ClientHello::Control {
                 token: config.token.clone(),
                 service,
-            },
-        )?))
-        .await?;
+            })
+            .map_err(anyhow::Error::from)?,
+        ))
+        .await
+        .map_err(anyhow::Error::from)?;
     log_client_info("registration request sent");
 
     while let Some(message) = socket.next().await {
-        let message = message?;
+        let message = message.map_err(anyhow::Error::from)?;
         let Message::Text(text) = message else {
             continue;
         };
-        match serde_json::from_str::<ServerMessage>(&text)? {
+        match serde_json::from_str::<ServerMessage>(&text).map_err(anyhow::Error::from)? {
             ServerMessage::Registered { public, .. } => match &config.service {
                 ClientServiceConfig::Http { local, .. } => {
                     debug_assert_eq!(ready_status_log_level(), tracing::Level::INFO);
@@ -130,7 +168,7 @@ pub async fn run(config: ClientConfig) -> anyhow::Result<()> {
             ServerMessage::Open { connection_id } => {
                 log_client_debug(&format!("opening data connection: {connection_id}"));
                 let token = config.token.clone();
-                let control_url = control_url.clone();
+                let control_url = control_url.to_string();
                 let local = match &config.service {
                     ClientServiceConfig::Http { local, .. } => local.clone(),
                     ClientServiceConfig::Tcp { local, .. } => local.clone(),
@@ -147,13 +185,14 @@ pub async fn run(config: ClientConfig) -> anyhow::Result<()> {
                 });
             }
             ServerMessage::Error { code, message } => {
-                log_client_warn(&format!("server rejected request: {code:?}: {message}"));
-                anyhow::bail!("server error {code:?}: {message}");
+                return Err(ControlConnectionError::Rejected(code, message));
             }
         }
     }
 
-    Ok(())
+    Err(ControlConnectionError::Disconnected(anyhow::anyhow!(
+        "control websocket closed"
+    )))
 }
 
 async fn handle_data_connection(
@@ -287,5 +326,10 @@ mod tests {
     #[test]
     fn ready_status_logs_are_info() {
         assert_eq!(ready_status_log_level(), tracing::Level::INFO);
+    }
+
+    #[test]
+    fn reconnect_delay_is_short() {
+        assert_eq!(control_reconnect_delay(), Duration::from_secs(1));
     }
 }
