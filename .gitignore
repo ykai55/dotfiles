@@ -9,3 +9,6 @@ bin/.downloads/
 .managed/
 
 .DS_Store
+
+/void/*
+!/void/AGENTS.md
