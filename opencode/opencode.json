@@ -20,14 +20,21 @@
         "--shell-type=fish"
       ],
       "enabled": true
+    },
+    "codebase-memory-mcp": {
+      "enabled": true,
+      "type": "local",
+      "command": [
+        "/Users/bytedance/.local/bin/codebase-memory-mcp"
+      ]
     }
   },
   "permission": {
     "external_directory": {
-      "/tmp/opencode-clipboard": "allow",
-      "/tmp/opencode-clipboard/**": "allow",
-      "/private/tmp/opencode-clipboard": "allow",
-      "/private/tmp/opencode-clipboard/**": "allow",
+      "/tmp": "allow",
+      "/tmp/**": "allow",
+      "/private/tmp": "allow",
+      "/private/tmp/**": "allow",
       "~/dotfiles/": "allow",
       "~/dotfiles/**": "allow",
     }
@@ -37,6 +44,5 @@
       "model": "openai/gpt-5.4-fast"
     }
   },
-  "provider": {
-  }
+  "provider": {}
 }
