@@ -40,6 +40,17 @@
     }
   },
   "agent": {
+    "explore": {
+      "permission": {
+        "codebase-memory-mcp_get*": "allow",
+        "codebase-memory-mcp_search*": "allow",
+        "codebase-memory-mcp_list*": "allow",
+        "codebase-memory-mcp_query_graph": "allow",
+        "codebase-memory-mcp_trace*": "allow",
+        "codebase-memory-mcp_detect*": "allow",
+        "codebase-memory-mcp_*status": "allow"
+      }
+    },
     "compaction": {
       "model": "openai/gpt-5.4-fast"
     }
