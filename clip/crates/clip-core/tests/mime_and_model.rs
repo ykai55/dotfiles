@@ -1,4 +1,4 @@
-use clip_core::{ClipboardItem, MimeType, ReadRequest};
+use clip_core::{ClipboardItem, ClipboardVariant, MimeType, ReadRequest};
 
 #[test]
 fn mime_type_accepts_builtin_and_custom_values() {
@@ -26,5 +26,21 @@ fn clipboard_item_text_helper_preserves_value() {
     assert_eq!(
         ClipboardItem::text("hello"),
         ClipboardItem::Text(String::from("hello"))
+    );
+}
+
+#[test]
+fn clipboard_item_bundle_helper_preserves_variants() {
+    assert_eq!(
+        ClipboardItem::bundle(vec![ClipboardVariant {
+            mime: MimeType::new("text/html").unwrap(),
+            data: b"<b>hi</b>".to_vec(),
+        }]),
+        ClipboardItem::Bundle {
+            variants: vec![ClipboardVariant {
+                mime: MimeType::new("text/html").unwrap(),
+                data: b"<b>hi</b>".to_vec(),
+            }],
+        }
     );
 }

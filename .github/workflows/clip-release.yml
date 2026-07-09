@@ -66,7 +66,8 @@ jobs:
           cp clip/target/release/clip dist/clip-macos-aarch64/clip
           cp clip/target/release/clip-history dist/clip-macos-aarch64/clip-history
           cp clip/helpers/macos/clip-macos-helper/.build/release/clip-macos-helper dist/clip-macos-aarch64/clip-macos-helper
-          tar -C dist/clip-macos-aarch64 -czf dist/clip-macos-aarch64.tar.gz clip clip-history clip-macos-helper
+          cp clip/helpers/macos/clip-macos-helper/.build/release/clip-history-menu dist/clip-macos-aarch64/clip-history-menu
+          tar -C dist/clip-macos-aarch64 -czf dist/clip-macos-aarch64.tar.gz clip clip-history clip-macos-helper clip-history-menu
           shasum -a 256 dist/clip-macos-aarch64.tar.gz > dist/clip-macos-aarch64.tar.gz.sha256
 
       - name: Upload build artifact

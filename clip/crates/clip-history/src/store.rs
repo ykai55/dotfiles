@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use clip_core::{ClipError, ClipboardItem, MimeType};
+use clip_core::{ClipError, ClipboardItem, ClipboardVariant, MimeType};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClipboardSnapshot {
@@ -251,8 +251,42 @@ pub fn entry_item(entry: &HistoryEntry, mime: Option<&str>) -> Result<ClipboardI
     } else {
         entry
     };
-    let variant = choose_variant(entry, mime)?;
+    if let Some(mime) = mime {
+        let variant = choose_variant(entry, Some(mime))?;
+        let data = fs::read(entry.path.join(&variant.file_name))?;
+        return variant_item(variant, data);
+    }
+
+    if entry.variants.len() > 1 {
+        let mut variants = Vec::new();
+        if let Some(primary) = entry
+            .variants
+            .iter()
+            .find(|variant| variant.mime == entry.primary_mime)
+        {
+            variants.push(ClipboardVariant {
+                mime: primary.mime.clone(),
+                data: fs::read(entry.path.join(&primary.file_name))?,
+            });
+        }
+        for variant in &entry.variants {
+            if variant.mime == entry.primary_mime {
+                continue;
+            }
+            variants.push(ClipboardVariant {
+                mime: variant.mime.clone(),
+                data: fs::read(entry.path.join(&variant.file_name))?,
+            });
+        }
+        return Ok(ClipboardItem::bundle(variants));
+    }
+
+    let variant = choose_variant(entry, None)?;
     let data = fs::read(entry.path.join(&variant.file_name))?;
+    variant_item(variant, data)
+}
+
+fn variant_item(variant: &HistoryVariant, data: Vec<u8>) -> Result<ClipboardItem, ClipError> {
     if variant.mime.as_str() == "text/plain" {
         return Ok(ClipboardItem::Text(String::from_utf8(data).map_err(
             |_| ClipError::config("stored text item is not valid UTF-8"),

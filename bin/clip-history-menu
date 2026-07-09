@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+fail() {
+  echo "clip-history-menu wrapper: $1" >&2
+  exit 1
+}
+
+main() {
+  local script_dir repo_root system arch target_dir menu_bin clip_history_bin helper_path
+
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  repo_root="$(cd "$script_dir/.." && pwd)"
+  system="$(uname -s)"
+  arch="$(uname -m)"
+
+  case "$system" in
+    Darwin)
+      case "$arch" in
+        arm64|aarch64)
+          target_dir="macos-aarch64"
+          ;;
+        *)
+          fail "unsupported macOS architecture: $arch"
+          ;;
+      esac
+      ;;
+    *)
+      fail "clip-history-menu is only supported on macOS"
+      ;;
+  esac
+
+  menu_bin="$repo_root/bin/.downloads/clip/current/$target_dir/clip-history-menu"
+  clip_history_bin="$repo_root/bin/.downloads/clip/current/$target_dir/clip-history"
+  helper_path="$repo_root/bin/.downloads/clip/current/$target_dir/clip-macos-helper"
+
+  if [[ -x "$repo_root/clip/helpers/macos/clip-macos-helper/.build/release/clip-history-menu" ]]; then
+    menu_bin="$repo_root/clip/helpers/macos/clip-macos-helper/.build/release/clip-history-menu"
+  fi
+  if [[ -x "$repo_root/clip/target/release/clip-history" ]]; then
+    clip_history_bin="$repo_root/clip/target/release/clip-history"
+  fi
+  if [[ -x "$repo_root/clip/helpers/macos/clip-macos-helper/.build/release/clip-macos-helper" ]]; then
+    helper_path="$repo_root/clip/helpers/macos/clip-macos-helper/.build/release/clip-macos-helper"
+  fi
+
+  if [[ ! -x "$menu_bin" ]]; then
+    fail "missing downloaded clip-history-menu binary: $menu_bin; run bin/dotfiles-apply"
+  fi
+  if [[ ! -x "$clip_history_bin" ]]; then
+    fail "missing clip-history binary: $clip_history_bin; run bin/dotfiles-apply"
+  fi
+  if [[ ! -x "$helper_path" ]]; then
+    fail "missing downloaded clip helper: $helper_path; run bin/dotfiles-apply"
+  fi
+
+  export CLIP_HISTORY_BIN="$clip_history_bin"
+  export CLIP_MACOS_HELPER="$helper_path"
+  exec "$menu_bin" "$@"
+}
+
+main "$@"

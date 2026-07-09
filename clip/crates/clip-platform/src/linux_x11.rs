@@ -186,6 +186,16 @@ impl ClipboardBackend for X11Backend {
             (X11Tool::Xsel, ClipboardItem::Bytes { .. }) => Err(ClipError::clipboard(
                 "xsel backend only supports text/plain",
             )),
+            (_, ClipboardItem::Bundle { variants }) => {
+                let variant = variants
+                    .iter()
+                    .next()
+                    .ok_or_else(|| ClipError::clipboard("clipboard bundle has no variants"))?;
+                self.write(&ClipboardItem::bytes(
+                    variant.mime.clone(),
+                    variant.data.clone(),
+                ))
+            }
         }
     }
 }

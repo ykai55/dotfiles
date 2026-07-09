@@ -110,6 +110,18 @@ impl ClipboardBackend for WaylandBackend {
             ClipboardItem::Bytes { mime, data } => {
                 self.run("wl-copy", &["--type", mime.as_str()], data.clone(), false)?;
             }
+            ClipboardItem::Bundle { variants } => {
+                let variant = variants
+                    .iter()
+                    .next()
+                    .ok_or_else(|| ClipError::clipboard("clipboard bundle has no variants"))?;
+                self.run(
+                    "wl-copy",
+                    &["--type", variant.mime.as_str()],
+                    variant.data.clone(),
+                    false,
+                )?;
+            }
         }
         Ok(())
     }

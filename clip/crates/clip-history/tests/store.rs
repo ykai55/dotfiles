@@ -1,6 +1,6 @@
 use std::fs;
 
-use clip_core::{ClipboardItem, MimeType};
+use clip_core::{ClipboardItem, ClipboardVariant, MimeType};
 use clip_history::store::{
     entry_item, entry_preview, find_entry, list_entries, migrate_entries, save_snapshot,
     ClipboardSnapshot, SnapshotVariant,
@@ -161,6 +161,39 @@ fn entry_item_can_select_specific_mime_variant() {
     assert_eq!(
         entry_item(&entry, Some("image/png")).unwrap(),
         ClipboardItem::bytes(mime("image/png"), vec![1, 2, 3])
+    );
+}
+
+#[test]
+fn entry_item_selects_all_variants_by_default() {
+    let temp = TempDir::new().unwrap();
+    let snapshot = ClipboardSnapshot {
+        variants: vec![
+            SnapshotVariant {
+                mime: mime("text/html"),
+                data: b"<b>rich</b>".to_vec(),
+            },
+            SnapshotVariant {
+                mime: mime("text/plain"),
+                data: b"rich".to_vec(),
+            },
+        ],
+    };
+    save_snapshot(temp.path(), &snapshot).unwrap();
+    let entry = list_entries(temp.path()).unwrap().remove(0);
+
+    assert_eq!(
+        entry_item(&entry, None).unwrap(),
+        ClipboardItem::bundle(vec![
+            ClipboardVariant {
+                mime: mime("text/html"),
+                data: b"<b>rich</b>".to_vec(),
+            },
+            ClipboardVariant {
+                mime: mime("text/plain"),
+                data: b"rich".to_vec(),
+            },
+        ])
     );
 }
 

@@ -75,6 +75,9 @@ main() {
 
   if [[ "$RESOLVED_TARGET_DIR" == "macos-aarch64" ]]; then
     helper_path="$RESOLVED_REPO_ROOT/bin/.downloads/clip/current/$RESOLVED_TARGET_DIR/clip-macos-helper"
+    if [[ -x "$RESOLVED_REPO_ROOT/clip/helpers/macos/clip-macos-helper/.build/release/clip-macos-helper" ]]; then
+      helper_path="$RESOLVED_REPO_ROOT/clip/helpers/macos/clip-macos-helper/.build/release/clip-macos-helper"
+    fi
     if [[ ! -x "$helper_path" ]]; then
       fail "missing downloaded clip helper: $helper_path; run bin/dotfiles-apply"
     fi

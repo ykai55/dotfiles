@@ -3,7 +3,9 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use clip_core::{ClipboardBackend, ClipboardBlob, ClipboardItem, MimeType, ReadRequest};
+use clip_core::{
+    ClipboardBackend, ClipboardBlob, ClipboardItem, ClipboardVariant, MimeType, ReadRequest,
+};
 use clip_platform::{resolve_macos_helper_path, MacOsBackend, ProcessCommandRunner};
 
 #[test]
@@ -31,7 +33,7 @@ fn helper_round_trips_text_and_html() {
 
     assert_eq!(
         backend.read(ReadRequest::text()).unwrap(),
-        ClipboardBlob::Text(String::from("<b>macos</b>"))
+        ClipboardBlob::Text(String::from("macos"))
     );
 
     assert!(backend
@@ -50,5 +52,23 @@ fn helper_round_trips_text_and_html() {
     assert_eq!(
         backend.read(ReadRequest::text()).unwrap(),
         ClipboardBlob::Text(String::from("https://example.com\nhttps://example.org"))
+    );
+
+    backend
+        .write(&ClipboardItem::bundle(vec![
+            ClipboardVariant {
+                mime: MimeType::new("text/html").unwrap(),
+                data: b"<b>rich</b>".to_vec(),
+            },
+            ClipboardVariant {
+                mime: MimeType::new("text/plain").unwrap(),
+                data: b"rich".to_vec(),
+            },
+        ]))
+        .unwrap();
+
+    assert_eq!(
+        backend.read(ReadRequest::text()).unwrap(),
+        ClipboardBlob::Text(String::from("rich"))
     );
 }

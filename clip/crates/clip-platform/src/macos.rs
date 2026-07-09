@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use clip_core::{
-    BackendCapabilities, ClipError, ClipboardBackend, ClipboardBlob, ClipboardItem, MimeType,
-    ReadRequest,
+    BackendCapabilities, ClipError, ClipboardBackend, ClipboardBlob, ClipboardItem,
+    ClipboardVariant, MimeType, ReadRequest,
 };
 
 use crate::{CommandOutput, CommandRunner, CommandSpec};
@@ -61,6 +61,22 @@ impl MacOsBackend {
         ClipError::clipboard(
             "macos backend only supports text/plain, text/html, image/png, and text/uri-list",
         )
+    }
+
+    fn encode_bundle(variants: &[ClipboardVariant]) -> Result<Vec<u8>, ClipError> {
+        let mut output = b"clip-bundle-v1\n".to_vec();
+        for variant in variants {
+            if !Self::supports_mime(&variant.mime) {
+                return Err(Self::unsupported_type_error());
+            }
+            output.extend_from_slice(variant.mime.as_str().as_bytes());
+            output.push(b'\n');
+            output.extend_from_slice(variant.data.len().to_string().as_bytes());
+            output.push(b'\n');
+            output.extend_from_slice(&variant.data);
+            output.push(b'\n');
+        }
+        Ok(output)
     }
 }
 
@@ -171,6 +187,9 @@ impl ClipboardBackend for MacOsBackend {
                     return Err(Self::unsupported_type_error());
                 }
                 self.run(&["write", "--type", mime.as_str()], data.clone(), false)?;
+            }
+            ClipboardItem::Bundle { variants } => {
+                self.run(&["write-bundle"], Self::encode_bundle(variants)?, false)?;
             }
         }
         Ok(())

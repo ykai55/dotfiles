@@ -4,7 +4,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use clip_core::{ClipboardBackend, ClipboardItem, MimeType, ReadRequest, TargetKind};
+use clip_core::{
+    ClipboardBackend, ClipboardItem, ClipboardVariant, MimeType, ReadRequest, TargetKind,
+};
 use clip_platform::{
     resolve_backend, resolve_macos_helper_path_for, CommandOutput, CommandRunner, CommandSpec,
     EnvProbe, MacOsBackend,
@@ -79,6 +81,37 @@ fn write_html_invokes_helper_with_explicit_type() {
     let calls = runner.calls.lock().unwrap();
     assert_eq!(calls[0].program, "/tmp/clip-macos-helper");
     assert_eq!(calls[0].args, vec!["write", "--type", "text/html"]);
+}
+
+#[test]
+fn write_bundle_invokes_helper_with_encoded_variants() {
+    let runner = FakeRunner::with_output(CommandOutput {
+        status: 0,
+        stdout: Vec::new(),
+        stderr: Vec::new(),
+    });
+    let backend = MacOsBackend::new(runner.clone(), PathBuf::from("/tmp/clip-macos-helper"));
+
+    backend
+        .write(&ClipboardItem::bundle(vec![
+            ClipboardVariant {
+                mime: MimeType::new("text/html").unwrap(),
+                data: b"<strong>hi</strong>".to_vec(),
+            },
+            ClipboardVariant {
+                mime: MimeType::new("text/plain").unwrap(),
+                data: b"hi".to_vec(),
+            },
+        ]))
+        .unwrap();
+
+    let calls = runner.calls.lock().unwrap();
+    assert_eq!(calls[0].program, "/tmp/clip-macos-helper");
+    assert_eq!(calls[0].args, vec!["write-bundle"]);
+    assert_eq!(
+        calls[0].stdin,
+        b"clip-bundle-v1\ntext/html\n19\n<strong>hi</strong>\ntext/plain\n2\nhi\n"
+    );
 }
 
 #[test]

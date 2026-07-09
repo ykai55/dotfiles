@@ -41,6 +41,13 @@ pub enum ClipboardBlob {
 pub enum ClipboardItem {
     Text(String),
     Bytes { mime: MimeType, data: Vec<u8> },
+    Bundle { variants: Vec<ClipboardVariant> },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClipboardVariant {
+    pub mime: MimeType,
+    pub data: Vec<u8>,
 }
 
 impl ClipboardItem {
@@ -50,6 +57,10 @@ impl ClipboardItem {
 
     pub fn bytes(mime: MimeType, data: Vec<u8>) -> Self {
         Self::Bytes { mime, data }
+    }
+
+    pub fn bundle(variants: Vec<ClipboardVariant>) -> Self {
+        Self::Bundle { variants }
     }
 }
 
