@@ -47,7 +47,7 @@ function __recent_repos_record --argument-names repo_id repo_path
   set -l tmp "$file.tmp.$fish_pid"
   set -l limit (__recent_repos_limit)
   command sort -rn "$file" | command awk -F '\t' -v limit="$limit" '
-    !seen[$2]++ {
+    !seen[$3]++ {
       print
       count++
       if (count >= limit) {

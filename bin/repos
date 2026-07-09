@@ -1,0 +1,382 @@
+#!/usr/bin/env python3
+
+from __future__ import annotations
+
+import argparse
+import glob
+import os
+import shutil
+import subprocess
+import sys
+from dataclasses import dataclass
+from typing import Iterable, List, Optional
+
+
+TAB = "\t"
+WORKTREE_INDENT = "  "
+ANSI_RESET = "\033[0m"
+
+
+@dataclass(frozen=True)
+class RecentRecord:
+    timestamp: int
+    index: int
+    repo_id: str
+    anchor_path: str
+
+
+@dataclass(frozen=True)
+class Candidate:
+    repo_path: str
+    repo_id: str
+    display_path: str
+    branch: str
+
+    def display_label(self, path_width: Optional[int] = None) -> str:
+        display_path = self.display_path
+        if path_width is not None:
+            display_path = display_path.ljust(path_width)
+        label = f"{display_path} [{self.branch}]"
+        if label.startswith(" "):
+            return ANSI_RESET + label
+        return label
+
+    def fzf_line(self, path_width: Optional[int] = None) -> str:
+        return f"{self.display_label(path_width)}{TAB}{self.repo_path}{TAB}{self.repo_id}"
+
+
+def run_git(repo_path: str, args: List[str]) -> Optional[str]:
+    proc = subprocess.run(
+        ["git", "-C", repo_path] + args,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if proc.returncode != 0:
+        return None
+    return proc.stdout
+
+
+def state_file() -> str:
+    state_home = os.environ.get("XDG_STATE_HOME")
+    if state_home:
+        return os.path.join(state_home, "recent-repos.tsv")
+    return os.path.join(os.path.expanduser("~"), ".local", "state", "recent-repos.tsv")
+
+
+def display_path(repo_path: str) -> str:
+    home = os.path.expanduser("~")
+    if repo_path == home:
+        return "~"
+    prefix = home + os.sep
+    if repo_path.startswith(prefix):
+        return "~" + repo_path[len(home) :]
+    return repo_path
+
+
+def branch_name(repo_path: str) -> str:
+    branch = run_git(repo_path, ["symbolic-ref", "--quiet", "--short", "HEAD"])
+    if branch and branch.strip():
+        return branch.strip()
+
+    revision = run_git(repo_path, ["rev-parse", "--short", "HEAD"])
+    if revision and revision.strip():
+        return f"detached {revision.strip()}"
+    return "unknown"
+
+
+def repo_id(repo_path: str) -> Optional[str]:
+    common_dir = run_git(repo_path, ["rev-parse", "--git-common-dir"])
+    if common_dir is None:
+        return None
+
+    common_dir = common_dir.strip()
+    if not common_dir:
+        return None
+    if not os.path.isabs(common_dir):
+        common_dir = os.path.join(repo_path, common_dir)
+    return os.path.realpath(common_dir)
+
+
+def main_worktree_path(current_repo_id: str) -> Optional[str]:
+    if os.path.basename(current_repo_id) != ".git":
+        return None
+    return os.path.dirname(current_repo_id)
+
+
+def parse_worktree_paths(porcelain: str) -> List[str]:
+    paths: List[str] = []
+    for line in porcelain.splitlines():
+        if line.startswith("worktree "):
+            paths.append(line[len("worktree ") :])
+    return paths
+
+
+def order_worktree_paths(paths: List[str], current_repo_id: str) -> List[str]:
+    main_path = main_worktree_path(current_repo_id)
+    if not main_path:
+        return paths
+
+    main_path = os.path.realpath(main_path)
+    main_matches = [path for path in paths if os.path.realpath(path) == main_path]
+    other_paths = [path for path in paths if os.path.realpath(path) != main_path]
+    return main_matches + other_paths
+
+
+def is_main_worktree_path(repo_path: str, current_repo_id: str) -> bool:
+    main_path = main_worktree_path(current_repo_id)
+    if not main_path:
+        return False
+    return os.path.realpath(repo_path) == os.path.realpath(main_path)
+
+
+def worktrees(repo_path: str) -> List[str]:
+    output = run_git(repo_path, ["worktree", "list", "--porcelain"])
+    if output is None:
+        return [repo_path]
+
+    paths = parse_worktree_paths(output)
+    if not paths:
+        return [repo_path]
+    return paths
+
+
+def recent_records(path: Optional[str] = None) -> List[RecentRecord]:
+    file_path = path or state_file()
+    if not os.path.isfile(file_path):
+        return []
+
+    records: List[RecentRecord] = []
+    with open(file_path, "r", encoding="utf-8") as f:
+        for index, line in enumerate(f):
+            fields = line.rstrip("\n").split(TAB)
+            if len(fields) < 3:
+                continue
+            try:
+                timestamp = int(fields[0])
+            except ValueError:
+                continue
+            records.append(RecentRecord(timestamp, index, fields[1], fields[2]))
+
+    seen: set[str] = set()
+    deduped: List[RecentRecord] = []
+    for record in sorted(records, key=lambda item: (item.timestamp, item.index), reverse=True):
+        if record.anchor_path in seen:
+            continue
+        seen.add(record.anchor_path)
+        deduped.append(record)
+    return deduped
+
+
+def pattern_paths(patterns: Iterable[str]) -> List[str]:
+    seen: set[str] = set()
+    paths: List[str] = []
+    for pattern in patterns:
+        expanded = os.path.expanduser(pattern)
+        for path in sorted(glob.glob(expanded)):
+            if not os.path.isdir(path):
+                continue
+            full_path = os.path.abspath(path)
+            if full_path in seen:
+                continue
+            seen.add(full_path)
+            paths.append(full_path)
+    return paths
+
+
+def is_git_worktree(repo_path: str) -> bool:
+    output = run_git(repo_path, ["rev-parse", "--is-inside-work-tree"])
+    return bool(output and output.strip() == "true")
+
+
+def append_candidate(repo_path: str, current_repo_id: str, *, indent: bool) -> Optional[Candidate]:
+    if not is_git_worktree(repo_path):
+        return None
+
+    path_label = display_path(repo_path)
+    if indent:
+        path_label = WORKTREE_INDENT + path_label
+    return Candidate(
+        repo_path=repo_path,
+        repo_id=current_repo_id,
+        display_path=path_label,
+        branch=branch_name(repo_path),
+    )
+
+
+def recent_repo_indexes(records: List[RecentRecord]) -> tuple[dict[str, RecentRecord], List[str]]:
+    latest_by_repo: dict[str, RecentRecord] = {}
+    repo_order: List[str] = []
+
+    for record in records:
+        if record.repo_id not in latest_by_repo:
+            latest_by_repo[record.repo_id] = record
+            repo_order.append(record.repo_id)
+
+    return latest_by_repo, repo_order
+
+
+def candidates(patterns: Iterable[str], recent_path: Optional[str] = None) -> List[Candidate]:
+    result: List[Candidate] = []
+    seen_paths: set[str] = set()
+    records = recent_records(recent_path)
+    latest_by_repo, repo_order = recent_repo_indexes(records)
+
+    for current_repo_id in repo_order:
+        latest_record = latest_by_repo[current_repo_id]
+        anchor_path = latest_record.anchor_path
+        if not current_repo_id or not os.path.isdir(anchor_path):
+            continue
+
+        worktree_paths = order_worktree_paths(worktrees(anchor_path), current_repo_id)
+        for worktree_path in worktree_paths:
+            if not os.path.isdir(worktree_path) or worktree_path in seen_paths:
+                continue
+            indent = not is_main_worktree_path(worktree_path, current_repo_id)
+            candidate = append_candidate(worktree_path, current_repo_id, indent=indent)
+            if candidate is None:
+                continue
+            seen_paths.add(worktree_path)
+            result.append(candidate)
+
+    for repo_path in pattern_paths(patterns):
+        if repo_path in seen_paths:
+            continue
+        current_repo_id = repo_id(repo_path)
+        if not current_repo_id:
+            continue
+        candidate = append_candidate(repo_path, current_repo_id, indent=False)
+        if candidate is None:
+            continue
+        seen_paths.add(repo_path)
+        result.append(candidate)
+
+    return result
+
+
+def remove_recent_repo(current_repo_id: str, path: Optional[str] = None) -> None:
+    if not current_repo_id:
+        return
+
+    file_path = path or state_file()
+    if not os.path.isfile(file_path):
+        return
+
+    with open(file_path, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+
+    kept = []
+    for line in lines:
+        fields = line.rstrip("\n").split(TAB)
+        if len(fields) >= 2 and fields[1] == current_repo_id:
+            continue
+        kept.append(line)
+
+    tmp_path = f"{file_path}.tmp.{os.getpid()}"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        f.writelines(kept)
+    os.replace(tmp_path, file_path)
+
+
+def display_path_width(items: List[Candidate]) -> int:
+    if not items:
+        return 0
+    return max(len(item.display_path) for item in items)
+
+
+def run_fzf(items: List[Candidate]) -> Optional[tuple[str, Candidate]]:
+    path_width = display_path_width(items)
+    proc = subprocess.run(
+        [
+            "fzf",
+            "--delimiter",
+            TAB,
+            "--with-nth",
+            "1",
+            "--ansi",
+            "--prompt",
+            "repo> ",
+            "--header",
+            "ctrl-x: remove repo from recents",
+            "--expect",
+            "ctrl-x",
+            "--no-sort",
+            "--reverse",
+            "--bind",
+            "tab:toggle-preview",
+            "--preview-window",
+            "right:70%:hidden",
+            "--preview",
+            'git -C {2} status -sb 2>/dev/null || printf "(not a git repo)\\n"',
+        ],
+        input="\n".join(item.fzf_line(path_width) for item in items) + "\n",
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    if proc.returncode != 0 or not proc.stdout:
+        return None
+
+    lines = proc.stdout.splitlines()
+    if not lines:
+        return None
+    key = lines[0]
+    if len(lines) < 2 or not lines[1]:
+        return None
+
+    fields = lines[1].split(TAB)
+    if len(fields) < 3:
+        return None
+
+    selected_path = fields[1]
+    selected_repo_id = fields[2]
+    for item in items:
+        if item.repo_path == selected_path and item.repo_id == selected_repo_id:
+            return key, item
+    return key, Candidate(selected_path, selected_repo_id, "", "")
+
+
+def select_repo(patterns: List[str], recent_path: Optional[str] = None) -> Optional[str]:
+    while True:
+        items = candidates(patterns, recent_path)
+        if not items:
+            if patterns:
+                print(f"No directories matched: {', '.join(patterns)}", file=sys.stderr)
+            else:
+                print("No recent repositories found", file=sys.stderr)
+            return None
+
+        selected = run_fzf(items)
+        if selected is None:
+            return ""
+
+        key, item = selected
+        if key == "ctrl-x":
+            remove_recent_repo(item.repo_id, recent_path)
+            continue
+        return item.repo_path
+
+
+def parse_args(argv: List[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Select a repo with fzf")
+    parser.add_argument("patterns", nargs="*", help="Optional directory glob patterns")
+    parser.add_argument("--recent-file", help=argparse.SUPPRESS)
+    return parser.parse_args(argv)
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    args = parse_args(argv or sys.argv[1:])
+
+    if shutil.which("fzf") is None:
+        print("repos: fzf is required", file=sys.stderr)
+        return 1
+
+    selected_path = select_repo(args.patterns, args.recent_file)
+    if selected_path is None:
+        return 1
+    if selected_path:
+        print(selected_path)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
