@@ -5,6 +5,15 @@ standalone scripts under `bin/` (bash, Python, perl), with a few focused
 subprojects such as `ha_helper/`, `rproxy/`, and `opencode/`. There is no
 centralized build system or lint configuration.
 
+## Public Repository Safety
+
+This repository is public. Never commit privacy, security, or otherwise
+sensitive information to Git, including real credentials, tokens, private keys,
+personal contact details, private hostnames, internal URLs, machine-specific
+state, or deployment notes that should not be public. When a sensitive local
+file or generated state may exist in this checkout, add it to `.gitignore` or
+the nearest appropriate ignore file whenever possible.
+
 ## Subdirectory Instructions
 
 - More specific `AGENTS.md` files exist under some subdirectories. Follow the
