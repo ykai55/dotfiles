@@ -2,6 +2,24 @@
 
 When making modifications, remember to update both scripts and the unit test simultaneously.
 
+## Build / Lint / Test
+
+There is no dedicated lint tooling for `bin/`. After Python changes, run the
+relevant unittest(s), or all `bin/` Python tests with:
+`python -m unittest discover -s bin/tests -p 'test_*.py'`.
+
+Use dotted module paths for single tests, for example:
+`python -m unittest bin.tests.test_tmux_load.TmuxLoadWindowRestoreTests.test_restore_new_session_creates_all_windows`.
+Avoid running test files directly as scripts because imports may fail.
+
+Keep tests fast and isolated. `bin/tests/test_utils.py` provides
+`CapturingTestCase` for stdout/stderr capture, and tmux tests should mock tmux
+calls instead of running tmux.
+
+`bin/tests/test_dotfiles_apply.py` loads `dotfiles-apply` via `importlib`
+because the script has no `.py` extension. `bin/tests/test_apply_env.py` calls
+the `apply_env.fish` fish function via `subprocess` with `fish -N -c`.
+
 ## tmux-dump
 
 Purpose
@@ -33,6 +51,7 @@ Important fields
 Notes
 - processes[].command is an array of strings (tokenized via shell-like splitting).
 - processes[].command reflects the command tokens as reported by ps.
+- Schema reference: `tmux-dump.d.ts`.
 
 ## tmux-load
 
@@ -73,3 +92,19 @@ Notes
   the first process is not a shell; when the first process is a shell and there is
   a second process, the second command is sent to the shell.
 - -c cannot be used when restoring in the current session.
+- Runs pane commands by default; use `--no-run-commands` to skip.
+
+## clip
+
+`bin/clip` is a thin Bash wrapper around the downloaded `clip` binary under
+`bin/.downloads/clip/current/<platform>/`. Keep it as a wrapper: preserve
+`set -euo pipefail`, quote variables, and prefer explicit platform/architecture
+errors.
+
+Supported targets are macOS arm64 (`macos-aarch64`), Linux x86_64
+(`linux-x86_64-musl`), and Windows x86_64 (`windows-x86_64-gnu`). On macOS
+arm64, the wrapper also exports `CLIP_MACOS_HELPER` pointing at the downloaded
+`clip-macos-helper` executable.
+
+If the binary or helper is missing, the user-facing recovery is to run
+`bin/dotfiles-apply`.

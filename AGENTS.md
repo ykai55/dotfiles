@@ -5,42 +5,37 @@ standalone scripts under `bin/` (bash, Python, perl), with a few focused
 subprojects such as `ha_helper/`, `rproxy/`, and `opencode/`. There is no
 centralized build system or lint configuration.
 
-## Build / Lint / Test
+## Subdirectory Instructions
 
-No global build step.
-
-Lint
-- No lint tooling configured.
-- Keep shell and Python changes consistent with existing style.
-
-Tests (Python)
-- After any code change, run the relevant unittest(s).
-- Run all `bin/` Python tests:
-  `python -m unittest discover -s bin/tests -p 'test_*.py'`
-- Run a single test:
-  `python -m unittest bin.tests.test_tmux_load.TmuxLoadWindowRestoreTests.test_restore_new_session_creates_all_windows`
-  (Use dotted module path with `python -m unittest`; avoid running test files
-  directly as scripts since they may fail on module resolution.)
-
-Tests (Rust)
-- `ha_helper/` is an independent Rust crate. After Rust changes, run:
-  `cargo test --manifest-path ha_helper/Cargo.toml`
-- `rproxy/` is an independent Rust crate. After Rust changes, run:
-  `cargo test --manifest-path rproxy/Cargo.toml`
-
-Subdirectory instructions
 - More specific `AGENTS.md` files exist under some subdirectories. Follow the
   nearest one for work in that subtree.
+
+## dotfiles-apply
+
+`bin/dotfiles-apply` applies mappings from `dotfiles-map.json` and downloads
+tools or managed repositories from `downloads.json`. It is the user-facing
+recovery path when linked configs, downloaded binaries, or `.managed/` content
+are missing.
 
 ## Repository Layout
 
 - `bin/`: executable scripts (bash, Python, perl). Most tooling lives here.
 - `bin/tests/`: unittest coverage for scripts and modules.
-- `tbox/`: Python package (`tbox.cli`, `tbox.core`). `bin/tbox` is a thin
-  launcher that adds the repo root to `sys.path` and calls `tbox.cli.main()`.
-  Tests import from `tbox.core` directly.
-- `fish/`, `nvim/`, `tmux/`: shell/editor/terminal configs.
+- `.github/`: GitHub Actions workflows for releases and static tool builds.
+- `.managed/`: generated or downloaded content managed by `bin/dotfiles-apply`.
+- `clip/`: independent Rust workspace for the cross-platform clipboard CLI and
+  history tools.
+- `docs/`: design notes, plans, and other project documentation.
+- `github-codebase-sync/`: Docker and shell helpers for syncing this repository
+  into codebase-memory tooling.
+- `tbox/`: Python package backing the `bin/tbox` tmux workflow helper.
+- `fish/`: fish shell configuration, functions, completions, and plugin state.
+- `nvim/`: Neovim/LazyVim configuration and related editor settings.
+- `tmux/`: tmux configuration files linked into the user environment.
 - `kitty.conf`, `gitconfig`: app configs.
+- `niri/`, `ironbar/`, `mako/`, `keyd/`: Linux desktop, bar, notification, and
+  keyboard configuration.
+- `systemd/`: systemd unit files, currently reserved for user services.
 - `dotfiles-map.json`: manifest mapping repo files to install targets;
   consumed by `bin/dotfiles-apply`.
 - `downloads.json`, `downloads.schema.json`: downloaded binary/tool manifest
@@ -50,6 +45,8 @@ Subdirectory instructions
 - `rproxy/`: independent Rust crate for an HTTP/TCP reverse proxy CLI.
 - `scripts/`: helper scripts for building static tools.
 - `tmux-box.md`: tbox usage and workflow documentation.
+- When adding a new top-level directory, add a short entry here describing its
+  purpose and any important maintenance expectations.
 
 ## Code Style Guidelines
 
@@ -109,38 +106,3 @@ Config files (fish, nvim, tmux, kitty)
 - Prefer explicit error messages and non-zero exit codes.
 - For tmux scripts, surface tmux command failures verbosely.
 - Avoid silent failures; handle missing dependencies with clear messages.
-
-## Testing Notes
-
-- `bin/tests/test_tmux_load.py` uses `unittest` and `unittest.mock`.
-- Keep tests fast and isolated; mock tmux calls instead of running tmux.
-- `bin/tests/test_utils.py` provides `CapturingTestCase` base class (captures
-  stdout/stderr during tests). Used by `test_tbox`, `test_tmux_load`,
-  `test_dotfiles_apply`, and `test_apply_env`.
-- `bin/tests/test_dotfiles_apply.py` loads the script via `importlib` because
-  `dotfiles-apply` has no `.py` extension; tests must pass `-m unittest` style
-  to resolve the `test_utils` import.
-- `bin/tests/test_tbox_integration.py` runs `tbox` as a subprocess and
-  requires the `tbox` package to be importable from the repo root.
-- `bin/tests/test_apply_env.py` calls the `apply_env.fish` fish function via
-  `subprocess` with `fish -N -c`.
-
-## tmux Tools Notes
-
-- `tmux-load` runs pane commands by default; use `--no-run-commands` to skip.
-- Pane commands are derived from `processes` in the dump, not tmux start/current command fields.
-- `tmux-dump` schema reference: `tmux-dump.d.ts`.
-- When changing tbox commands, update `tmux-box.md`.
-
-## clip Wrapper Notes
-
-- `bin/clip` is a Bash wrapper around the downloaded `clip` binary under
-  `bin/.downloads/clip/current/<platform>/`.
-- Supported targets are macOS arm64 (`macos-aarch64`), Linux x86_64
-  (`linux-x86_64-musl`), and Windows x86_64 (`windows-x86_64-gnu`).
-- On macOS arm64, the wrapper also exports `CLIP_MACOS_HELPER` pointing at the
-  downloaded `clip-macos-helper` executable.
-- If the binary or helper is missing, the user-facing recovery is to run
-  `bin/dotfiles-apply`.
-- Keep `bin/clip` as a thin Bash wrapper: preserve `set -euo pipefail`, quote
-  variables, and prefer explicit platform/architecture errors.
