@@ -14,6 +14,7 @@
 	untrackedCache = true
 	fsmonitor = false
 	splitIndex = true
+	quotepath = false
 [push]
 	autoSetupRemote = true
 [alias]
