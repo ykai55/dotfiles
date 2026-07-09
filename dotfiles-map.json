@@ -75,12 +75,6 @@
       ]
     },
     {
-      "name": "void",
-      "source": "void",
-      "target": "~/void",
-      "mode": "symlink"
-    },
-    {
       "name": "niri",
       "source": "niri/config.kdl",
       "target": "~/.config/niri/config.kdl",
