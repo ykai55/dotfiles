@@ -1,12 +1,14 @@
-use clap::{Args, Parser, Subcommand};
+use clap::{ArgAction, Args, CommandFactory, Parser, Subcommand};
 use std::net::SocketAddr;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Debug, Parser)]
 #[command(name = "rproxy")]
 struct Cli {
+    #[arg(long, action = ArgAction::SetTrue, help = "Print AI-agent oriented usage guide")]
+    help_ai: bool,
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -68,12 +70,54 @@ pub struct TcpArgs {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     init_crypto_provider();
-    init_logging();
     let cli = Cli::parse();
-    match cli.command {
-        Command::Server(args) => rproxy::server::run(server_config(args)).await,
-        Command::Client(args) => rproxy::client::run(client_config(args)).await,
+    if cli.help_ai {
+        println!("{}", ai_help_text());
+        return Ok(());
     }
+
+    init_logging();
+    match cli.command {
+        Some(Command::Server(args)) => rproxy::server::run(server_config(args)).await,
+        Some(Command::Client(args)) => rproxy::client::run(client_config(args)).await,
+        None => {
+            Cli::command().print_help()?;
+            println!();
+            Ok(())
+        }
+    }
+}
+
+fn ai_help_text() -> &'static str {
+    r#"rproxy --help-ai
+
+Purpose:
+  rproxy exposes local HTTP or TCP services through a remote rproxy server.
+  Use it when an agent needs a temporary public URL for a local service.
+
+Core commands:
+  rproxy server --domain <domain> --token <token> --control-listen 127.0.0.1:7000 --http-listen 0.0.0.0:8080
+  rproxy client --server wss://rp.example.com --token <token> http --local 127.0.0.1:8000 --subdomain <name>
+  rproxy client --server wss://rp.example.com --token <token> tcp --local 127.0.0.1:22 --remote-port <port>
+
+Important rules:
+  --server must start with ws:// or wss://; the client appends /_rproxy automatically.
+  --local must be host:port, for example 127.0.0.1:8000. Do not pass a URL.
+  HTTP routing uses the Host header. HTTPS is handled by an external TLS terminator such as nginx or Caddy.
+  Tunnel registrations live only while the client control WebSocket stays connected.
+  For HTTP, the server prints the public URL after registration, for example https://demo.example.com.
+  For TCP, the server prints the public host:port after registration.
+
+Common deployment pattern:
+  nginx terminates https://rp.example.com/_rproxy and forwards WebSocket traffic to rproxy --control-listen.
+  nginx terminates https://*.example.com and forwards HTTP traffic to rproxy --http-listen with the original Host header.
+  Start the server with --http-public-scheme https when TLS is terminated before rproxy.
+
+Troubleshooting:
+  404 on an HTTP tunnel usually means no connected client registered that subdomain.
+  A redirect to https://*.domain/ means the nginx wildcard block is redirecting to its literal server_name.
+  WebSocket reset warnings on data connections may be transient; the control connection owns tunnel lifetime.
+"#
 }
 
 fn init_crypto_provider() {
@@ -146,7 +190,7 @@ mod tests {
             "foo",
         ]);
 
-        let Command::Client(args) = cli.command else {
+        let Some(Command::Client(args)) = cli.command else {
             panic!("expected client command");
         };
         assert_eq!(args.server, "ws://127.0.0.1:7000");
@@ -174,7 +218,7 @@ mod tests {
             "20000",
         ]);
 
-        let Command::Client(args) = cli.command else {
+        let Some(Command::Client(args)) = cli.command else {
             panic!("expected client command");
         };
         assert_eq!(args.server, "wss://a.com");
@@ -203,7 +247,7 @@ mod tests {
             "20000-20010",
         ]);
 
-        let Command::Server(args) = cli.command else {
+        let Some(Command::Server(args)) = cli.command else {
             panic!("expected server command");
         };
         assert_eq!(args.domain, "a.com");
@@ -230,7 +274,7 @@ mod tests {
             "444",
         ]);
 
-        let Command::Server(args) = cli.command else {
+        let Some(Command::Server(args)) = cli.command else {
             panic!("expected server command");
         };
         assert_eq!(args.http_public_scheme, "https");
@@ -246,5 +290,40 @@ mod tests {
     fn initializes_rustls_crypto_provider() {
         init_crypto_provider();
         init_crypto_provider();
+    }
+
+    #[test]
+    fn ai_help_describes_agent_usage() {
+        let help = ai_help_text();
+
+        assert!(help.contains("rproxy --help-ai"));
+        assert!(help.contains("rproxy server --domain <domain> --token <token>"));
+        assert!(help.contains(
+            "rproxy client --server wss://rp.example.com --token <token> http --local 127.0.0.1:8000"
+        ));
+        assert!(help.contains("client appends /_rproxy automatically"));
+        assert!(help.contains("HTTP routing uses the Host header"));
+        assert!(help.contains(
+            "Tunnel registrations live only while the client control WebSocket stays connected"
+        ));
+    }
+
+    #[test]
+    fn parses_help_ai_without_subcommand() {
+        let cli = Cli::parse_from(["rproxy", "--help-ai"]);
+
+        assert!(cli.help_ai);
+        assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn clap_help_explains_help_ai() {
+        let mut output = Vec::new();
+
+        Cli::command().write_help(&mut output).unwrap();
+        let help = String::from_utf8(output).unwrap();
+
+        assert!(help.contains("--help-ai"));
+        assert!(help.contains("Print AI-agent oriented usage guide"));
     }
 }
