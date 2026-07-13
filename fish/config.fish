@@ -43,7 +43,7 @@ end
 
 # 放到最前面，后面有些命令会依赖
 if is_mac
-  eval (/opt/homebrew/bin/brew shellenv)
+  eval (/opt/homebrew/bin/brew shellenv fish)
   add_path '/opt/homebrew/bin'
   add_path '/opt/homebrew/sbin'
 end
@@ -109,7 +109,7 @@ end
 # pyenv
 # if type pyenv -q && test -z "$PYENV_SHELL"
 if type pyenv -q
-  pyenv init --no-rehash - | source
+  pyenv init --no-rehash - fish | source
 end
 
 # if test "$JENV_LOADED" != "1"
