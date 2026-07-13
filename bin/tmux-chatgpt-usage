@@ -170,10 +170,12 @@ def main() -> int:
         "used_percent",
     )
 
-    if primary is None or secondary is None:
+    if primary is None:
         return 0
 
-    usage = f"{format_percentage(primary)}%/{format_percentage(secondary)}%"
+    usage = f"{format_percentage(primary)}%"
+    if secondary is not None:
+        usage = f"{usage}/{format_percentage(secondary)}%"
     if label:
         usage = f"{label} {usage}"
     formatted = f"{usage}\n"

@@ -146,9 +146,20 @@ class TmuxChatgptUsageTests(unittest.TestCase):
         self.assertEqual(result.stderr, "")
         self.assertEqual(state["requests"], 1)
 
-    def test_prints_nothing_when_rate_limit_fields_are_missing(self):
+    def test_formats_single_window_usage_when_secondary_window_is_missing(self):
         auth_file = self.make_auth_file()
         url, state = self.start_server(200, '{"rate_limit":{"primary_window":{"used_percent":14.0}}}')
+
+        result = self.run_usage(auth_file, url)
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "14%\n")
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(state["requests"], 1)
+
+    def test_prints_nothing_when_primary_window_is_missing(self):
+        auth_file = self.make_auth_file()
+        url, state = self.start_server(200, '{"rate_limit":{"secondary_window":{"used_percent":22.0}}}')
 
         result = self.run_usage(auth_file, url)
 
