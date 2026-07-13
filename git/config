@@ -11,6 +11,7 @@
 	status = always
 [core]
 	autocrlf = input
+	excludesFile = ~/dotfiles/git/ignore
 	untrackedCache = true
 	fsmonitor = false
 	splitIndex = true

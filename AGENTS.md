@@ -41,7 +41,7 @@ are missing.
 - `fish/`: fish shell configuration, functions, completions, and plugin state.
 - `nvim/`: Neovim/LazyVim configuration and related editor settings.
 - `tmux/`: tmux configuration files linked into the user environment.
-- `kitty.conf`, `gitconfig`: app configs.
+- `kitty.conf`, `git/`: app configs.
 - `niri/`, `ironbar/`, `mako/`, `keyd/`: Linux desktop, bar, notification, and
   keyboard configuration.
 - `systemd/`: systemd unit files, currently reserved for user services.

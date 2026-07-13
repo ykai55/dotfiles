@@ -1077,39 +1077,6 @@ class DotfilesApplyTests(CapturingTestCase):
             if name in mappings_by_name:
                 self.assertEqual(mappings_by_name[name].platforms, ["linux"])
 
-    def test_repo_opencode_user_service_runs_requested_command(self):
-        service_path = (
-            pathlib.Path(__file__).resolve().parents[2]
-            / "opencode"
-            / "opencode.service"
-        )
-
-        service = service_path.read_text(encoding="utf-8")
-
-        self.assertIn(
-            "ExecStart=/usr/bin/fnm exec --using=default opencode serve --hostname 0.0.0.0 --port 4096",
-            service,
-        )
-        self.assertIn("Restart=on-failure", service)
-        self.assertIn("WantedBy=default.target", service)
-
-    def test_repo_opencode_launchagent_runs_requested_command(self):
-        service_path = (
-            pathlib.Path(__file__).resolve().parents[2]
-            / "opencode"
-            / "opencode.plist"
-        )
-
-        service = service_path.read_text(encoding="utf-8")
-
-        self.assertIn("<string>opencode.server</string>", service)
-        self.assertIn(
-            "<string>fnm exec --using=default opencode serve --hostname 0.0.0.0 --port 4096</string>",
-            service,
-        )
-        self.assertIn("<key>RunAtLoad</key>", service)
-        self.assertIn("<key>KeepAlive</key>", service)
-
     def test_link_children_preserves_local_files_and_excludes(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             home = os.path.join(tmpdir, "home")

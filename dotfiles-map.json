@@ -43,7 +43,7 @@
     },
     {
       "name": "git",
-      "source": "gitconfig",
+      "source": "git/config",
       "target": "~/.gitconfig",
       "mode": "symlink"
     },

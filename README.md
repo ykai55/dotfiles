@@ -2,8 +2,9 @@
 
 ## Apply On A New Machine
 
-The repo assumes it is reachable as `~/dotfiles`. If you cloned it somewhere else,
-`bin/dotfiles-apply` will create a compatibility symlink at `~/dotfiles`.
+The repo assumes it is reachable as `~/dotfiles`, and that location is treated
+as a trusted path. If you cloned it somewhere else, `bin/dotfiles-apply` will
+create a compatibility symlink at `~/dotfiles`.
 
 Preview the changes:
 
