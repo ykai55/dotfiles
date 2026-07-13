@@ -20,13 +20,6 @@
         "--shell-type=fish"
       ],
       "enabled": true
-    },
-    "codebase-memory-mcp": {
-      "enabled": true,
-      "type": "local",
-      "command": [
-        "/Users/bytedance/.local/bin/codebase-memory-mcp"
-      ]
     }
   },
   "permission": {
