@@ -1073,6 +1073,10 @@ class DotfilesApplyTests(CapturingTestCase):
         self.assertIn("opencode.service", opencode_config.exclude)
         self.assertIn("opencode.plist", opencode_config.exclude)
 
+        codex_agents = mappings_by_name["codex-agents"]
+        self.assertEqual(codex_agents.source, "opencode/AGENTS.md")
+        self.assertEqual(codex_agents.target, "~/.codex/AGENTS.md")
+
         for name in ("niri", "ironbar", "keyd"):
             if name in mappings_by_name:
                 self.assertEqual(mappings_by_name[name].platforms, ["linux"])

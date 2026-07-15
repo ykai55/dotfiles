@@ -75,6 +75,12 @@
       ]
     },
     {
+      "name": "codex-agents",
+      "source": "opencode/AGENTS.md",
+      "target": "~/.codex/AGENTS.md",
+      "mode": "symlink"
+    },
+    {
       "name": "void-agents",
       "source": "void/AGENTS.md",
       "target": "~/void/AGENTS.md",
