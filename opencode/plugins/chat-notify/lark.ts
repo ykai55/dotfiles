@@ -231,6 +231,8 @@ export default (async (input, options) => {
   const appID = textOption(options?.appID, conf(config, "LARK_APP_ID"))
   const appSecret = textOption(options?.appSecret, conf(config, "LARK_APP_SECRET"))
   const chatID = textOption(options?.chatID, conf(config, "LARK_CHAT_ID"))
+  if (!appID || !appSecret) console.warn("lark-notify plugin: missing LARK_APP_ID or LARK_APP_SECRET")
+  if (!chatID) console.warn("lark-notify plugin: missing LARK_CHAT_ID")
   const mentionEmail = textOption(options?.mentionEmail, conf(config, "LARK_MENTION_EMAIL"))
   const notifyDone = boolOption(options?.notifyDone, true)
   const notifyPermission = boolOption(options?.notifyPermission, true)
@@ -453,10 +455,7 @@ export default (async (input, options) => {
 
   async function tenantToken() {
     if (token && token.expiresAt > Date.now() + 60_000) return token.value
-    if (!appID || !appSecret) {
-      console.warn("lark-notify plugin: missing LARK_APP_ID or LARK_APP_SECRET")
-      return
-    }
+    if (!appID || !appSecret) return
     const response = await fetch("https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -528,10 +527,7 @@ export default (async (input, options) => {
   }
 
   async function send(message: LarkMessage, rootMessageID?: string) {
-    if (!chatID) {
-      console.warn("lark-notify plugin: missing LARK_CHAT_ID")
-      return
-    }
+    if (!chatID) return
     const data = rootMessageID
       ? await larkAPI("POST", `/im/v1/messages/${encodeURIComponent(rootMessageID)}/reply`, undefined, {
           ...larkBody(message),

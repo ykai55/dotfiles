@@ -246,6 +246,7 @@ export default (async (input, options) => {
   const config = await readPluginConfig()
   const token = textOption(options?.token, env(config, "TELEGRAM_BOT_TOKEN"))
   const chatID = textOption(options?.chatID, env(config, "TELEGRAM_CHAT_ID"))
+  if (!token || !chatID) console.warn("telegram-notify plugin: missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID")
   const messageThreadID = numberOption(options?.messageThreadID ?? env(config, "TELEGRAM_MESSAGE_THREAD_ID"))
   const forumTopics = boolOption(options?.forumTopics, boolText(env(config, "TELEGRAM_FORUM_TOPICS"), true))
   const notifyDone = boolOption(options?.notifyDone, true)
@@ -533,10 +534,7 @@ export default (async (input, options) => {
   }
 
   async function send(text: string, options?: { replyTo?: number; threadID?: number; replyMarkup?: unknown }) {
-    if (!token || !chatID) {
-      console.warn("telegram-notify plugin: missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID")
-      return
-    }
+    if (!token || !chatID) return
 
     const threadID = options?.threadID ?? messageThreadID
     const response = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
