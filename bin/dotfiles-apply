@@ -484,7 +484,7 @@ def extract_archive(archive_path: str, archive_type: str, target_dir: str) -> No
                     raise RuntimeError(f"Archive contains unsafe link: {member.name}")
                 if not (member.isfile() or member.isdir()):
                     raise RuntimeError(f"Archive contains unsafe tar member: {member.name}")
-            archive.extractall(target_dir)
+            archive.extractall(target_dir, filter="data")
         return
     if archive_type == "zip":
         with zipfile.ZipFile(archive_path) as archive:

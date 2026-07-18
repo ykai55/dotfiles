@@ -11,6 +11,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
+import warnings
 import zipfile
 from unittest import mock
 
@@ -896,6 +897,30 @@ class DotfilesApplyTests(CapturingTestCase):
             self.assertEqual(stats.errors, 1)
             self.assertFalse(os.path.exists(installed))
             self.assertIn("unsafe tar member", self._stderr_buffer.getvalue())
+
+    def test_extract_archive_does_not_emit_deprecation_warning(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            archive_path = os.path.join(tmpdir, "tool.tar.gz")
+            data = b"#!/bin/sh\n"
+            with tarfile.open(archive_path, "w:gz") as archive:
+                member = tarfile.TarInfo("tool")
+                member.size = len(data)
+                member.mode = 0o755
+                archive.addfile(member, fileobj=io.BytesIO(data))
+            target_dir = os.path.join(tmpdir, "out")
+            os.makedirs(target_dir)
+
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                self.dotfiles_apply.extract_archive(archive_path, "tar.gz", target_dir)
+
+            deprecations = [
+                w for w in caught if issubclass(w.category, DeprecationWarning)
+            ]
+            self.assertEqual(deprecations, [])
+            extracted = os.path.join(target_dir, "tool")
+            self.assertTrue(os.path.exists(extracted))
+            self.assertTrue(os.stat(extracted).st_mode & stat.S_IXUSR)
 
     def test_managed_download_preserves_existing_install_when_replacement_fails(self):
         with tempfile.TemporaryDirectory() as tmpdir:
