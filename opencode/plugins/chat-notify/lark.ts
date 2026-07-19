@@ -226,13 +226,22 @@ const larkMessageText = (message: unknown) => {
   }
 }
 
+let warnedMissingCredentials = false
+let warnedMissingChatID = false
+
 export default (async (input, options) => {
   const config = await readPluginConfig()
   const appID = textOption(options?.appID, conf(config, "LARK_APP_ID"))
   const appSecret = textOption(options?.appSecret, conf(config, "LARK_APP_SECRET"))
   const chatID = textOption(options?.chatID, conf(config, "LARK_CHAT_ID"))
-  if (!appID || !appSecret) console.warn("lark-notify plugin: missing LARK_APP_ID or LARK_APP_SECRET")
-  if (!chatID) console.warn("lark-notify plugin: missing LARK_CHAT_ID")
+  if ((!appID || !appSecret) && !warnedMissingCredentials) {
+    warnedMissingCredentials = true
+    console.warn("lark-notify plugin: missing LARK_APP_ID or LARK_APP_SECRET")
+  }
+  if (!chatID && !warnedMissingChatID) {
+    warnedMissingChatID = true
+    console.warn("lark-notify plugin: missing LARK_CHAT_ID")
+  }
   const mentionEmail = textOption(options?.mentionEmail, conf(config, "LARK_MENTION_EMAIL"))
   const notifyDone = boolOption(options?.notifyDone, true)
   const notifyPermission = boolOption(options?.notifyPermission, true)

@@ -242,11 +242,16 @@ const contextLabel = (tokens: number | undefined, limit: number | undefined, app
 const estimateTextTokens = (value: unknown) =>
   typeof value === "string" && value.trim().length > 0 ? Math.ceil(Array.from(value).length / 3) : 0
 
+let warnedMissingConfig = false
+
 export default (async (input, options) => {
   const config = await readPluginConfig()
   const token = textOption(options?.token, env(config, "TELEGRAM_BOT_TOKEN"))
   const chatID = textOption(options?.chatID, env(config, "TELEGRAM_CHAT_ID"))
-  if (!token || !chatID) console.warn("telegram-notify plugin: missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID")
+  if ((!token || !chatID) && !warnedMissingConfig) {
+    warnedMissingConfig = true
+    console.warn("telegram-notify plugin: missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID")
+  }
   const messageThreadID = numberOption(options?.messageThreadID ?? env(config, "TELEGRAM_MESSAGE_THREAD_ID"))
   const forumTopics = boolOption(options?.forumTopics, boolText(env(config, "TELEGRAM_FORUM_TOPICS"), true))
   const notifyDone = boolOption(options?.notifyDone, true)
