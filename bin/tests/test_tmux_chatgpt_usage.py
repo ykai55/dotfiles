@@ -1,3 +1,4 @@
+import json
 import os
 import pathlib
 import subprocess
@@ -12,7 +13,7 @@ class TmuxChatgptUsageTests(unittest.TestCase):
         self.repo_root = pathlib.Path(__file__).resolve().parents[2]
         self.script = self.repo_root / "bin" / "tmux-chatgpt-usage"
 
-    def run_usage(self, auth_file, url, cache_file=None, extra_env=None):
+    def run_usage(self, auth_file, url, cache_file=None, extra_env=None, extra_args=None):
         if cache_file is None:
             cache = tempfile.NamedTemporaryFile(delete=False)
             cache.close()
@@ -27,8 +28,11 @@ class TmuxChatgptUsageTests(unittest.TestCase):
         }
         if extra_env:
             env.update(extra_env)
+        cmd = [str(self.script)]
+        if extra_args:
+            cmd.extend(extra_args)
         return subprocess.run(
-            [str(self.script)],
+            cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -170,7 +174,7 @@ class TmuxChatgptUsageTests(unittest.TestCase):
 
     def test_invalid_ttl_disables_cache_and_fetches_live(self):
         cache = tempfile.NamedTemporaryFile(delete=False)
-        cache.write(b"GPT 99%\n")
+        cache.write(b'{"rate_limit":{"primary_window":{"used_percent":99}}}')
         cache.close()
         self.addCleanup(lambda: pathlib.Path(cache.name).unlink(missing_ok=True))
         auth_file = self.make_auth_file()
@@ -210,7 +214,9 @@ class TmuxChatgptUsageTests(unittest.TestCase):
 
     def test_expired_cache_falls_back_to_live_fetch(self):
         cache = tempfile.NamedTemporaryFile(delete=False)
-        cache.write(b"GPT 7%\n")
+        cache.write(
+            b'{"rate_limit":{"primary_window":{"used_percent":7}}}',
+        )
         cache.close()
         self.addCleanup(lambda: pathlib.Path(cache.name).unlink(missing_ok=True))
         auth_file = self.make_auth_file()
@@ -245,40 +251,135 @@ class TmuxChatgptUsageTests(unittest.TestCase):
         first_result = self.run_usage(auth_file, url, cache_file=cache.name)
         second_result = self.run_usage(auth_file, url, cache_file=cache.name)
 
+        expected = "14%/22.2%\n"
         self.assertEqual(first_result.returncode, 0)
-        self.assertEqual(first_result.stdout, "14%/22.2%\n")
+        self.assertEqual(first_result.stdout, expected)
         self.assertEqual(first_result.stderr, "")
         self.assertEqual(second_result.returncode, 0)
-        self.assertEqual(second_result.stdout, "14%/22.2%\n")
+        self.assertEqual(second_result.stdout, expected)
         self.assertEqual(second_result.stderr, "")
         self.assertEqual(state["requests"], 1)
-        self.assertEqual(pathlib.Path(cache.name).read_text(encoding="utf-8"), "14%/22.2%\n")
+        cached = json.loads(pathlib.Path(cache.name).read_text(encoding="utf-8"))
+        self.assertEqual(
+            cached["rate_limit"]["primary_window"]["used_percent"], 14.0
+        )
 
     def test_uses_cached_output_when_available(self):
         cache = tempfile.NamedTemporaryFile(delete=False)
-        cache.write(b"GPT 7%\n")
+        cache.write(
+            b'{"rate_limit":{"primary_window":{"used_percent":7}}}',
+        )
         cache.close()
         self.addCleanup(lambda: pathlib.Path(cache.name).unlink(missing_ok=True))
         auth_file = self.make_auth_file()
-        url, _ = self.start_server(500, '{}')
+        url, state = self.start_server(500, '{}')
 
-        result = subprocess.run(
-            [str(self.script)],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            env={
-                "PATH": os.environ.get("PATH", ""),
-                "TMUX_CHATGPT_USAGE_AUTH_FILE": str(auth_file),
-                "TMUX_CHATGPT_USAGE_CACHE_FILE": cache.name,
-                "TMUX_CHATGPT_USAGE_URL": url,
-            },
-            check=False,
+        result = self.run_usage(auth_file, url, cache_file=cache.name)
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "7%\n")
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(state["requests"], 0)
+
+    def test_detail_fetches_live_when_cache_disabled(self):
+        auth_file = self.make_auth_file()
+        import time as time_module
+        reset_at = int(time_module.time()) + 604800
+        body = (
+            '{"plan_type":"prolite","rate_limit":{'
+            '"primary_window":{"used_percent":85,"limit_window_seconds":604800,"reset_at":' + str(reset_at) + '}'
+            '}}'
+        )
+        url, state = self.start_server(200, body)
+
+        result = self.run_usage(
+            auth_file, url,
+            extra_args=["--detail"],
+            extra_env={"TMUX_CHATGPT_USAGE_TTL_SECONDS": "0"},
         )
 
         self.assertEqual(result.returncode, 0)
-        self.assertEqual(result.stdout, "GPT 7%\n")
-        self.assertEqual(result.stderr, "")
+        self.assertIn("ChatGPT usage", result.stdout)
+        self.assertIn("\033[33m85%\033[0m", result.stdout)
+        self.assertEqual(state["requests"], 1)
+
+    def test_detail_reuses_cache(self):
+        cache = tempfile.NamedTemporaryFile(delete=False)
+        cache.write(
+            b'{"plan_type":"prolite","rate_limit":{'
+            b'"primary_window":{"used_percent":30,"reset_at":2000000000}}}',
+        )
+        cache.close()
+        self.addCleanup(lambda: pathlib.Path(cache.name).unlink(missing_ok=True))
+
+        auth_file = self.make_auth_file()
+        url, state = self.start_server(200, "{}")
+
+        result = self.run_usage(auth_file, url, cache_file=cache.name, extra_args=["--detail"])
+
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("\033[32m30%\033[0m", result.stdout)
+        self.assertEqual(state["requests"], 0)
+
+    def test_detail_reports_error_when_fetch_fails(self):
+        auth_file = self.make_auth_file()
+        url, state = self.start_server(500, '{}')
+
+        result = self.run_usage(auth_file, url, extra_args=["--detail"])
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("failed to fetch", result.stderr)
+        self.assertEqual(state["requests"], 1)
+
+    def test_detail_reports_error_when_auth_missing(self):
+        missing_auth = pathlib.Path(tempfile.gettempdir()) / "missing-detail-auth.json"
+        url, _ = self.start_server(200, '{}')
+
+        cache = tempfile.NamedTemporaryFile(delete=False)
+        cache.close()
+        os.unlink(cache.name)
+        self.addCleanup(lambda: pathlib.Path(cache.name).unlink(missing_ok=True))
+
+        env = {
+            "PATH": os.environ.get("PATH", ""),
+            "TMUX_CHATGPT_USAGE_AUTH_FILE": str(missing_auth),
+            "TMUX_CHATGPT_USAGE_CACHE_FILE": cache.name,
+            "TMUX_CHATGPT_USAGE_URL": url,
+        }
+        result = subprocess.run(
+            [str(self.script), "--detail"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("auth", result.stderr)
+        self.assertEqual(result.stdout, "")
+
+    def test_detail_colors_high_percentage_red(self):
+        auth_file = self.make_auth_file()
+        url, _ = self.start_server(
+            200,
+            '{"rate_limit":{"primary_window":{"used_percent":95}}}',
+        )
+
+        result = self.run_usage(auth_file, url, extra_args=["--detail"])
+
+        self.assertIn("\033[31m95%\033[0m", result.stdout)
+
+    def test_detail_colors_medium_percentage_orange(self):
+        auth_file = self.make_auth_file()
+        url, _ = self.start_server(
+            200,
+            '{"rate_limit":{"primary_window":{"used_percent":85}}}',
+        )
+
+        result = self.run_usage(auth_file, url, extra_args=["--detail"])
+
+        self.assertIn("\033[33m85%\033[0m", result.stdout)
 
 
 if __name__ == "__main__":

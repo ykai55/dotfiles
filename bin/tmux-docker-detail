@@ -1,0 +1,77 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import re
+import subprocess
+import sys
+
+_ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _cell_width(s: str) -> int:
+    return len(_ANSI_ESCAPE.sub("", s))
+
+
+def draw_table(headers: list[str], rows: list[list[str]]) -> str:
+    col_widths = [len(h) for h in headers]
+    for row in rows:
+        for i, cell in enumerate(row):
+            col_widths[i] = max(col_widths[i], _cell_width(cell))
+
+    def _sep(left: str, mid: str, right: str) -> str:
+        return left + mid.join("─" * (w + 2) for w in col_widths) + right
+
+    def _row(cells: list[str]) -> str:
+        parts = []
+        for i, c in enumerate(cells):
+            w = col_widths[i]
+            pad = w - _cell_width(c)
+            parts.append(f" {c}{' ' * pad} ")
+        return "│" + "│".join(parts) + "│"
+
+    return "\n".join([
+        _sep("╭", "┬", "╮"),
+        _row(headers),
+        _sep("├", "┼", "┤"),
+        *(_row(r) for r in rows),
+        _sep("╰", "┴", "╯"),
+    ])
+
+
+def main() -> int:
+    docker_cmd = "docker"
+    try:
+        proc = subprocess.run(
+            [docker_cmd, "ps", "--format", "{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}"],
+            capture_output=True, text=True,
+        )
+    except FileNotFoundError:
+        print("docker not found", file=sys.stderr)
+        return 1
+
+    if proc.returncode != 0:
+        print(proc.stderr.strip() or "docker ps failed", file=sys.stderr)
+        return 1
+
+    output = proc.stdout.strip()
+    if not output:
+        print("no running containers", file=sys.stderr)
+        return 0
+
+    rows = []
+    for line in output.split("\n"):
+        if not line.strip():
+            continue
+        rows.append([col.strip() for col in line.split("\t")])
+
+    if not rows:
+        print("no running containers", file=sys.stderr)
+        return 0
+
+    table = draw_table(["name", "image", "status", "ports"], rows)
+    print(f"Running containers\n\n{table}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

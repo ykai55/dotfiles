@@ -3,11 +3,14 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 import tempfile
 import sys
 import time
 from urllib import error, request
+
+_ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 
 
 def format_percentage(value: object) -> str:
@@ -37,7 +40,7 @@ def cache_ttl_seconds() -> float:
 
 def cache_file_path() -> Path:
     default_dir = os.environ.get("TMPDIR", "/tmp")
-    default_path = os.path.join(default_dir, "tmux-chatgpt-usage.v2.cache")
+    default_path = os.path.join(default_dir, "tmux-chatgpt-usage.v3.cache")
     return Path(env("TMUX_CHATGPT_USAGE_CACHE_FILE", default_path))
 
 
@@ -123,67 +126,218 @@ def fetch_usage(url: str, access_token: str, account_id: str) -> object | None:
         return None
 
 
-def extract_percentage(payload: object, *keys: str) -> object | None:
-    if not isinstance(payload, dict):
+def load_cached_data(path: Path, ttl_seconds: float) -> dict | None:
+    raw = read_cache(path, ttl_seconds)
+    if raw is None:
         return None
-
-    for key in keys:
-        value = payload.get(key)
-        if value is not None:
-            return value
-
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if isinstance(data, dict):
+        return data
     return None
 
 
-def main() -> int:
+def color_pct(value: object, ansi: bool = False) -> str:
+    try:
+        pct = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+
+    s = format_percentage(value) + "%"
+    if ansi:
+        if pct >= 90:
+            a = "31"
+        elif pct >= 80:
+            a = "33"
+        else:
+            a = "32"
+        return f"\033[{a}m{s}\033[0m"
+    return s
+
+
+def format_duration(value: object) -> str | None:
+    try:
+        total = int(float(value))
+    except (TypeError, ValueError):
+        return None
+    if total < 0:
+        return None
+    days, remainder = divmod(total, 86400)
+    hours, remainder = divmod(remainder, 3600)
+    minutes = remainder // 60
+    if days:
+        return f"{days}d{hours}h" if hours else f"{days}d"
+    if hours:
+        return f"{hours}h{minutes}m" if minutes else f"{hours}h"
+    return f"{minutes}m"
+
+
+def make_rate_limit_row(label: str, window: object, ansi_color: bool = False) -> list[str] | None:
+    if not isinstance(window, dict):
+        return None
+    used_percent = window.get("used_percent")
+    if used_percent is None:
+        return None
+    used_str = color_pct(used_percent, ansi=ansi_color)
+    reset_str = ""
+    try:
+        reset_at = float(window.get("reset_at"))
+    except (TypeError, ValueError):
+        reset_at = None
+    if reset_at:
+        remaining = format_duration(max(0.0, reset_at - time.time())) or "0m"
+        when = time.strftime("%m-%d %H:%M", time.localtime(reset_at))
+        reset_str = f"{remaining} ({when})"
+    return [label, used_str, reset_str]
+
+
+def _short_name(name: str) -> str:
+    parts = name.rsplit("-", 1)
+    return parts[-1] if len(parts) > 1 else name
+
+
+def _cell_width(s: str) -> int:
+    return len(_ANSI_ESCAPE.sub("", s))
+
+
+def draw_table(headers: list[str], rows: list[list[str]]) -> str:
+    col_widths = [len(h) for h in headers]
+    for row in rows:
+        for i, cell in enumerate(row):
+            col_widths[i] = max(col_widths[i], _cell_width(cell))
+
+    def _sep(left: str, mid: str, right: str) -> str:
+        return left + mid.join("─" * (w + 2) for w in col_widths) + right
+
+    def _row(cells: list[str]) -> str:
+        parts = []
+        for i, c in enumerate(cells):
+            w = col_widths[i]
+            pad = w - _cell_width(c)
+            parts.append(f" {c}{' ' * pad} ")
+        return "│" + "│".join(parts) + "│"
+
+    lines = [
+        _sep("╭", "┬", "╮"),
+        _row(headers),
+        _sep("├", "┼", "┤"),
+    ]
+    for row in rows:
+        lines.append(_row(row))
+    lines.append(_sep("╰", "┴", "╯"))
+    return "\n".join(lines)
+
+
+def format_detail(data: dict) -> str:
+    rows: list[list[str]] = []
+    plan_type = data.get("plan_type")
+
+    rate_limit = data.get("rate_limit")
+    if isinstance(rate_limit, dict):
+        label = str(plan_type) if isinstance(plan_type, str) and plan_type else "chatgpt"
+        row = make_rate_limit_row(label, rate_limit.get("primary_window"), ansi_color=True)
+        if row:
+            rows.append(row)
+
+    additional = data.get("additional_rate_limits")
+    if isinstance(additional, list):
+        for entry in additional:
+            if not isinstance(entry, dict):
+                continue
+            limit_name = entry.get("limit_name")
+            entry_rate_limit = entry.get("rate_limit")
+            if not isinstance(limit_name, str) or not isinstance(entry_rate_limit, dict):
+                continue
+            row = make_rate_limit_row(
+                _short_name(limit_name), entry_rate_limit.get("primary_window"), ansi_color=True
+            )
+            if row:
+                rows.append(row)
+
+    if not rows:
+        return ""
+
+    return "\n".join(["ChatGPT usage", "", draw_table(["model", "used", "resets"], rows)]) + "\n"
+
+
+def format_one_line(data: dict, label: str) -> str | None:
+    rate_limit = data.get("rate_limit")
+    if not isinstance(rate_limit, dict):
+        return None
+
+    primary_window = rate_limit.get("primary_window")
+    if not isinstance(primary_window, dict):
+        return None
+    primary = primary_window.get("used_percent")
+    if primary is None:
+        return None
+
+    usage = color_pct(primary)
+    secondary_window = rate_limit.get("secondary_window")
+    if isinstance(secondary_window, dict) and secondary_window.get("used_percent") is not None:
+        usage = f"{usage}/{color_pct(secondary_window.get('used_percent'))}"
+    if label:
+        usage = f"{label} {usage}"
+    return f"{usage}\n"
+
+
+def main(argv: list[str]) -> int:
+    detail = "--detail" in argv
     cache_file = cache_file_path()
-    cached = read_cache(cache_file, cache_ttl_seconds())
+    ttl = cache_ttl_seconds()
+
+    cached = load_cached_data(cache_file, ttl)
     if cached is not None:
-        print(cached, end="")
-        return 0
+        if detail:
+            output = format_detail(cached)
+            if output:
+                print(output, end="")
+            else:
+                print("chatgpt usage: no rate limit data", file=sys.stderr)
+            return 0
+        one_line = format_one_line(cached, env("TMUX_CHATGPT_USAGE_LABEL", ""))
+        if one_line is not None:
+            print(one_line, end="")
+            return 0
 
     auth_file = env(
         "TMUX_CHATGPT_USAGE_AUTH_FILE",
         os.path.expanduser("~/.local/share/opencode/auth.json"),
     )
     usage_url = env("TMUX_CHATGPT_USAGE_URL", "https://chatgpt.com/backend-api/wham/usage")
-    label = env("TMUX_CHATGPT_USAGE_LABEL", "")
 
     auth = load_auth(auth_file)
     if auth is None:
+        if detail:
+            print("chatgpt usage: auth file missing or invalid", file=sys.stderr)
+            return 1
         return 0
 
     data = fetch_usage(usage_url, auth[0], auth[1])
     if not isinstance(data, dict):
+        if detail:
+            print("chatgpt usage: failed to fetch usage data", file=sys.stderr)
+            return 1
         return 0
 
-    rate_limit = data.get("rate_limit")
-    if not isinstance(rate_limit, dict):
+    if ttl > 0:
+        write_cache(cache_file, json.dumps(data))
+
+    if detail:
+        output = format_detail(data)
+        if not output:
+            print("chatgpt usage: no rate limit data", file=sys.stderr)
+            return 1
+        print(output, end="")
         return 0
 
-    primary = extract_percentage(
-        rate_limit.get("primary_window"),
-        "used_percent",
-    )
-    secondary = extract_percentage(
-        rate_limit.get("secondary_window"),
-        "used_percent",
-    )
-
-    if primary is None:
-        return 0
-
-    usage = f"{format_percentage(primary)}%"
-    if secondary is not None:
-        usage = f"{usage}/{format_percentage(secondary)}%"
-    if label:
-        usage = f"{label} {usage}"
-    formatted = f"{usage}\n"
-    print(formatted, end="")
-    write_cache(cache_file, formatted)
-
+    one_line = format_one_line(data, env("TMUX_CHATGPT_USAGE_LABEL", ""))
+    if one_line is not None:
+        print(one_line, end="")
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(sys.argv))
