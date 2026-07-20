@@ -1,0 +1,605 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+CONFIG_FILE="renew-aliyun-certs.conf"
+DRY_RUN=0
+STAGING=0
+ACME_TMP=""
+NONCE=""
+ACCOUNT_KID=""
+ACCOUNT_JWK=""
+JWK_THUMBPRINT=""
+NEW_NONCE_URL=""
+NEW_ACCOUNT_URL=""
+NEW_ORDER_URL=""
+CREATED_DNS_RECORD_IDS=()
+SENSITIVE_TMP_FILES=()
+SSH_OPTS=(
+  -o BatchMode=yes
+  -o StrictHostKeyChecking=accept-new
+)
+
+usage() {
+  cat <<'USAGE'
+Usage: renew-aliyun-certs [--config PATH] [--dry-run] [--staging] [--help]
+
+Renew configured certificates locally with ACME DNS-01 via Aliyun DNS, then deploy
+to configured Aliyun and server targets.
+
+Options:
+  --config PATH  Read config from PATH instead of ./renew-aliyun-certs.conf
+  --dry-run      Validate config and print deployment commands without changes
+  --staging      Use Let's Encrypt staging ACME directory
+  --help         Show this help
+USAGE
+}
+
+die() {
+  printf 'ERROR: %s\n' "$*" >&2
+  exit 1
+}
+
+log() {
+  printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*" >&2
+}
+
+parse_args() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --config)
+        [[ $# -ge 2 ]] || die "--config requires a path"
+        CONFIG_FILE="$2"
+        shift 2
+        ;;
+      --dry-run)
+        DRY_RUN=1
+        shift
+        ;;
+      --staging)
+        STAGING=1
+        shift
+        ;;
+      --help|-h)
+        usage
+        exit 0
+        ;;
+      *)
+        die "Unknown argument: $1"
+        ;;
+    esac
+  done
+}
+
+load_config() {
+  [[ -f "$CONFIG_FILE" ]] || die "Config file not found: $CONFIG_FILE"
+  # shellcheck source=/dev/null
+  source "$CONFIG_FILE"
+}
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || die "Required command not found: $1"
+}
+
+check_dependencies() {
+  require_command curl
+  require_command jq
+  require_command openssl
+  require_command xxd
+  require_command aliyun
+  require_command install
+  require_command scp
+  require_command ssh
+}
+
+require_var() {
+  local name="$1"
+  [[ -n "${!name:-}" ]] || die "$name must be set in $CONFIG_FILE"
+}
+
+ensure_array() {
+  local name="$1"
+  if ! declare -p "$name" >/dev/null 2>&1; then
+    eval "$name=()"
+  fi
+}
+
+validate_config() {
+  require_var DOMAIN
+  require_var CERT_DIR
+  require_var ALIYUN_REGION_ID
+  require_var ALIYUN_PROFILE
+  require_var ACME_DIRECTORY_URL
+  DNS_PROPAGATION_SECONDS="${DNS_PROPAGATION_SECONDS:-90}"
+  ALIYUN_CAS_ENDPOINT="${ALIYUN_CAS_ENDPOINT:-cas.aliyuncs.com}"
+
+  ensure_array ALT_NAMES
+  ensure_array ALB_LISTENER_IDS
+  ensure_array OSS_CNAME_TARGETS
+  ensure_array SERVER_DEPLOYS
+  ensure_array PROTECTED_SERVER_HOSTS
+  ensure_array PROTECTED_ALB_LISTENER_IDS
+  ensure_array PROTECTED_OSS_CNAME_TARGETS
+
+  local target remote dest files reload_command bucket domain file
+  local -a deploy_files
+  for target in "${OSS_CNAME_TARGETS[@]}"; do
+    [[ -n "$target" ]] || continue
+    bucket="${target%%:*}"
+    domain="${target#*:}"
+    [[ "$target" == *:* && -n "$bucket" && -n "$domain" ]] || die "Invalid OSS_CNAME_TARGETS entry: $target"
+  done
+  for target in "${SERVER_DEPLOYS[@]}"; do
+    [[ -n "$target" ]] || continue
+    IFS=: read -r remote dest files reload_command <<<"$target"
+    [[ -n "$remote" && "$remote" == *@* && -n "$dest" && -n "$files" && -n "$reload_command" ]] || die "Invalid SERVER_DEPLOYS entry: $target"
+    IFS=, read -ra deploy_files <<<"$files"
+    for file in "${deploy_files[@]}"; do
+      case "$file" in
+        fullchain.pem|cert.pem|ca.pem|privkey.pem|domain.key) ;;
+        *) die "Unsupported server certificate file: $file" ;;
+      esac
+    done
+  done
+
+  if [[ "${ALLOW_PRODUCTION_TARGETS:-0}" != "1" ]]; then
+    local host protected_host protected_target
+    for target in "${SERVER_DEPLOYS[@]}"; do
+      remote="${target%%:*}"
+      host="${remote#*@}"
+      for protected_host in "${PROTECTED_SERVER_HOSTS[@]}"; do
+        if [[ -n "$protected_host" && "$host" == "$protected_host" ]]; then
+          die "Refusing production-like target without ALLOW_PRODUCTION_TARGETS=1: $target"
+        fi
+      done
+    done
+    for target in "${ALB_LISTENER_IDS[@]}"; do
+      for protected_target in "${PROTECTED_ALB_LISTENER_IDS[@]}"; do
+        if [[ -n "$protected_target" && "$target" == "$protected_target" ]]; then
+          die "Refusing protected ALB listener without ALLOW_PRODUCTION_TARGETS=1: $target"
+        fi
+      done
+    done
+    for target in "${OSS_CNAME_TARGETS[@]}"; do
+      for protected_target in "${PROTECTED_OSS_CNAME_TARGETS[@]}"; do
+        if [[ -n "$protected_target" && "$target" == "$protected_target" ]]; then
+          die "Refusing protected OSS target without ALLOW_PRODUCTION_TARGETS=1: $target"
+        fi
+      done
+    done
+  fi
+}
+
+print_dry_run_summary() {
+  printf 'DRY RUN: no ACME, Aliyun, SSH, or SCP changes will be made.\n'
+  printf 'Domain: %s\n' "$DOMAIN"
+  printf 'Certificate directory: %s\n' "$CERT_DIR"
+  printf 'ALB listeners: %s\n' "${ALB_LISTENER_IDS[*]:-(none)}"
+  printf 'OSS CNAME targets: %s\n' "${OSS_CNAME_TARGETS[*]:-(none)}"
+  printf 'Server deploys: %s\n' "${SERVER_DEPLOYS[*]:-(none)}"
+}
+
+select_certificate_directory() {
+  if [[ "$STAGING" == "1" ]]; then
+    CERT_DIR="${CERT_DIR%/}/staging"
+  fi
+}
+
+cleanup() {
+  local record_id
+  for record_id in "${CREATED_DNS_RECORD_IDS[@]}"; do
+    if [[ -n "$record_id" ]]; then
+      log "Deleting DNS TXT record $record_id"
+      aliyun --profile "$ALIYUN_PROFILE" alidns DeleteDomainRecord \
+        --RecordId "$record_id" >/dev/null || true
+    fi
+  done
+  if [[ -n "$ACME_TMP" && -d "$ACME_TMP" ]]; then
+    rm -rf "$ACME_TMP"
+  fi
+  if [[ "${#SENSITIVE_TMP_FILES[@]}" -gt 0 ]]; then
+    rm -f "${SENSITIVE_TMP_FILES[@]}"
+  fi
+}
+
+b64url() {
+  openssl base64 -A | tr '+/' '-_' | tr -d '='
+}
+
+hex_to_b64url() {
+  local hex="$1"
+  if (( ${#hex} % 2 == 1 )); then
+    hex="0${hex}"
+  fi
+  printf '%s' "$hex" | xxd -r -p | b64url
+}
+
+json_quote() {
+  jq -Rn --arg value "$1" '$value'
+}
+
+ensure_keys() {
+  mkdir -p "$CERT_DIR"
+  chmod 700 "$CERT_DIR"
+  if [[ ! -f "$CERT_DIR/account.key" ]]; then
+    log "Generating ACME account key"
+    openssl genrsa -out "$CERT_DIR/account.key" 4096 >/dev/null 2>&1
+    chmod 600 "$CERT_DIR/account.key"
+  fi
+  if [[ ! -f "$CERT_DIR/domain.key" ]]; then
+    log "Generating domain key"
+    openssl genrsa -out "$CERT_DIR/domain.key" 4096 >/dev/null 2>&1
+    chmod 600 "$CERT_DIR/domain.key"
+  fi
+}
+
+prepare_account_jwk() {
+  local modulus_hex
+  modulus_hex="$(openssl rsa -in "$CERT_DIR/account.key" -noout -modulus 2>/dev/null | cut -d= -f2 | tr '[:upper:]' '[:lower:]')"
+  local n
+  n="$(hex_to_b64url "$modulus_hex")"
+  ACCOUNT_JWK="$(jq -cn --arg n "$n" '{e:"AQAB",kty:"RSA",n:$n}')"
+  JWK_THUMBPRINT="$(printf '%s' "$ACCOUNT_JWK" | jq -cS -j . | openssl dgst -sha256 -binary | b64url)"
+}
+
+load_acme_directory() {
+  local directory_url="$ACME_DIRECTORY_URL"
+  if [[ "$STAGING" == "1" ]]; then
+    directory_url="https://acme-staging-v02.api.letsencrypt.org/directory"
+  fi
+  local directory_json
+  directory_json="$(curl -fsS "$directory_url")"
+  NEW_NONCE_URL="$(jq -r '.newNonce' <<<"$directory_json")"
+  NEW_ACCOUNT_URL="$(jq -r '.newAccount' <<<"$directory_json")"
+  NEW_ORDER_URL="$(jq -r '.newOrder' <<<"$directory_json")"
+  [[ "$NEW_NONCE_URL" != "null" && "$NEW_ACCOUNT_URL" != "null" && "$NEW_ORDER_URL" != "null" ]] || die "Invalid ACME directory: $directory_url"
+}
+
+fetch_nonce() {
+  local headers_file="$ACME_TMP/nonce.headers"
+  curl -fsSI "$NEW_NONCE_URL" -o /dev/null -D "$headers_file"
+  NONCE="$(awk 'BEGIN{IGNORECASE=1} /^Replay-Nonce:/ {gsub("\r", ""); print $2}' "$headers_file" | tail -n1)"
+  [[ -n "$NONCE" ]] || die "ACME server did not return a nonce"
+}
+
+update_nonce_from_headers() {
+  local headers_file="$1"
+  local next_nonce
+  next_nonce="$(awk 'BEGIN{IGNORECASE=1} /^Replay-Nonce:/ {gsub("\r", ""); print $2}' "$headers_file" | tail -n1)"
+  if [[ -n "$next_nonce" ]]; then
+    NONCE="$next_nonce"
+  fi
+}
+
+acme_request() {
+  local url="$1"
+  local payload_json="$2"
+  local output_file="$3"
+  local retried="${4:-0}"
+  local protected payload signature signing_input protected_json
+
+  if [[ -z "$NONCE" ]]; then
+    fetch_nonce
+  fi
+
+  if [[ -n "$ACCOUNT_KID" ]]; then
+    protected_json="$(jq -cn --arg nonce "$NONCE" --arg url "$url" --arg kid "$ACCOUNT_KID" '{alg:"RS256",nonce:$nonce,url:$url,kid:$kid}')"
+  else
+    protected_json="$(jq -cn --arg nonce "$NONCE" --arg url "$url" --argjson jwk "$ACCOUNT_JWK" '{alg:"RS256",nonce:$nonce,url:$url,jwk:$jwk}')"
+  fi
+
+  protected="$(printf '%s' "$protected_json" | b64url)"
+  payload="$(printf '%s' "$payload_json" | b64url)"
+  signing_input="${protected}.${payload}"
+  signature="$(printf '%s' "$signing_input" | openssl dgst -sha256 -sign "$CERT_DIR/account.key" | b64url)"
+
+  local request_file headers_file status_file
+  request_file="$ACME_TMP/request.json"
+  headers_file="$ACME_TMP/response.headers"
+  status_file="$ACME_TMP/status"
+  jq -cn --arg protected "$protected" --arg payload "$payload" --arg signature "$signature" \
+    '{protected:$protected,payload:$payload,signature:$signature}' > "$request_file"
+
+  local status
+  status="$(curl -sS -w '%{http_code}' -o "$output_file" -D "$headers_file" \
+    -H 'Content-Type: application/jose+json' --data-binary "@$request_file" "$url")"
+  printf '%s' "$status" > "$status_file"
+  update_nonce_from_headers "$headers_file"
+  if [[ ! "$status" =~ ^2 ]]; then
+    if [[ "$retried" == "0" ]] && jq -e '.type == "urn:ietf:params:acme:error:badNonce"' "$output_file" >/dev/null 2>&1; then
+      log "Retrying ACME request with fresh nonce"
+      NONCE=""
+      fetch_nonce
+      acme_request "$url" "$payload_json" "$output_file" 1
+      return 0
+    fi
+    printf 'ACME request failed with HTTP %s for %s\n' "$status" "$url" >&2
+    cat "$output_file" >&2
+    return 1
+  fi
+}
+
+create_account() {
+  local body_file="$ACME_TMP/account.json"
+  acme_request "$NEW_ACCOUNT_URL" '{"termsOfServiceAgreed":true}' "$body_file"
+  ACCOUNT_KID="$(awk 'BEGIN{IGNORECASE=1} /^Location:/ {gsub("\r", ""); print $2}' "$ACME_TMP/response.headers" | tail -n1)"
+  [[ -n "$ACCOUNT_KID" ]] || die "ACME account response did not include Location account URL"
+}
+
+dns_rr_for_identifier() {
+  local identifier="$1"
+  if [[ "$identifier" == \*.* ]]; then
+    identifier="${identifier#*.}"
+  fi
+  if [[ "$identifier" == "$DOMAIN" ]]; then
+    printf '_acme-challenge'
+  else
+    printf '_acme-challenge.%s' "${identifier%.${DOMAIN}}"
+  fi
+}
+
+add_dns_txt_record() {
+  local rr="$1"
+  local value="$2"
+  local response record_id
+  log "Adding DNS TXT record ${rr}.${DOMAIN}"
+  response="$(aliyun --profile "$ALIYUN_PROFILE" alidns AddDomainRecord \
+    --DomainName "$DOMAIN" --RR "$rr" --Type TXT --Value "$value" --TTL 600)"
+  record_id="$(jq -r '.RecordId // empty' <<<"$response")"
+  [[ -n "$record_id" ]] || die "Aliyun DNS AddDomainRecord did not return RecordId"
+  CREATED_DNS_RECORD_IDS+=("$record_id")
+}
+
+wait_for_authorization() {
+  local authz_url="$1"
+  local output_file="$ACME_TMP/authz-poll.json"
+  local status
+  local attempt
+  for attempt in {1..30}; do
+    acme_request "$authz_url" '' "$output_file"
+    status="$(jq -r '.status' "$output_file")"
+    case "$status" in
+      valid)
+        return 0
+        ;;
+      invalid)
+        cat "$output_file" >&2
+        die "ACME authorization became invalid"
+        ;;
+    esac
+    sleep 2
+  done
+  die "Timed out waiting for ACME authorization: $authz_url"
+}
+
+wait_for_order() {
+  local order_url="$1"
+  local output_file="$ACME_TMP/order-poll.json"
+  local status cert_url
+  local attempt
+  for attempt in {1..30}; do
+    acme_request "$order_url" '' "$output_file"
+    status="$(jq -r '.status' "$output_file")"
+    case "$status" in
+      valid)
+        cert_url="$(jq -r '.certificate // empty' "$output_file")"
+        [[ -n "$cert_url" ]] || die "Valid ACME order did not include certificate URL"
+        printf '%s' "$cert_url"
+        return 0
+        ;;
+      invalid)
+        cat "$output_file" >&2
+        die "ACME order became invalid"
+        ;;
+    esac
+    sleep 2
+  done
+  die "Timed out waiting for ACME order: $order_url"
+}
+
+create_csr() {
+  local san="DNS:${DOMAIN}"
+  local alt
+  for alt in "${ALT_NAMES[@]}"; do
+    san=",${san}"
+    san="${san},DNS:${alt}"
+  done
+  san="${san#,}"
+  openssl req -new -sha256 -key "$CERT_DIR/domain.key" -subj "/CN=${DOMAIN}" \
+    -addext "subjectAltName=${san}" -outform DER | b64url
+}
+
+split_certificate_chain() {
+  local fullchain_file="$1"
+  local cert_file="$2"
+  local ca_file="$3"
+  : > "$cert_file"
+  : > "$ca_file"
+  awk '
+    /-----BEGIN CERTIFICATE-----/ { cert++ }
+    cert == 1 { print > cert_file }
+    cert > 1 { print > ca_file }
+  ' cert_file="$cert_file" ca_file="$ca_file" "$fullchain_file"
+}
+
+validate_downloaded_certificate() {
+  local fullchain_file="$1"
+  local cert_public_key domain_public_key
+  openssl x509 -in "$fullchain_file" -noout >/dev/null 2>&1 || die "Downloaded certificate is invalid"
+  cert_public_key="$(openssl x509 -in "$fullchain_file" -pubkey -noout | openssl pkey -pubin -outform DER 2>/dev/null | openssl dgst -sha256)"
+  domain_public_key="$(openssl pkey -in "$CERT_DIR/domain.key" -pubout -outform DER 2>/dev/null | openssl dgst -sha256)"
+  [[ "$cert_public_key" == "$domain_public_key" ]] || die "Downloaded certificate does not match domain key"
+}
+
+issue_certificate() {
+  ACME_TMP="$(mktemp -d)"
+  trap cleanup EXIT
+  ensure_keys
+  prepare_account_jwk
+  load_acme_directory
+  fetch_nonce
+  create_account
+
+  local identifiers_json order_payload order_file order_url finalize_url authz_url authz_file challenge_url token key_authorization txt_value rr csr cert_url downloaded_fullchain downloaded_cert downloaded_ca
+  identifiers_json="$(jq -cn --arg domain "$DOMAIN" --argjson alt_names "$(printf '%s\n' "${ALT_NAMES[@]}" | jq -R . | jq -s .)" \
+    '[$domain] + $alt_names | map({type:"dns",value:.})')"
+  order_payload="$(jq -cn --argjson identifiers "$identifiers_json" '{identifiers:$identifiers}')"
+  order_file="$ACME_TMP/order.json"
+
+  log "Creating ACME order"
+  acme_request "$NEW_ORDER_URL" "$order_payload" "$order_file"
+  order_url="$(awk 'BEGIN{IGNORECASE=1} /^Location:/ {gsub("\r", ""); print $2}' "$ACME_TMP/response.headers" | tail -n1)"
+  finalize_url="$(jq -r '.finalize' "$order_file")"
+  [[ -n "$order_url" && "$finalize_url" != "null" ]] || die "ACME new order response missing order or finalize URL"
+
+  while IFS= read -r authz_url; do
+    authz_file="$ACME_TMP/authz.json"
+    acme_request "$authz_url" '' "$authz_file"
+    challenge_url="$(jq -r '.challenges[] | select(.type == "dns-01") | .url' "$authz_file")"
+    token="$(jq -r '.challenges[] | select(.type == "dns-01") | .token' "$authz_file")"
+    local identifier
+    identifier="$(jq -r '.identifier.value' "$authz_file")"
+    [[ -n "$challenge_url" && -n "$token" && -n "$identifier" ]] || die "ACME authorization missing dns-01 challenge"
+    key_authorization="${token}.${JWK_THUMBPRINT}"
+    txt_value="$(printf '%s' "$key_authorization" | openssl dgst -sha256 -binary | b64url)"
+    rr="$(dns_rr_for_identifier "$identifier")"
+    add_dns_txt_record "$rr" "$txt_value"
+  done < <(jq -r '.authorizations[]' "$order_file")
+
+  log "Waiting ${DNS_PROPAGATION_SECONDS}s for DNS propagation"
+  sleep "$DNS_PROPAGATION_SECONDS"
+
+  while IFS= read -r authz_url; do
+    authz_file="$ACME_TMP/authz.json"
+    acme_request "$authz_url" '' "$authz_file"
+    challenge_url="$(jq -r '.challenges[] | select(.type == "dns-01") | .url' "$authz_file")"
+    log "Notifying ACME challenge"
+    acme_request "$challenge_url" '{}' "$ACME_TMP/challenge.json"
+    wait_for_authorization "$authz_url"
+  done < <(jq -r '.authorizations[]' "$order_file")
+
+  csr="$(create_csr)"
+  log "Finalizing ACME order"
+  acme_request "$finalize_url" "$(jq -cn --arg csr "$csr" '{csr:$csr}')" "$ACME_TMP/finalize.json"
+  cert_url="$(wait_for_order "$order_url")"
+  log "Downloading certificate"
+  downloaded_fullchain="$ACME_TMP/fullchain.pem"
+  downloaded_cert="$ACME_TMP/cert.pem"
+  downloaded_ca="$ACME_TMP/ca.pem"
+  acme_request "$cert_url" '' "$downloaded_fullchain"
+  validate_downloaded_certificate "$downloaded_fullchain"
+  split_certificate_chain "$downloaded_fullchain" "$downloaded_cert" "$downloaded_ca"
+  [[ -s "$downloaded_cert" && -s "$downloaded_ca" ]] || die "Downloaded certificate chain is incomplete"
+  install -m 644 "$downloaded_fullchain" "$CERT_DIR/fullchain.pem"
+  install -m 644 "$downloaded_cert" "$CERT_DIR/cert.pem"
+  install -m 644 "$downloaded_ca" "$CERT_DIR/ca.pem"
+  install -m 600 "$CERT_DIR/domain.key" "$CERT_DIR/privkey.pem"
+}
+
+upload_aliyun_certificate() {
+  local cert_name response cert_id
+  cert_name="${DOMAIN}-$(date +%Y%m%d%H%M%S)"
+  log "Uploading certificate to Aliyun SSL as $cert_name"
+  response="$(aliyun --profile "$ALIYUN_PROFILE" --endpoint "$ALIYUN_CAS_ENDPOINT" cas UploadUserCertificate \
+    --Name "$cert_name" \
+    --Cert "$(<"$CERT_DIR/fullchain.pem")" \
+    --Key "$(<"$CERT_DIR/domain.key")")"
+  cert_id="$(jq -r '.CertId // .CertificateId // .CertIdentifier // .Id // empty' <<<"$response")"
+  [[ -n "$cert_id" ]] || die "Aliyun SSL upload did not return a certificate ID: $response"
+  printf '%s' "$cert_id"
+}
+
+deploy_alb_listeners() {
+  local cert_id="$1"
+  local listener_id
+  for listener_id in "${ALB_LISTENER_IDS[@]}"; do
+    [[ -n "$listener_id" ]] || continue
+    log "Updating ALB listener $listener_id"
+    aliyun --force --profile "$ALIYUN_PROFILE" --region "$ALIYUN_REGION_ID" alb UpdateListenerAttribute \
+      --ListenerId "$listener_id" \
+      --Certificates.1.CertificateId "$cert_id" \
+      --Certificates.1.CertificateType Server >/dev/null
+  done
+}
+
+xml_escape_file() {
+  local file="$1"
+  sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' "$file"
+}
+
+deploy_oss_cnames() {
+  local cert_id="$1"
+  local target bucket domain xml_file
+  for target in "${OSS_CNAME_TARGETS[@]}"; do
+    [[ -n "$target" ]] || continue
+    bucket="${target%%:*}"
+    domain="${target#*:}"
+    [[ -n "$bucket" && -n "$domain" && "$bucket" != "$domain" ]] || die "Invalid OSS_CNAME_TARGETS entry: $target"
+    xml_file="$(mktemp)"
+    SENSITIVE_TMP_FILES+=("$xml_file")
+    chmod 600 "$xml_file"
+    {
+      printf '<BucketCnameConfiguration>\n'
+      printf '  <Cname>\n'
+      printf '    <Domain>%s</Domain>\n' "$domain"
+      printf '    <CertificateConfiguration>\n'
+      printf '      <CertId>%s</CertId>\n' "$cert_id"
+      printf '      <Certificate>'
+      xml_escape_file "$CERT_DIR/fullchain.pem"
+      printf '</Certificate>\n'
+      printf '      <PrivateKey>'
+      xml_escape_file "$CERT_DIR/domain.key"
+      printf '</PrivateKey>\n'
+      printf '      <Force>true</Force>\n'
+      printf '    </CertificateConfiguration>\n'
+      printf '  </Cname>\n'
+      printf '</BucketCnameConfiguration>\n'
+    } > "$xml_file"
+    log "Updating OSS CNAME certificate $bucket:$domain"
+    aliyun --profile "$ALIYUN_PROFILE" oss bucket-cname --method put --item certificate "oss://$bucket" "$xml_file"
+    rm -f "$xml_file"
+  done
+}
+
+deploy_servers() {
+  local target remote dest files reload_command file
+  for target in "${SERVER_DEPLOYS[@]}"; do
+    [[ -n "$target" ]] || continue
+    IFS=: read -r remote dest files reload_command <<<"$target"
+    [[ -n "$remote" && -n "$dest" && -n "$files" && -n "$reload_command" ]] || die "Invalid SERVER_DEPLOYS entry: $target"
+    IFS=, read -ra deploy_files <<<"$files"
+    for file in "${deploy_files[@]}"; do
+      [[ -f "$CERT_DIR/$file" ]] || die "Certificate file not found: $CERT_DIR/$file"
+      log "Copying $file to $remote:$dest"
+      scp "${SSH_OPTS[@]}" "$CERT_DIR/$file" "$remote:$dest/"
+    done
+    log "Reloading service on $remote"
+    ssh "${SSH_OPTS[@]}" "$remote" "$reload_command"
+  done
+}
+
+main() {
+  parse_args "$@"
+  load_config
+  validate_config
+  check_dependencies
+  if [[ "$DRY_RUN" == "1" ]]; then
+    print_dry_run_summary
+    exit 0
+  fi
+  select_certificate_directory
+  issue_certificate
+  if [[ "$STAGING" == "1" ]]; then
+    log "Staging mode: skipping Aliyun and server deployment"
+    exit 0
+  fi
+  cert_id="$(upload_aliyun_certificate)"
+  log "Uploaded Aliyun certificate ID: $cert_id"
+  deploy_alb_listeners "$cert_id"
+  deploy_oss_cnames "$cert_id"
+  deploy_servers
+  log "Done"
+}
+
+if [[ "${RENEW_ALIYUN_CERTS_TESTING:-0}" != "1" ]]; then
+  main "$@"
+fi

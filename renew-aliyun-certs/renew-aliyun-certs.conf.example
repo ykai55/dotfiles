@@ -1,0 +1,38 @@
+# Copy to renew-aliyun-certs.conf and edit locally.
+# The real config is ignored because it may contain internal resource IDs.
+
+DOMAIN="example.com"
+ALT_NAMES=("*.example.com")
+CERT_DIR="./certs/example.com"
+
+ALIYUN_REGION_ID="cn-beijing"
+ALIYUN_PROFILE="default"
+ALIYUN_CAS_ENDPOINT="cas.aliyuncs.com"
+ACME_DIRECTORY_URL="https://acme-staging-v02.api.letsencrypt.org/directory"
+DNS_PROPAGATION_SECONDS="90"
+
+# Initial rollout: only test resources. Do not add production listeners here.
+ALB_LISTENER_IDS=(
+  "lsn-test-example"
+)
+
+# Format: bucket:custom-domain. Use only a test bucket/domain for rollout.
+OSS_CNAME_TARGETS=(
+  "test-bucket-example:test-u.example.com"
+)
+
+# Format: user@host:destination:files:reload_command
+SERVER_DEPLOYS=(
+  "admin@u.example.com:/home/admin/docker/nginx/data/ssl:fullchain.pem,privkey.pem:docker exec nginx nginx -s reload"
+)
+
+# These hosts require ALLOW_PRODUCTION_TARGETS=1 before deployment.
+PROTECTED_SERVER_HOSTS=(
+  "prod.example.com"
+)
+PROTECTED_ALB_LISTENER_IDS=(
+  "lsn-production-example"
+)
+PROTECTED_OSS_CNAME_TARGETS=(
+  "production-bucket-example:assets.example.com"
+)

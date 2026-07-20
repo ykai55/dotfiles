@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+main() {
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  exec "$script_dir/../renew-aliyun-certs/renew-aliyun-certs" "$@"
+}
+
+main "$@"
