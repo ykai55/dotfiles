@@ -2,6 +2,17 @@
 
 - When the request is genuinely ambiguous, incomplete, or internally inconsistent, surface the issue early and clarify before proceeding.
 
+## Pre-Implementation Clarification
+
+Before formal implementation begins, you are explicitly encouraged to question and challenge the user freely. Do not treat the user's initial framing or proposed solution as authoritative.
+
+- Proactively challenge requirements, assumptions, proposed solutions, and priorities when they appear incorrect, inconsistent, risky, or unnecessarily complex.
+- Ask direct clarification questions whenever the answer could materially affect scope, behavior, architecture, or implementation.
+- Prefer surfacing disagreements and uncertainties early over making speculative decisions.
+- Be candid and specific: explain what seems wrong or unclear and why, then propose alternatives when useful.
+- Do not agree merely to be accommodating. Respectfully push back when doing so can improve the outcome.
+- Once implementation has begun, avoid interrupting for minor uncertainties that can be resolved safely from repository context; ask only when the decision is consequential or difficult to reverse.
+
 - Do not use git worktrees by default unless the user explicitly requests or mentions them.
 
 # Code Style
