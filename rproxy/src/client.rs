@@ -1,4 +1,4 @@
-use crate::protocol::{ClientHello, ServerMessage, ServiceRequest};
+use crate::protocol::{ClientHello, DataMessage, ServerMessage, ServiceRequest};
 use futures_util::{SinkExt, StreamExt};
 use std::net::{SocketAddr, ToSocketAddrs};
 use thiserror::Error;
@@ -7,6 +7,7 @@ use tokio::net::TcpStream;
 use tokio::time::{sleep, Duration};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_util::sync::CancellationToken;
 use url::Url;
 
 #[derive(Debug)]
@@ -158,11 +159,15 @@ async fn run_control_connection(
         .await
         .map_err(anyhow::Error::from)?;
     log_client_info("registration request sent");
+    let data_connections = CancellationToken::new();
+    let _cancel_data_connections = data_connections.clone().drop_guard();
 
     while let Some(message) = socket.next().await {
         let message = message.map_err(anyhow::Error::from)?;
-        let Message::Text(text) = message else {
-            continue;
+        let text = match message {
+            Message::Text(text) => text,
+            Message::Close(_) => break,
+            _ => continue,
         };
         match serde_json::from_str::<ServerMessage>(&text).map_err(anyhow::Error::from)? {
             ServerMessage::Registered { public, .. } => match &config.service {
@@ -183,10 +188,17 @@ async fn run_control_connection(
                     ClientServiceConfig::Http { local, .. } => local.clone(),
                     ClientServiceConfig::Tcp { local, .. } => local.clone(),
                 };
+                let cancellation = data_connections.clone();
                 tokio::spawn(async move {
                     let logged_connection_id = connection_id.clone();
-                    if let Err(error) =
-                        handle_data_connection(control_url, token, connection_id, local).await
+                    if let Err(error) = handle_data_connection(
+                        control_url,
+                        token,
+                        connection_id,
+                        local,
+                        cancellation,
+                    )
+                    .await
                     {
                         log_client_warn(&format!(
                             "data connection {logged_connection_id} failed: {error}"
@@ -210,9 +222,13 @@ async fn handle_data_connection(
     token: String,
     connection_id: String,
     local: String,
+    cancellation: CancellationToken,
 ) -> anyhow::Result<()> {
     log_client_debug(&format!("connecting data websocket: {connection_id}"));
-    let (mut socket, _) = connect_async(&control_url).await?;
+    let (mut socket, _) = tokio::select! {
+        _ = cancellation.cancelled() => return Ok(()),
+        result = connect_async(&control_url) => result?,
+    };
     let logged_connection_id = connection_id.clone();
     socket
         .send(Message::Text(serde_json::to_string(&ClientHello::Data {
@@ -221,14 +237,18 @@ async fn handle_data_connection(
         })?))
         .await?;
     log_client_debug(&format!("connecting local target: {local}"));
-    let local = TcpStream::connect(local).await?;
+    let local = tokio::select! {
+        _ = cancellation.cancelled() => return Ok(()),
+        result = TcpStream::connect(local) => result?,
+    };
     log_client_debug(&format!("data connection ready: {logged_connection_id}"));
-    proxy_local_with_websocket(local, socket).await
+    proxy_local_with_websocket(local, socket, cancellation).await
 }
 
 async fn proxy_local_with_websocket<S>(
     local: TcpStream,
     socket: tokio_tungstenite::WebSocketStream<S>,
+    cancellation: CancellationToken,
 ) -> anyhow::Result<()>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
@@ -236,22 +256,33 @@ where
     let (mut ws_sender, mut ws_receiver) = socket.split();
     let (mut local_reader, mut local_writer) = local.into_split();
 
-    let ws_to_local = tokio::spawn(async move {
+    let ws_to_local = async move {
         while let Some(message) = ws_receiver.next().await {
             match message? {
                 Message::Binary(data) => local_writer.write_all(&data).await?,
+                Message::Text(text)
+                    if serde_json::from_str::<DataMessage>(&text)? == DataMessage::HalfClose =>
+                {
+                    break;
+                }
                 Message::Close(_) => break,
                 _ => {}
             }
         }
+        local_writer.shutdown().await?;
         anyhow::Ok(())
-    });
+    };
 
-    let local_to_ws = tokio::spawn(async move {
+    let local_to_ws = async move {
         let mut buffer = [0; 8192];
         loop {
             let n = local_reader.read(&mut buffer).await?;
             if n == 0 {
+                ws_sender
+                    .send(Message::Text(serde_json::to_string(
+                        &DataMessage::HalfClose,
+                    )?))
+                    .await?;
                 break;
             }
             ws_sender
@@ -259,11 +290,13 @@ where
                 .await?;
         }
         anyhow::Ok(())
-    });
+    };
 
     tokio::select! {
-        result = ws_to_local => result??,
-        result = local_to_ws => result??,
+        result = async { tokio::try_join!(ws_to_local, local_to_ws) } => {
+            result?;
+        }
+        _ = cancellation.cancelled() => {}
     }
 
     Ok(())

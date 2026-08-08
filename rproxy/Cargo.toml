@@ -19,7 +19,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring"] }
 thiserror = "2.0"
 tokio = { version = "1.40", features = ["full"] }
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
-tokio-util = { version = "0.7", features = ["compat"] }
+tokio-util = { version = "0.7", features = ["compat", "rt"] }
 toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

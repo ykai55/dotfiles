@@ -14,7 +14,8 @@ The binary has two modes:
 The client connects to the server over WebSocket. Users pass only a WebSocket
 service prefix with `--server`, such as `ws://127.0.0.1:7000` for local testing
 or `wss://a.com` for production. The internal control path is always appended
-by the client as `/_rproxy`.
+by the client as `/_rproxy`. The server URL must not include another path, query,
+fragment, or embedded credentials.
 
 Each client keeps one control WebSocket open. When the server receives an
 external HTTP or TCP connection for that tunnel, it sends an `open` message on
@@ -25,10 +26,38 @@ The first version intentionally avoids custom stream multiplexing. One inbound
 connection maps to one data WebSocket. This keeps connection lifecycle, back
 pressure, and error handling easier to reason about.
 
+### Connection Lifecycle
+
+The control WebSocket owns the tunnel and all of its data connections. If it
+closes, the server releases the public route and cancels pending and active data
+connections. The client also closes its data WebSockets and local TCP
+connections before reconnecting the control WebSocket.
+
+After an external connection arrives, the server waits up to three seconds for
+the matching authenticated data WebSocket. A timeout or tunnel shutdown removes
+the pending connection state rather than leaving it allocated.
+
+### Data Connection Protocol
+
+After the initial authenticated data `hello`, WebSocket binary frames carry TCP
+bytes unchanged. TCP EOF is directional, so either peer sends the following text
+frame after its TCP reader reaches EOF:
+
+```json
+{"type":"half_close"}
+```
+
+The receiver shuts down only its TCP write half and continues forwarding bytes
+in the other direction. This supports protocols in which a requester sends EOF
+and then waits for a response. A WebSocket close or control-connection shutdown
+closes the whole data connection. Because `half_close` changes the data-plane
+protocol, deploy matching server and client versions together.
+
 ## Features
 
 - HTTP tunnels routed by `Host` header, for example `foo.a.com`.
 - TCP tunnels exposed on a requested or automatically allocated remote port.
+- Directional TCP half-close propagation through data WebSocket control frames.
 - Static client token authentication for control and data WebSocket connections.
   Servers can use one legacy token or a config file with multiple client
   identities.
@@ -157,12 +186,28 @@ The server reads the config file only at startup. Restart the server after token
 changes. Client tokens are plaintext in the first config format, so protect the
 file with normal filesystem permissions and do not log or publish real tokens.
 
+## Input Boundaries
+
+- Requested HTTP subdomains are normalized to lowercase and must be one ASCII
+  DNS label of at most 63 characters. Letters, digits, and internal hyphens are
+  accepted; empty labels, dots, spaces, underscores, and leading or trailing
+  hyphens are rejected.
+- TCP port ranges cannot include port `0`. Requested ports must be inside the
+  configured range; port `65535` is supported.
+- HTTP `Host` matching is case-insensitive. Missing, empty, duplicate, or
+  malformed Host headers are rejected rather than used for routing.
+- Initial HTTP request headers are limited to 64 KiB and must complete within
+  five seconds. Oversized headers receive `431`, incomplete headers receive
+  `400`, and timed-out headers receive `408`.
+- `--server` accepts a `ws://` or `wss://` base URL with a host and optional
+  port. Paths, queries, fragments, and URL credentials are rejected.
+
 ## Performance Notes
 
 The current data path favors deployment simplicity over maximum throughput. Each
 external HTTP or TCP connection creates one data WebSocket back from the client
 to the server. The connection is then proxied as raw bytes over WebSocket binary
-frames.
+frames, with the text control frame described above for half-close signaling.
 
 This has a few important costs compared with a local reverse proxy such as
 nginx:

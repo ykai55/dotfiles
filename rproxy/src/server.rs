@@ -1,5 +1,5 @@
 use crate::alloc::{AllocError, PortAllocator, SubdomainAllocator};
-use crate::protocol::{ClientHello, ServerErrorCode, ServerMessage, ServiceRequest};
+use crate::protocol::{ClientHello, DataMessage, ServerErrorCode, ServerMessage, ServiceRequest};
 use crate::routing::subdomain_for_host;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
@@ -16,6 +16,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::time::{timeout, Duration};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 #[derive(Debug, Clone)]
@@ -31,6 +32,7 @@ pub struct TunnelHandle {
     pub client_identity_id: String,
     pub local: String,
     pub control_tx: mpsc::UnboundedSender<ServerMessage>,
+    cancellation: CancellationToken,
 }
 
 #[derive(Debug)]
@@ -235,6 +237,7 @@ impl ServerState {
                     client_identity_id,
                     local,
                     control_tx,
+                    cancellation: CancellationToken::new(),
                 };
                 inner.http_tunnels.insert(subdomain.clone(), handle);
                 inner
@@ -261,6 +264,7 @@ impl ServerState {
                     client_identity_id,
                     local,
                     control_tx,
+                    cancellation: CancellationToken::new(),
                 };
                 inner.tcp_tunnels.insert(port, handle);
                 inner
@@ -287,11 +291,15 @@ impl ServerState {
             match resource {
                 ClientResource::HttpSubdomain(subdomain) => {
                     inner.subdomains.release(&subdomain);
-                    inner.http_tunnels.remove(&subdomain);
+                    if let Some(tunnel) = inner.http_tunnels.remove(&subdomain) {
+                        tunnel.cancellation.cancel();
+                    }
                 }
                 ClientResource::TcpPort(port) => {
                     inner.ports.release(port);
-                    inner.tcp_tunnels.remove(&port);
+                    if let Some(tunnel) = inner.tcp_tunnels.remove(&port) {
+                        tunnel.cancellation.cancel();
+                    }
                 }
             }
         }
@@ -346,9 +354,15 @@ impl ServerState {
         wait: Duration,
     ) -> anyhow::Result<WebSocket> {
         let (connection_id, receiver) = self.open_data_connection(tunnel).await?;
-        let result = timeout(wait, receiver).await;
+        let result = tokio::select! {
+            result = timeout(wait, receiver) => match result {
+                Ok(result) => result.map_err(anyhow::Error::from),
+                Err(error) => Err(error.into()),
+            },
+            _ = tunnel.cancellation.cancelled() => Err(anyhow::anyhow!("tunnel closed")),
+        };
         self.inner.lock().await.pending_data.remove(&connection_id);
-        Ok(result??)
+        result
     }
 
     async fn attach_data_connection(
@@ -897,8 +911,9 @@ async fn handle_registered_control(
                 }
             }
             incoming = receiver.next() => {
-                if incoming.is_none() {
-                    break;
+                match incoming {
+                    Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                    _ => {}
                 }
             }
         }
@@ -971,7 +986,7 @@ async fn handle_tcp_stream(state: ServerState, port: u16, stream: TcpStream) -> 
     let socket = state
         .await_data_connection(&tunnel, Duration::from_secs(3))
         .await?;
-    proxy_tcp_with_websocket(stream, socket, None).await
+    proxy_tcp_with_websocket(stream, socket, None, tunnel.cancellation).await
 }
 
 async fn handle_http_stream(state: ServerState, mut stream: TcpStream) -> anyhow::Result<()> {
@@ -1023,7 +1038,7 @@ async fn handle_http_stream(state: ServerState, mut stream: TcpStream) -> anyhow
     let socket = state
         .await_data_connection(&tunnel, Duration::from_secs(3))
         .await?;
-    proxy_tcp_with_websocket(stream, socket, Some(initial)).await
+    proxy_tcp_with_websocket(stream, socket, Some(initial), tunnel.cancellation).await
 }
 
 #[derive(Debug, Error)]
@@ -1075,6 +1090,7 @@ async fn proxy_tcp_with_websocket(
     stream: TcpStream,
     socket: WebSocket,
     initial_to_websocket: Option<Vec<u8>>,
+    cancellation: CancellationToken,
 ) -> anyhow::Result<()> {
     let (mut ws_sender, mut ws_receiver) = socket.split();
     let (mut tcp_reader, mut tcp_writer) = stream.into_split();
@@ -1083,11 +1099,16 @@ async fn proxy_tcp_with_websocket(
         ws_sender.send(Message::Binary(initial)).await?;
     }
 
-    let tcp_to_ws = tokio::spawn(async move {
+    let tcp_to_ws = async move {
         let mut buffer = [0; 8192];
         loop {
             let n = tcp_reader.read(&mut buffer).await?;
             if n == 0 {
+                ws_sender
+                    .send(Message::Text(serde_json::to_string(
+                        &DataMessage::HalfClose,
+                    )?))
+                    .await?;
                 break;
             }
             ws_sender
@@ -1095,22 +1116,30 @@ async fn proxy_tcp_with_websocket(
                 .await?;
         }
         anyhow::Ok(())
-    });
+    };
 
-    let ws_to_tcp = tokio::spawn(async move {
+    let ws_to_tcp = async move {
         while let Some(message) = ws_receiver.next().await {
             match message? {
                 Message::Binary(data) => tcp_writer.write_all(&data).await?,
+                Message::Text(text)
+                    if serde_json::from_str::<DataMessage>(&text)? == DataMessage::HalfClose =>
+                {
+                    break;
+                }
                 Message::Close(_) => break,
                 _ => {}
             }
         }
+        tcp_writer.shutdown().await?;
         anyhow::Ok(())
-    });
+    };
 
     tokio::select! {
-        result = tcp_to_ws => result??,
-        result = ws_to_tcp => result??,
+        result = async { tokio::try_join!(tcp_to_ws, ws_to_tcp) } => {
+            result?;
+        }
+        _ = cancellation.cancelled() => {}
     }
 
     Ok(())

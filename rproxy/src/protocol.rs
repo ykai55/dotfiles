@@ -64,6 +64,12 @@ pub enum ServerErrorCode {
     PortRangeExhausted,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum DataMessage {
+    HalfClose,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct ClientHelloWire {
     #[serde(rename = "type")]
@@ -174,5 +180,13 @@ mod tests {
         assert_eq!(json["type"], "registered");
         assert_eq!(json["public"], "a.com:25432");
         assert_eq!(json["remote_port"], 25432);
+    }
+
+    #[test]
+    fn serializes_data_half_close_message() {
+        assert_eq!(
+            serde_json::to_string(&DataMessage::HalfClose).unwrap(),
+            r#"{"type":"half_close"}"#
+        );
     }
 }
