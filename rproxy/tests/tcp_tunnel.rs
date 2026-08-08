@@ -1,8 +1,10 @@
 use futures_util::{SinkExt, StreamExt};
 use rproxy::client::{ClientConfig, ClientServiceConfig};
-use rproxy::protocol::{ClientHello, ServerMessage, ServiceRequest};
+use rproxy::protocol::{ClientHello, DataFrame, ServerMessage, ServiceRequest};
 use rproxy::server::ServerConfig;
 use std::net::{SocketAddr, TcpListener as StdTcpListener};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::{sleep, timeout, Duration};
@@ -39,6 +41,55 @@ async fn start_echo_tcp() -> SocketAddr {
         }
     });
     addr
+}
+
+async fn start_counting_echo_tcp() -> (SocketAddr, Arc<AtomicUsize>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let accepted_for_task = accepted.clone();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
+            };
+            accepted_for_task.fetch_add(1, Ordering::SeqCst);
+            tokio::spawn(async move {
+                let mut buffer = [0; 1024];
+                loop {
+                    let Ok(n) = stream.read(&mut buffer).await else {
+                        break;
+                    };
+                    if n == 0 || stream.write_all(&buffer[..n]).await.is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+    });
+    (addr, accepted)
+}
+
+async fn start_counting_tcp_proxy(target: SocketAddr) -> (SocketAddr, Arc<AtomicUsize>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let accepted_for_task = accepted.clone();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut incoming, _)) = listener.accept().await else {
+                break;
+            };
+            accepted_for_task.fetch_add(1, Ordering::SeqCst);
+            tokio::spawn(async move {
+                let Ok(mut outgoing) = TcpStream::connect(target).await else {
+                    return;
+                };
+                let _ = tokio::io::copy_bidirectional(&mut incoming, &mut outgoing).await;
+            });
+        }
+    });
+    (addr, accepted)
 }
 
 async fn start_eof_response_tcp() -> SocketAddr {
@@ -98,6 +149,126 @@ async fn proxies_tcp_bytes_through_requested_port() {
 
     assert_eq!(&response, b"ping");
 
+    client.abort();
+    server.abort();
+}
+
+#[tokio::test]
+async fn limits_active_tcp_streams_per_tunnel() {
+    let (local_tcp, accepted) = start_counting_echo_tcp().await;
+    let control_listen = free_addr();
+    let http_listen = free_addr();
+    let remote_port = free_addr().port();
+    let server = tokio::spawn(rproxy::server::run(ServerConfig {
+        domain: "test".into(),
+        token: Some("secret".into()),
+        config: None,
+        control_listen,
+        http_listen,
+        tcp_port_range: format!("{remote_port}-{remote_port}"),
+        http_public_scheme: "http".into(),
+        http_public_port: None,
+    }));
+    sleep(Duration::from_millis(100)).await;
+    let client = tokio::spawn(rproxy::client::run(ClientConfig {
+        server: format!("ws://{control_listen}"),
+        token: "secret".into(),
+        service: ClientServiceConfig::Tcp {
+            local: local_tcp.to_string(),
+            remote_port: Some(remote_port),
+        },
+    }));
+    sleep(Duration::from_millis(200)).await;
+
+    let mut active = Vec::new();
+    for _ in 0..64 {
+        let mut stream = TcpStream::connect(("127.0.0.1", remote_port))
+            .await
+            .unwrap();
+        stream.write_all(b"x").await.unwrap();
+        let mut response = [0; 1];
+        timeout(Duration::from_secs(2), stream.read_exact(&mut response))
+            .await
+            .unwrap()
+            .unwrap();
+        active.push(stream);
+    }
+    assert_eq!(accepted.load(Ordering::SeqCst), 64);
+
+    let mut excess = TcpStream::connect(("127.0.0.1", remote_port))
+        .await
+        .unwrap();
+    excess.write_all(b"x").await.unwrap();
+    let mut response = [0; 1];
+    assert!(
+        timeout(Duration::from_millis(250), excess.read_exact(&mut response))
+            .await
+            .is_err(),
+        "the 65th active stream reached the local service"
+    );
+    assert_eq!(accepted.load(Ordering::SeqCst), 64);
+
+    drop(active.pop());
+    timeout(Duration::from_secs(2), excess.read_exact(&mut response))
+        .await
+        .expect("the queued stream should proceed after one active stream closes")
+        .unwrap();
+    assert_eq!(&response, b"x");
+
+    drop(active);
+    client.abort();
+    server.abort();
+}
+
+#[tokio::test]
+async fn multiplexes_concurrent_streams_over_one_data_websocket() {
+    let local_tcp = start_echo_tcp().await;
+    let control_backend = free_addr();
+    let http_listen = free_addr();
+    let remote_port = free_addr().port();
+    let server = tokio::spawn(rproxy::server::run(ServerConfig {
+        domain: "test".into(),
+        token: Some("secret".into()),
+        config: None,
+        control_listen: control_backend,
+        http_listen,
+        tcp_port_range: format!("{remote_port}-{remote_port}"),
+        http_public_scheme: "http".into(),
+        http_public_port: None,
+    }));
+    sleep(Duration::from_millis(100)).await;
+    let (control_proxy, accepted) = start_counting_tcp_proxy(control_backend).await;
+    let client = tokio::spawn(rproxy::client::run(ClientConfig {
+        server: format!("ws://{control_proxy}"),
+        token: "secret".into(),
+        service: ClientServiceConfig::Tcp {
+            local: local_tcp.to_string(),
+            remote_port: Some(remote_port),
+        },
+    }));
+    sleep(Duration::from_millis(200)).await;
+
+    let mut streams = Vec::new();
+    for byte in 0_u8..8 {
+        let mut stream = TcpStream::connect(("127.0.0.1", remote_port))
+            .await
+            .unwrap();
+        stream.write_all(&[byte]).await.unwrap();
+        let mut response = [0];
+        timeout(Duration::from_secs(2), stream.read_exact(&mut response))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(response, [byte]);
+        streams.push(stream);
+    }
+    assert_eq!(
+        accepted.load(Ordering::SeqCst),
+        2,
+        "one control and one data websocket should serve all streams"
+    );
+
+    drop(streams);
     client.abort();
     server.abort();
 }
@@ -188,20 +359,12 @@ async fn control_disconnect_closes_active_tcp_data_connection() {
     let Some(Ok(Message::Text(text))) = control_socket.next().await else {
         panic!("expected registered message");
     };
-    assert!(matches!(
-        serde_json::from_str::<ServerMessage>(&text).unwrap(),
-        ServerMessage::Registered { .. }
-    ));
+    let ServerMessage::Registered { session_id, .. } =
+        serde_json::from_str::<ServerMessage>(&text).unwrap()
+    else {
+        panic!("expected registered message");
+    };
 
-    let mut external = TcpStream::connect(("127.0.0.1", remote_port))
-        .await
-        .unwrap();
-    let Some(Ok(Message::Text(text))) = control_socket.next().await else {
-        panic!("expected open message");
-    };
-    let ServerMessage::Open { connection_id } = serde_json::from_str(&text).unwrap() else {
-        panic!("expected open message");
-    };
     let (mut data_socket, _) = connect_async(format!("ws://{control_listen}/_rproxy"))
         .await
         .unwrap();
@@ -209,9 +372,25 @@ async fn control_disconnect_closes_active_tcp_data_connection() {
         .send(Message::Text(
             serde_json::to_string(&ClientHello::Data {
                 token: "secret".into(),
-                connection_id,
+                session_id,
             })
             .unwrap(),
+        ))
+        .await
+        .unwrap();
+
+    let mut external = TcpStream::connect(("127.0.0.1", remote_port))
+        .await
+        .unwrap();
+    let Some(Ok(Message::Binary(frame))) = data_socket.next().await else {
+        panic!("expected Open frame");
+    };
+    let DataFrame::Open { stream_id } = DataFrame::decode(&frame).unwrap() else {
+        panic!("expected Open frame");
+    };
+    data_socket
+        .send(Message::Binary(
+            DataFrame::Ready { stream_id }.encode().unwrap(),
         ))
         .await
         .unwrap();
@@ -219,7 +398,13 @@ async fn control_disconnect_closes_active_tcp_data_connection() {
     let Some(Ok(Message::Binary(data))) = data_socket.next().await else {
         panic!("expected relayed TCP bytes");
     };
-    assert_eq!(data, b"ping");
+    assert_eq!(
+        DataFrame::decode(&data).unwrap(),
+        DataFrame::Data {
+            stream_id,
+            payload: b"ping".to_vec()
+        }
+    );
 
     control_socket.close(None).await.unwrap();
     let mut byte = [0; 1];

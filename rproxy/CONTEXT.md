@@ -18,18 +18,23 @@ _Avoid_: global token, password
 
 **Control Connection**:
 The WebSocket connection a client identity uses to authenticate and register one
-tunnel, then receive requests to open data connections.
+tunnel. Its lifetime owns the tunnel and its data connection.
 _Avoid_: client, session
 
 **Data Connection**:
-The authenticated WebSocket created for one external TCP connection. Binary
-frames carry TCP bytes, and its lifetime is owned by the control connection.
+The single long-lived authenticated WebSocket attached to one tunnel session.
+Binary frames multiplex all logical streams for the tunnel by stream ID.
 _Avoid_: control connection, tunnel
 
+**Logical Stream**:
+One external HTTP or TCP connection multiplexed over a tunnel's data connection.
+Each logical stream has independent flow control and directional shutdown state.
+_Avoid_: data connection, WebSocket
+
 **Half-Close**:
-Directional TCP EOF propagated over a data connection with a `half_close`
-control frame. It closes the receiver's TCP write half without stopping traffic
-in the other direction.
+Directional TCP EOF propagated over a data connection with a stream `Fin` frame.
+It closes the receiver's TCP write half without stopping traffic in the other
+direction.
 _Avoid_: disconnect, close
 
 **Tunnel**:

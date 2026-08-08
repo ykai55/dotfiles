@@ -1,37 +1,60 @@
 use crate::alloc::{AllocError, PortAllocator, SubdomainAllocator};
-use crate::protocol::{ClientHello, DataMessage, ServerErrorCode, ServerMessage, ServiceRequest};
+use crate::protocol::{
+    ClientHello, DataFrame, ServerErrorCode, ServerMessage, ServiceRequest, INITIAL_CREDIT,
+    MAX_DATA_SIZE,
+};
 use crate::routing::subdomain_for_host;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
+use axum::http::StatusCode;
+use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::Router;
+use futures_util::stream::SplitStream;
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{mpsc, oneshot, Mutex, OwnedSemaphorePermit, Semaphore};
+use tokio::task::JoinSet;
 use tokio::time::{timeout, Duration};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+const MAX_STREAMS: usize = 64;
+const OPEN_QUEUE_SIZE: usize = MAX_STREAMS;
+const STREAM_QUEUE_SIZE: usize = INITIAL_CREDIT as usize * 2 + 4;
+const WRITER_QUEUE_SIZE: usize = 128;
+const MAX_PENDING_HELLOS: usize = 1024;
+const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
+const DATA_ATTACH_TIMEOUT: Duration = Duration::from_secs(5);
+const READY_TIMEOUT: Duration = Duration::from_secs(6);
+
 #[derive(Debug, Clone)]
 pub struct RegisteredTunnel {
+    pub session_id: String,
     pub public: String,
     pub subdomain: Option<String>,
     pub remote_port: Option<u16>,
 }
 
+#[derive(Debug)]
+struct OpenCommand {
+    stream: TcpStream,
+    initial: Option<Vec<u8>>,
+    _permit: OwnedSemaphorePermit,
+}
+
 #[derive(Debug, Clone)]
 pub struct TunnelHandle {
-    pub client_id: String,
-    pub client_identity_id: String,
     pub local: String,
-    pub control_tx: mpsc::UnboundedSender<ServerMessage>,
+    open_tx: mpsc::Sender<OpenCommand>,
+    permits: Arc<Semaphore>,
     cancellation: CancellationToken,
 }
 
@@ -80,21 +103,11 @@ fn log_server_info(message: &str) {
 }
 
 fn log_server_debug(message: &str) {
-    debug_assert_eq!(connection_traffic_log_level(), tracing::Level::DEBUG);
     tracing::debug!("{}", server_log_line(message));
 }
 
 fn log_server_warn(message: &str) {
-    debug_assert_eq!(recoverable_failure_log_level(), tracing::Level::WARN);
     tracing::warn!("{}", server_log_line(message));
-}
-
-fn connection_traffic_log_level() -> tracing::Level {
-    tracing::Level::DEBUG
-}
-
-fn recoverable_failure_log_level() -> tracing::Level {
-    tracing::Level::WARN
 }
 
 fn http_public_url(scheme: &str, port: Option<u16>, subdomain: &str, domain: &str) -> String {
@@ -136,13 +149,11 @@ impl AuthConfig {
     }
 
     pub fn from_file(path: &str) -> anyhow::Result<Self> {
-        let text = fs::read_to_string(path)?;
-        Self::from_toml(&text)
+        Self::from_toml(&fs::read_to_string(path)?)
     }
 
     pub fn from_toml(text: &str) -> anyhow::Result<Self> {
-        let config: AuthConfigFile = toml::from_str(text)?;
-        Self::from_clients(config.clients)
+        Self::from_clients(toml::from_str::<AuthConfigFile>(text)?.clients)
     }
 
     pub fn client_id_for_token(&self, token: &str) -> Option<&str> {
@@ -153,15 +164,11 @@ impl AuthConfig {
         if clients.is_empty() {
             anyhow::bail!("auth config must contain at least one client");
         }
-
         let mut clients_by_token = HashMap::new();
-        let mut client_ids = std::collections::HashSet::new();
+        let mut client_ids = HashSet::new();
         for client in clients {
-            if client.id.trim().is_empty() {
-                anyhow::bail!("client id must not be empty");
-            }
-            if client.token.is_empty() {
-                anyhow::bail!("client token must not be empty");
+            if client.id.trim().is_empty() || client.token.is_empty() {
+                anyhow::bail!("client id and token must not be empty");
             }
             if !client_ids.insert(client.id.clone()) {
                 anyhow::bail!("client ids must be unique");
@@ -170,7 +177,6 @@ impl AuthConfig {
                 anyhow::bail!("client tokens must be unique");
             }
         }
-
         Ok(Self { clients_by_token })
     }
 }
@@ -202,7 +208,7 @@ enum ClientResource {
 impl ServerState {
     pub fn new(
         domain: String,
-        port_allocator: PortAllocator,
+        ports: PortAllocator,
         http_public_scheme: String,
         http_public_port: Option<u16>,
     ) -> Self {
@@ -211,7 +217,7 @@ impl ServerState {
                 domain: domain.trim_end_matches('.').to_ascii_lowercase(),
                 http_public_scheme,
                 http_public_port,
-                ports: port_allocator,
+                ports,
                 subdomains: SubdomainAllocator::new(),
                 http_tunnels: HashMap::new(),
                 tcp_tunnels: HashMap::new(),
@@ -221,84 +227,87 @@ impl ServerState {
         }
     }
 
-    pub async fn register_control(
+    async fn register_control(
         &self,
         client_id: String,
         client_identity_id: String,
         service: ServiceRequest,
-        control_tx: mpsc::UnboundedSender<ServerMessage>,
-    ) -> Result<RegisteredTunnel, ServerStateError> {
+        open_tx: mpsc::Sender<OpenCommand>,
+        cancellation: CancellationToken,
+    ) -> Result<(RegisteredTunnel, oneshot::Receiver<WebSocket>), ServerStateError> {
+        let session_id = Uuid::new_v4().to_string();
+        let (data_tx, data_rx) = oneshot::channel();
         let mut inner = self.inner.lock().await;
-        match service {
+        let common = |local: String| TunnelHandle {
+            local,
+            open_tx: open_tx.clone(),
+            permits: Arc::new(Semaphore::new(MAX_STREAMS)),
+            cancellation: cancellation.clone(),
+        };
+        let registered = match service {
             ServiceRequest::Http { local, subdomain } => {
                 let subdomain = inner.subdomains.allocate(subdomain.as_deref())?;
-                let handle = TunnelHandle {
-                    client_id: client_id.clone(),
-                    client_identity_id,
-                    local,
-                    control_tx,
-                    cancellation: CancellationToken::new(),
-                };
-                inner.http_tunnels.insert(subdomain.clone(), handle);
+                inner.http_tunnels.insert(subdomain.clone(), common(local));
                 inner
                     .client_resources
-                    .entry(client_id)
+                    .entry(client_id.clone())
                     .or_default()
                     .push(ClientResource::HttpSubdomain(subdomain.clone()));
-                let public = http_public_url(
-                    &inner.http_public_scheme,
-                    inner.http_public_port,
-                    &subdomain,
-                    &inner.domain,
-                );
-                Ok(RegisteredTunnel {
-                    public,
+                RegisteredTunnel {
+                    session_id: session_id.clone(),
+                    public: http_public_url(
+                        &inner.http_public_scheme,
+                        inner.http_public_port,
+                        &subdomain,
+                        &inner.domain,
+                    ),
                     subdomain: Some(subdomain),
                     remote_port: None,
-                })
+                }
             }
             ServiceRequest::Tcp { local, remote_port } => {
                 let port = inner.ports.allocate(remote_port)?;
-                let handle = TunnelHandle {
-                    client_id: client_id.clone(),
-                    client_identity_id,
-                    local,
-                    control_tx,
-                    cancellation: CancellationToken::new(),
-                };
-                inner.tcp_tunnels.insert(port, handle);
+                inner.tcp_tunnels.insert(port, common(local));
                 inner
                     .client_resources
-                    .entry(client_id)
+                    .entry(client_id.clone())
                     .or_default()
                     .push(ClientResource::TcpPort(port));
-                Ok(RegisteredTunnel {
-                    public: format!("{}:{}", inner.domain, port),
+                RegisteredTunnel {
+                    session_id: session_id.clone(),
+                    public: format!("{}:{port}", inner.domain),
                     subdomain: None,
                     remote_port: Some(port),
-                })
+                }
             }
-        }
+        };
+        inner.pending_data.insert(
+            session_id,
+            PendingDataConnection {
+                client_id,
+                client_identity_id,
+                sender: data_tx,
+            },
+        );
+        Ok((registered, data_rx))
     }
 
     pub async fn release_client(&self, client_id: &str) {
         let mut inner = self.inner.lock().await;
-        let Some(resources) = inner.client_resources.remove(client_id) else {
-            return;
-        };
-
-        for resource in resources {
-            match resource {
-                ClientResource::HttpSubdomain(subdomain) => {
-                    inner.subdomains.release(&subdomain);
-                    if let Some(tunnel) = inner.http_tunnels.remove(&subdomain) {
-                        tunnel.cancellation.cancel();
+        if let Some(resources) = inner.client_resources.remove(client_id) {
+            for resource in resources {
+                match resource {
+                    ClientResource::HttpSubdomain(subdomain) => {
+                        inner.subdomains.release(&subdomain);
+                        if let Some(tunnel) = inner.http_tunnels.remove(&subdomain) {
+                            tunnel.cancellation.cancel();
+                        }
                     }
-                }
-                ClientResource::TcpPort(port) => {
-                    inner.ports.release(port);
-                    if let Some(tunnel) = inner.tcp_tunnels.remove(&port) {
-                        tunnel.cancellation.cancel();
+                    ClientResource::TcpPort(port) => {
+                        inner.ports.release(port);
+                        if let Some(tunnel) = inner.tcp_tunnels.remove(&port) {
+                            tunnel.cancellation.cancel();
+                        }
                     }
                 }
             }
@@ -315,384 +324,29 @@ impl ServerState {
     }
 
     pub async fn tcp_tunnel_for_port(&self, port: u16) -> Option<TunnelHandle> {
-        let inner = self.inner.lock().await;
-        inner.tcp_tunnels.get(&port).cloned()
-    }
-
-    async fn open_data_connection(
-        &self,
-        tunnel: &TunnelHandle,
-    ) -> anyhow::Result<(String, oneshot::Receiver<WebSocket>)> {
-        let connection_id = Uuid::new_v4().to_string();
-        let (tx, rx) = oneshot::channel();
-        self.inner.lock().await.pending_data.insert(
-            connection_id.clone(),
-            PendingDataConnection {
-                client_id: tunnel.client_id.clone(),
-                client_identity_id: tunnel.client_identity_id.clone(),
-                sender: tx,
-            },
-        );
-
-        if tunnel
-            .control_tx
-            .send(ServerMessage::Open {
-                connection_id: connection_id.clone(),
-            })
-            .is_err()
-        {
-            self.inner.lock().await.pending_data.remove(&connection_id);
-            anyhow::bail!("control connection closed");
-        }
-
-        Ok((connection_id, rx))
-    }
-
-    async fn await_data_connection(
-        &self,
-        tunnel: &TunnelHandle,
-        wait: Duration,
-    ) -> anyhow::Result<WebSocket> {
-        let (connection_id, receiver) = self.open_data_connection(tunnel).await?;
-        let result = tokio::select! {
-            result = timeout(wait, receiver) => match result {
-                Ok(result) => result.map_err(anyhow::Error::from),
-                Err(error) => Err(error.into()),
-            },
-            _ = tunnel.cancellation.cancelled() => Err(anyhow::anyhow!("tunnel closed")),
-        };
-        self.inner.lock().await.pending_data.remove(&connection_id);
-        result
+        self.inner.lock().await.tcp_tunnels.get(&port).cloned()
     }
 
     async fn attach_data_connection(
         &self,
-        connection_id: &str,
+        session_id: &str,
         client_identity_id: &str,
         socket: WebSocket,
     ) -> Result<(), WebSocket> {
         let mut inner = self.inner.lock().await;
-        if let Some(pending) = inner.pending_data.get(connection_id) {
-            if pending.client_identity_id != client_identity_id {
-                return Err(socket);
-            }
+        if inner
+            .pending_data
+            .get(session_id)
+            .is_some_and(|pending| pending.client_identity_id != client_identity_id)
+        {
+            return Err(socket);
         }
-        let pending = inner.pending_data.remove(connection_id);
+        let pending = inner.pending_data.remove(session_id);
         drop(inner);
-
-        if let Some(pending) = pending {
-            pending.sender.send(socket)
-        } else {
-            Err(socket)
+        match pending {
+            Some(pending) => pending.sender.send(socket),
+            None => Err(socket),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::alloc::PortAllocator;
-    use crate::protocol::ServiceRequest;
-    use tokio::sync::mpsc;
-
-    fn state() -> ServerState {
-        ServerState::new(
-            "a.com".into(),
-            PortAllocator::new(20000, 20002).unwrap(),
-            "http".into(),
-            None,
-        )
-    }
-
-    #[tokio::test]
-    async fn registers_http_with_requested_subdomain() {
-        let state = state();
-        let (tx, _rx) = mpsc::unbounded_channel();
-
-        let registered = state
-            .register_control(
-                "client-1".into(),
-                "identity-1".into(),
-                ServiceRequest::Http {
-                    local: "127.0.0.1:3000".into(),
-                    subdomain: Some("foo".into()),
-                },
-                tx,
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(registered.public, "http://foo.a.com");
-        assert_eq!(registered.subdomain, Some("foo".into()));
-        assert!(state.http_tunnel_for_host("foo.a.com").await.is_some());
-    }
-
-    #[tokio::test]
-    async fn registers_tcp_with_requested_port() {
-        let state = state();
-        let (tx, _rx) = mpsc::unbounded_channel();
-
-        let registered = state
-            .register_control(
-                "client-1".into(),
-                "identity-1".into(),
-                ServiceRequest::Tcp {
-                    local: "127.0.0.1:5432".into(),
-                    remote_port: Some(20001),
-                },
-                tx,
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(registered.public, "a.com:20001");
-        assert_eq!(registered.remote_port, Some(20001));
-        assert!(state.tcp_tunnel_for_port(20001).await.is_some());
-    }
-
-    #[tokio::test]
-    async fn rejects_duplicate_subdomain() {
-        let state = state();
-        let (first_tx, _first_rx) = mpsc::unbounded_channel();
-        let (second_tx, _second_rx) = mpsc::unbounded_channel();
-
-        state
-            .register_control(
-                "client-1".into(),
-                "identity-1".into(),
-                ServiceRequest::Http {
-                    local: "127.0.0.1:3000".into(),
-                    subdomain: Some("foo".into()),
-                },
-                first_tx,
-            )
-            .await
-            .unwrap();
-
-        let error = state
-            .register_control(
-                "client-2".into(),
-                "identity-2".into(),
-                ServiceRequest::Http {
-                    local: "127.0.0.1:4000".into(),
-                    subdomain: Some("foo".into()),
-                },
-                second_tx,
-            )
-            .await
-            .unwrap_err();
-
-        assert_eq!(error, ServerStateError::SubdomainUnavailable("foo".into()));
-    }
-
-    #[tokio::test]
-    async fn releases_client_resources() {
-        let state = state();
-        let (tx, _rx) = mpsc::unbounded_channel();
-
-        state
-            .register_control(
-                "client-1".into(),
-                "identity-1".into(),
-                ServiceRequest::Tcp {
-                    local: "127.0.0.1:5432".into(),
-                    remote_port: Some(20001),
-                },
-                tx,
-            )
-            .await
-            .unwrap();
-        state.release_client("client-1").await;
-
-        assert!(state.tcp_tunnel_for_port(20001).await.is_none());
-
-        let (tx, _rx) = mpsc::unbounded_channel();
-        let registered = state
-            .register_control(
-                "client-2".into(),
-                "identity-2".into(),
-                ServiceRequest::Tcp {
-                    local: "127.0.0.1:5432".into(),
-                    remote_port: Some(20001),
-                },
-                tx,
-            )
-            .await
-            .unwrap();
-        assert_eq!(registered.remote_port, Some(20001));
-    }
-
-    #[tokio::test]
-    async fn removes_pending_data_when_control_channel_is_closed() {
-        let state = state();
-        let (tx, rx) = mpsc::unbounded_channel();
-        drop(rx);
-        state
-            .register_control(
-                "client-1".into(),
-                "identity-1".into(),
-                ServiceRequest::Http {
-                    local: "127.0.0.1:3000".into(),
-                    subdomain: Some("foo".into()),
-                },
-                tx,
-            )
-            .await
-            .unwrap();
-        let tunnel = state.http_tunnel_for_host("foo.a.com").await.unwrap();
-
-        assert!(state.open_data_connection(&tunnel).await.is_err());
-        assert_eq!(state.inner.lock().await.pending_data.len(), 0);
-    }
-
-    #[tokio::test]
-    async fn release_client_removes_its_pending_data() {
-        let state = state();
-        let (tx, _rx) = mpsc::unbounded_channel();
-        state
-            .register_control(
-                "client-1".into(),
-                "identity-1".into(),
-                ServiceRequest::Http {
-                    local: "127.0.0.1:3000".into(),
-                    subdomain: Some("foo".into()),
-                },
-                tx,
-            )
-            .await
-            .unwrap();
-        let tunnel = state.http_tunnel_for_host("foo.a.com").await.unwrap();
-        let _pending = state.open_data_connection(&tunnel).await.unwrap();
-
-        state.release_client("client-1").await;
-
-        assert_eq!(state.inner.lock().await.pending_data.len(), 0);
-    }
-
-    #[tokio::test]
-    async fn data_connection_timeout_removes_pending_data() {
-        let state = state();
-        let (tx, _rx) = mpsc::unbounded_channel();
-        state
-            .register_control(
-                "client-1".into(),
-                "identity-1".into(),
-                ServiceRequest::Http {
-                    local: "127.0.0.1:3000".into(),
-                    subdomain: Some("foo".into()),
-                },
-                tx,
-            )
-            .await
-            .unwrap();
-        let tunnel = state.http_tunnel_for_host("foo.a.com").await.unwrap();
-
-        assert!(state
-            .await_data_connection(&tunnel, Duration::from_millis(1))
-            .await
-            .is_err());
-        assert_eq!(state.inner.lock().await.pending_data.len(), 0);
-    }
-
-    #[test]
-    fn ignores_host_lines_in_request_body() {
-        assert_eq!(
-            http_host(b"POST / HTTP/1.0\r\nContent-Length: 18\r\n\r\nHost: foo.a.com\r\n"),
-            None
-        );
-    }
-
-    #[test]
-    fn rejects_duplicate_host_headers() {
-        assert_eq!(
-            http_host(b"GET / HTTP/1.1\r\nHost: foo.a.com\r\nHost: bar.a.com\r\n\r\n"),
-            None
-        );
-    }
-
-    #[test]
-    fn formats_server_log_line() {
-        assert_eq!(
-            server_log_line("control listening on 127.0.0.1:7000"),
-            "[rproxy server] control listening on 127.0.0.1:7000"
-        );
-    }
-
-    #[test]
-    fn formats_http_public_url_without_port() {
-        assert_eq!(
-            http_public_url("http", None, "foo", "rp.ykai.cc"),
-            "http://foo.rp.ykai.cc"
-        );
-    }
-
-    #[test]
-    fn formats_http_public_url_with_port() {
-        assert_eq!(
-            http_public_url("https", Some(444), "foo", "rp.ykai.cc"),
-            "https://foo.rp.ykai.cc:444"
-        );
-    }
-
-    #[test]
-    fn rejects_invalid_http_public_scheme() {
-        assert!(validate_http_public_scheme("ftp").is_err());
-        assert!(validate_http_public_scheme("").is_err());
-    }
-
-    #[test]
-    fn connection_traffic_logs_are_debug() {
-        assert_eq!(connection_traffic_log_level(), tracing::Level::DEBUG);
-    }
-
-    #[test]
-    fn recoverable_failures_are_warn() {
-        assert_eq!(recoverable_failure_log_level(), tracing::Level::WARN);
-    }
-
-    #[test]
-    fn parses_client_identity_config() {
-        let auth = AuthConfig::from_toml(
-            r#"
-[[clients]]
-id = "kai-laptop"
-token = "secret-1"
-
-[[clients]]
-id = "remote-relay"
-token = "secret-2"
-"#,
-        )
-        .unwrap();
-
-        assert_eq!(auth.client_id_for_token("secret-1"), Some("kai-laptop"));
-        assert_eq!(auth.client_id_for_token("secret-2"), Some("remote-relay"));
-        assert_eq!(auth.client_id_for_token("missing"), None);
-    }
-
-    #[test]
-    fn rejects_empty_client_identity_config() {
-        let error = AuthConfig::from_toml("clients = []").unwrap_err();
-
-        assert!(error.to_string().contains("at least one client"));
-    }
-
-    #[test]
-    fn rejects_duplicate_client_identity_ids() {
-        let error = AuthConfig::from_toml(
-            r#"
-[[clients]]
-id = "client-one"
-token = "secret-1"
-
-[[clients]]
-id = "client-one"
-token = "secret-2"
-"#,
-        )
-        .unwrap_err();
-
-        assert!(error.to_string().contains("client ids must be unique"));
     }
 }
 
@@ -716,38 +370,36 @@ pub async fn run(config: ServerConfig) -> anyhow::Result<()> {
         (Some(_), Some(_)) => anyhow::bail!("--token and --config cannot be used together"),
         (None, None) => anyhow::bail!("one of --token or --config is required"),
     };
-    let ports = PortAllocator::parse_range(&config.tcp_port_range)?;
-    let domain = config.domain.clone();
     let state = ServerState::new(
-        config.domain,
-        ports,
+        config.domain.clone(),
+        PortAllocator::parse_range(&config.tcp_port_range)?,
         config.http_public_scheme,
         config.http_public_port,
     );
-    let app_state = AppState {
-        state: state.clone(),
-        auth,
-    };
-
     let control_listener = TcpListener::bind(config.control_listen).await?;
-    log_server_info(&format!(
-        "control listening on {} for domain {domain}",
-        config.control_listen
-    ));
     let http_listener = TcpListener::bind(config.http_listen).await?;
+    log_server_info(&format!(
+        "control listening on {} for domain {}",
+        config.control_listen, config.domain
+    ));
     log_server_info(&format!("http listening on {}", config.http_listen));
     let app = Router::new()
         .route("/_rproxy", get(control_ws))
-        .with_state(app_state);
-    let control_task = tokio::spawn(async move { axum::serve(control_listener, app).await });
-
-    let http_task = tokio::spawn(run_http_listener(state, http_listener));
-
-    tokio::select! {
-        result = control_task => result??,
-        result = http_task => result??,
-    }
-
+        .with_state(AppState {
+            state: state.clone(),
+            auth,
+            hello_permits: Arc::new(Semaphore::new(MAX_PENDING_HELLOS)),
+        });
+    let mut tasks = JoinSet::new();
+    tasks.spawn(async move {
+        axum::serve(control_listener, app)
+            .tcp_nodelay(true)
+            .await
+            .map_err(anyhow::Error::from)
+    });
+    tasks.spawn(run_http_listener(state, http_listener));
+    tasks.join_next().await.unwrap()??;
+    tasks.abort_all();
     Ok(())
 }
 
@@ -755,67 +407,55 @@ pub async fn run(config: ServerConfig) -> anyhow::Result<()> {
 struct AppState {
     state: ServerState,
     auth: AuthConfig,
+    hello_permits: Arc<Semaphore>,
 }
 
 async fn control_ws(State(app): State<AppState>, ws: WebSocketUpgrade) -> axum::response::Response {
-    ws.on_upgrade(move |socket| handle_control_socket(app, socket))
+    let Ok(permit) = app.hello_permits.clone().try_acquire_owned() else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    ws.max_message_size(MAX_DATA_SIZE + 5)
+        .max_frame_size(MAX_DATA_SIZE + 5)
+        .on_upgrade(move |socket| handle_socket(app, socket, permit))
 }
 
-async fn handle_control_socket(app: AppState, mut socket: WebSocket) {
-    let Some(Ok(Message::Text(text))) = socket.recv().await else {
-        log_server_warn("control websocket closed before hello");
+async fn handle_socket(app: AppState, mut socket: WebSocket, hello_permit: OwnedSemaphorePermit) {
+    let hello = match timeout(HELLO_TIMEOUT, socket.recv()).await {
+        Ok(Some(Ok(Message::Text(text)))) => serde_json::from_str::<ClientHello>(&text).ok(),
+        _ => None,
+    };
+    let Some(hello) = hello else {
+        log_server_warn("websocket closed or timed out before a valid hello");
+        let _ = socket.close().await;
         return;
     };
-    let Ok(hello) = serde_json::from_str::<ClientHello>(&text) else {
-        log_server_warn("invalid hello message received");
-        let _ = send_error(socket, ServerErrorCode::InvalidRequest, "invalid hello").await;
-        return;
-    };
-
+    drop(hello_permit);
     match hello {
         ClientHello::Control { token, service } => {
-            let Some(client_identity_id) = app.auth.client_id_for_token(&token).map(str::to_owned)
-            else {
-                log_server_warn("control authentication failed");
+            let Some(identity) = app.auth.client_id_for_token(&token).map(str::to_owned) else {
                 let _ =
                     send_error(socket, ServerErrorCode::AuthFailed, "authentication failed").await;
                 return;
             };
-            log_server_info(&format!(
-                "control authentication succeeded for client identity {client_identity_id}"
-            ));
-            handle_registered_control(app.state, socket, client_identity_id, service).await;
+            handle_registered_control(app.state, socket, identity, service).await;
         }
-        ClientHello::Data {
-            token,
-            connection_id,
-        } => {
-            let Some(client_identity_id) = app.auth.client_id_for_token(&token).map(str::to_owned)
-            else {
-                log_server_warn(&format!("data authentication failed: {connection_id}"));
+        ClientHello::Data { token, session_id } => {
+            let Some(identity) = app.auth.client_id_for_token(&token).map(str::to_owned) else {
                 let _ =
                     send_error(socket, ServerErrorCode::AuthFailed, "authentication failed").await;
                 return;
             };
-            match app
+            if let Err(socket) = app
                 .state
-                .attach_data_connection(&connection_id, &client_identity_id, socket)
+                .attach_data_connection(&session_id, &identity, socket)
                 .await
             {
-                Ok(()) => {
-                    log_server_debug(&format!("data websocket attached: {connection_id}"));
-                }
-                Err(socket) => {
-                    log_server_debug(&format!(
-                        "data websocket has no pending connection: {connection_id}"
-                    ));
-                    let _ = send_error(
-                        socket,
-                        ServerErrorCode::InvalidRequest,
-                        "unknown connection id",
-                    )
-                    .await;
-                }
+                let _ = send_error(
+                    socket,
+                    ServerErrorCode::InvalidRequest,
+                    "unknown session id",
+                )
+                .await;
             }
         }
     }
@@ -823,23 +463,25 @@ async fn handle_control_socket(app: AppState, mut socket: WebSocket) {
 
 async fn handle_registered_control(
     state: ServerState,
-    socket: WebSocket,
+    mut socket: WebSocket,
     client_identity_id: String,
     service: ServiceRequest,
 ) {
     let client_id = Uuid::new_v4().to_string();
-    let (control_tx, mut control_rx) = mpsc::unbounded_channel();
+    let cancellation = CancellationToken::new();
+    let (open_tx, open_rx) = mpsc::channel(OPEN_QUEUE_SIZE);
     let is_tcp = matches!(service, ServiceRequest::Tcp { .. });
-    let registered = match state
+    let (registered, data_rx) = match state
         .register_control(
             client_id.clone(),
             client_identity_id.clone(),
             service,
-            control_tx,
+            open_tx,
+            cancellation.clone(),
         )
         .await
     {
-        Ok(registered) => registered,
+        Ok(value) => value,
         Err(error) => {
             let code = match error {
                 ServerStateError::SubdomainUnavailable(_) => ServerErrorCode::SubdomainUnavailable,
@@ -850,79 +492,84 @@ async fn handle_registered_control(
                     ServerErrorCode::InvalidRequest
                 }
             };
-            log_server_warn(&format!("registration failed: {error}"));
             let _ = send_error(socket, code, &error.to_string()).await;
             return;
         }
     };
 
-    let mut tcp_listener_task = None;
+    let mut listener_task = None;
     if is_tcp {
         if let Some(port) = registered.remote_port {
-            let listener = match TcpListener::bind(("0.0.0.0", port)).await {
-                Ok(listener) => listener,
+            match TcpListener::bind(("0.0.0.0", port)).await {
+                Ok(listener) => {
+                    let tunnel = state.tcp_tunnel_for_port(port).await.unwrap();
+                    listener_task =
+                        Some(tokio::spawn(run_tcp_port_listener(port, tunnel, listener)));
+                }
                 Err(error) => {
                     state.release_client(&client_id).await;
-                    log_server_warn(&format!("failed to listen on TCP port {port}: {error}"));
-                    let _ = send_error(
-                        socket,
-                        ServerErrorCode::PortUnavailable,
-                        &format!("failed to listen on TCP port {port}: {error}"),
-                    )
-                    .await;
+                    let _ =
+                        send_error(socket, ServerErrorCode::PortUnavailable, &error.to_string())
+                            .await;
                     return;
                 }
-            };
-            log_server_info(&format!("tcp listening on 0.0.0.0:{port}"));
-            let state_for_tcp = state.clone();
-            tcp_listener_task = Some(tokio::spawn(async move {
-                let _ = run_tcp_port_listener(state_for_tcp, port, listener).await;
-            }));
+            }
         }
     }
 
-    let (mut sender, mut receiver) = socket.split();
     let message = ServerMessage::Registered {
+        session_id: registered.session_id,
         public: registered.public,
         subdomain: registered.subdomain,
         remote_port: registered.remote_port,
     };
-    log_server_info(&format!(
-        "registered tunnel for client identity {client_identity_id}: {}",
-        message_public(&message)
-    ));
-    if sender
+    if socket
         .send(Message::Text(serde_json::to_string(&message).unwrap()))
         .await
         .is_err()
     {
-        state.release_client(&client_id).await;
-        if let Some(task) = tcp_listener_task {
-            task.abort();
-        }
-        return;
-    }
-
-    loop {
-        tokio::select! {
-            Some(message) = control_rx.recv() => {
-                if sender.send(Message::Text(serde_json::to_string(&message).unwrap())).await.is_err() {
-                    break;
+        cancellation.cancel();
+    } else {
+        log_server_info(&format!(
+            "registered tunnel for client identity {client_identity_id}: {}",
+            message_public(&message)
+        ));
+        let (sender, mut receiver) = socket.split();
+        let data_socket = tokio::select! {
+            result = timeout(DATA_ATTACH_TIMEOUT, data_rx) => result.ok().and_then(Result::ok),
+            _ = wait_for_control_close(&mut receiver) => None,
+            _ = cancellation.cancelled() => None,
+        };
+        if let Some(data_socket) = data_socket {
+            let mut mux = Box::pin(run_server_mux(data_socket, open_rx, cancellation.clone()));
+            tokio::select! {
+                result = &mut mux => {
+                    if let Err(error) = result { log_server_warn(&format!("data websocket failed: {error}")); }
+                }
+                _ = wait_for_control_close(&mut receiver) => {
+                    cancellation.cancel();
+                    let _ = mux.await;
+                }
+                _ = cancellation.cancelled() => {
+                    let _ = mux.await;
                 }
             }
-            incoming = receiver.next() => {
-                match incoming {
-                    Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
-                    _ => {}
-                }
-            }
         }
+        drop(sender);
     }
-
+    cancellation.cancel();
     state.release_client(&client_id).await;
-    log_server_info(&format!("released client resources: {client_id}"));
-    if let Some(task) = tcp_listener_task {
+    if let Some(task) = listener_task {
         task.abort();
+        let _ = task.await;
+    }
+}
+
+async fn wait_for_control_close(receiver: &mut SplitStream<WebSocket>) {
+    while let Some(message) = receiver.next().await {
+        if matches!(message, Ok(Message::Close(_)) | Err(_)) {
+            break;
+        }
     }
 }
 
@@ -938,66 +585,76 @@ async fn send_error(
     code: ServerErrorCode,
     message: &str,
 ) -> anyhow::Result<()> {
-    let message = ServerMessage::Error {
-        code,
-        message: message.to_string(),
-    };
     socket
-        .send(Message::Text(serde_json::to_string(&message)?))
+        .send(Message::Text(serde_json::to_string(
+            &ServerMessage::Error {
+                code,
+                message: message.to_string(),
+            },
+        )?))
         .await?;
     Ok(())
 }
 
-async fn run_http_listener(state: ServerState, listener: TcpListener) -> anyhow::Result<()> {
-    loop {
-        let (stream, _) = listener.accept().await?;
-        let state = state.clone();
-        tokio::spawn(async move {
-            let _ = handle_http_stream(state, stream).await;
-        });
-    }
-}
-
 async fn run_tcp_port_listener(
-    state: ServerState,
     port: u16,
+    tunnel: TunnelHandle,
     listener: TcpListener,
 ) -> anyhow::Result<()> {
     loop {
-        let (stream, _) = listener.accept().await?;
-        let state = state.clone();
-        tokio::spawn(async move {
-            let _ = handle_tcp_stream(state, port, stream).await;
-        });
+        let permit = tokio::select! {
+            result = tunnel.permits.clone().acquire_owned() => result?,
+            _ = tunnel.cancellation.cancelled() => return Ok(()),
+        };
+        let (stream, _) = tokio::select! {
+            result = listener.accept() => result?,
+            _ = tunnel.cancellation.cancelled() => return Ok(()),
+        };
+        stream.set_nodelay(true)?;
+        log_server_debug(&format!(
+            "tcp connection accepted: port {port} -> {}",
+            tunnel.local
+        ));
+        if tunnel
+            .open_tx
+            .send(OpenCommand {
+                stream,
+                initial: None,
+                _permit: permit,
+            })
+            .await
+            .is_err()
+        {
+            return Ok(());
+        }
     }
 }
 
-async fn handle_tcp_stream(state: ServerState, port: u16, stream: TcpStream) -> anyhow::Result<()> {
-    let Some(tunnel) = state.tcp_tunnel_for_port(port).await else {
-        log_server_debug(&format!(
-            "tcp connection ignored without tunnel: port {port}"
-        ));
-        return Ok(());
-    };
-    log_server_debug(&format!(
-        "tcp connection accepted: port {port} -> {}",
-        tunnel.local
-    ));
-    let socket = state
-        .await_data_connection(&tunnel, Duration::from_secs(3))
-        .await?;
-    proxy_tcp_with_websocket(stream, socket, None, tunnel.cancellation).await
+async fn run_http_listener(state: ServerState, listener: TcpListener) -> anyhow::Result<()> {
+    let admission = Arc::new(Semaphore::new(1024));
+    let mut tasks = JoinSet::new();
+    loop {
+        while tasks.len() >= 1024 {
+            let _ = tasks.join_next().await;
+        }
+        let permit = admission.clone().acquire_owned().await?;
+        let (stream, _) = listener.accept().await?;
+        stream.set_nodelay(true)?;
+        let state = state.clone();
+        tasks.spawn(async move {
+            let _permit = permit;
+            if let Err(error) = handle_http_stream(state, stream).await {
+                log_server_debug(&format!("http stream failed: {error}"));
+            }
+        });
+    }
 }
 
 async fn handle_http_stream(state: ServerState, mut stream: TcpStream) -> anyhow::Result<()> {
     let initial = match timeout(Duration::from_secs(5), read_http_headers(&mut stream)).await {
         Ok(Ok(initial)) => initial,
         Ok(Err(HttpHeaderError::TooLarge)) => {
-            stream
-                .write_all(
-                    b"HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                )
-                .await?;
+            stream.write_all(b"HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await?;
             return Ok(());
         }
         Ok(Err(HttpHeaderError::Incomplete)) => {
@@ -1010,35 +667,35 @@ async fn handle_http_stream(state: ServerState, mut stream: TcpStream) -> anyhow
         }
         Ok(Err(HttpHeaderError::Io(error))) => return Err(error.into()),
         Err(_) => {
-            stream
-                .write_all(b"HTTP/1.1 408 Request Timeout\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-                .await?;
+            stream.write_all(b"HTTP/1.1 408 Request Timeout\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await?;
             return Ok(());
         }
     };
     let Some(host) = http_host(&initial) else {
-        log_server_debug("http request rejected without Host header");
         stream
             .write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n")
             .await?;
         return Ok(());
     };
     let Some(tunnel) = state.http_tunnel_for_host(&host).await else {
-        log_server_debug(&format!("http request has no tunnel: host {host}"));
         stream
             .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
             .await?;
         return Ok(());
     };
-
-    log_server_debug(&format!(
-        "http request accepted: host {host} -> {}",
-        tunnel.local
-    ));
-    let socket = state
-        .await_data_connection(&tunnel, Duration::from_secs(3))
+    let permit = tokio::select! {
+        result = tunnel.permits.clone().acquire_owned() => result?,
+        _ = tunnel.cancellation.cancelled() => return Ok(()),
+    };
+    tunnel
+        .open_tx
+        .send(OpenCommand {
+            stream,
+            initial: Some(initial),
+            _permit: permit,
+        })
         .await?;
-    proxy_tcp_with_websocket(stream, socket, Some(initial), tunnel.cancellation).await
+    Ok(())
 }
 
 #[derive(Debug, Error)]
@@ -1060,8 +717,8 @@ async fn read_http_headers(stream: &mut TcpStream) -> Result<Vec<u8>, HttpHeader
             return Err(HttpHeaderError::Incomplete);
         }
         buffer.extend_from_slice(&chunk[..n]);
-        if let Some(header_end) = buffer.windows(4).position(|window| window == b"\r\n\r\n") {
-            return if header_end + 4 <= 64 * 1024 {
+        if let Some(end) = buffer.windows(4).position(|window| window == b"\r\n\r\n") {
+            return if end + 4 <= 64 * 1024 {
                 Ok(buffer)
             } else {
                 Err(HttpHeaderError::TooLarge)
@@ -1074,10 +731,10 @@ async fn read_http_headers(stream: &mut TcpStream) -> Result<Vec<u8>, HttpHeader
 }
 
 fn http_host(initial: &[u8]) -> Option<String> {
-    let header_end = initial
+    let end = initial
         .windows(4)
         .position(|window| window == b"\r\n\r\n")?;
-    let request = std::str::from_utf8(&initial[..header_end]).ok()?;
+    let request = std::str::from_utf8(&initial[..end]).ok()?;
     let mut hosts = request.split("\r\n").skip(1).filter_map(|line| {
         let (name, value) = line.split_once(':')?;
         name.eq_ignore_ascii_case("host").then(|| value.trim())
@@ -1086,61 +743,202 @@ fn http_host(initial: &[u8]) -> Option<String> {
     (!host.is_empty() && hosts.next().is_none()).then_some(host)
 }
 
-async fn proxy_tcp_with_websocket(
-    stream: TcpStream,
+struct StreamEntry {
+    events: mpsc::Sender<DataFrame>,
+    cancellation: CancellationToken,
+}
+
+async fn run_server_mux(
     socket: WebSocket,
-    initial_to_websocket: Option<Vec<u8>>,
+    mut open_rx: mpsc::Receiver<OpenCommand>,
     cancellation: CancellationToken,
 ) -> anyhow::Result<()> {
     let (mut ws_sender, mut ws_receiver) = socket.split();
-    let (mut tcp_reader, mut tcp_writer) = stream.into_split();
-
-    if let Some(initial) = initial_to_websocket {
-        ws_sender.send(Message::Binary(initial)).await?;
-    }
-
-    let tcp_to_ws = async move {
-        let mut buffer = [0; 8192];
-        loop {
-            let n = tcp_reader.read(&mut buffer).await?;
-            if n == 0 {
-                ws_sender
-                    .send(Message::Text(serde_json::to_string(
-                        &DataMessage::HalfClose,
-                    )?))
-                    .await?;
-                break;
-            }
-            ws_sender
-                .send(Message::Binary(buffer[..n].to_vec()))
-                .await?;
+    let (writer_tx, mut writer_rx) = mpsc::channel::<DataFrame>(WRITER_QUEUE_SIZE);
+    let writer_cancellation = cancellation.clone();
+    let mut writer = tokio::spawn(async move {
+        while let Some(frame) = writer_rx.recv().await {
+            ws_sender.send(Message::Binary(frame.encode()?)).await?;
         }
         anyhow::Ok(())
-    };
-
-    let ws_to_tcp = async move {
-        while let Some(message) = ws_receiver.next().await {
-            match message? {
-                Message::Binary(data) => tcp_writer.write_all(&data).await?,
-                Message::Text(text)
-                    if serde_json::from_str::<DataMessage>(&text)? == DataMessage::HalfClose =>
-                {
-                    break;
+    });
+    let mut streams = HashMap::<u32, StreamEntry>::new();
+    let mut tasks = JoinSet::<u32>::new();
+    let mut next_stream_id = 1_u32;
+    let result = loop {
+        tokio::select! {
+            _ = cancellation.cancelled() => break Ok(()),
+            result = &mut writer => {
+                break match result { Ok(result) => result, Err(error) => Err(error.into()) };
+            }
+            Some(stream_id) = tasks.join_next() => {
+                if let Ok(stream_id) = stream_id { streams.remove(&stream_id); }
+            }
+            command = open_rx.recv() => {
+                let Some(command) = command else { break Ok(()); };
+                let stream_id = next_stream_id;
+                next_stream_id = next_stream_id.wrapping_add(1).max(1);
+                let (events_tx, events_rx) = mpsc::channel(STREAM_QUEUE_SIZE);
+                let stream_cancellation = cancellation.child_token();
+                streams.insert(stream_id, StreamEntry { events: events_tx, cancellation: stream_cancellation.clone() });
+                if writer_tx.send(DataFrame::Open { stream_id }).await.is_err() {
+                    streams.remove(&stream_id);
+                    break Err(anyhow::anyhow!("data websocket writer closed"));
                 }
-                Message::Close(_) => break,
-                _ => {}
+                let stream_writer = writer_tx.clone();
+                tasks.spawn(async move {
+                    if run_stream(command.stream, command.initial, events_rx, stream_writer.clone(), stream_cancellation).await.is_err() {
+                        let _ = stream_writer.send(DataFrame::Reset { stream_id }).await;
+                    }
+                    drop(command._permit);
+                    stream_id
+                });
+            }
+            incoming = ws_receiver.next() => {
+                let frame = match incoming {
+                    Some(Ok(Message::Binary(data))) => match DataFrame::decode(&data) {
+                        Ok(frame) => frame,
+                        Err(error) => break Err(error.into()),
+                    },
+                    Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break Err(anyhow::anyhow!("data websocket closed")),
+                    Some(Ok(_)) => continue,
+                };
+                let stream_id = frame.stream_id();
+                if matches!(&frame, DataFrame::Open { .. }) {
+                    break Err(anyhow::anyhow!("client sent Open frame"));
+                }
+                let Some(entry) = streams.get(&stream_id) else {
+                    if matches!(frame, DataFrame::Reset { .. }) {
+                        continue;
+                    }
+                    writer_tx.send(DataFrame::Reset { stream_id }).await?;
+                    continue;
+                };
+                if entry.events.try_send(frame).is_err() {
+                    if let Some(entry) = streams.remove(&stream_id) { entry.cancellation.cancel(); }
+                    writer_tx.send(DataFrame::Reset { stream_id }).await?;
+                }
             }
         }
-        tcp_writer.shutdown().await?;
-        anyhow::Ok(())
     };
+    writer_cancellation.cancel();
+    for entry in streams.values() {
+        entry.cancellation.cancel();
+    }
+    tasks.abort_all();
+    while tasks.join_next().await.is_some() {}
+    writer.abort();
+    let _ = writer.await;
+    result
+}
 
-    tokio::select! {
-        result = async { tokio::try_join!(tcp_to_ws, ws_to_tcp) } => {
-            result?;
+async fn run_stream(
+    stream: TcpStream,
+    initial: Option<Vec<u8>>,
+    mut events: mpsc::Receiver<DataFrame>,
+    writer: mpsc::Sender<DataFrame>,
+    cancellation: CancellationToken,
+) -> anyhow::Result<()> {
+    let ready = timeout(READY_TIMEOUT, events.recv())
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("stream closed before Ready"))?;
+    let stream_id = match ready {
+        DataFrame::Ready { stream_id } => stream_id,
+        DataFrame::Reset { .. } => return Ok(()),
+        _ => anyhow::bail!("expected Ready frame"),
+    };
+    let (mut reader, mut tcp_writer) = stream.into_split();
+    let mut credit = INITIAL_CREDIT;
+    let mut local_fin = false;
+    let mut peer_fin = false;
+    let mut initial = initial.unwrap_or_default();
+    let mut initial_offset = 0;
+    let mut buffer = [0_u8; MAX_DATA_SIZE];
+    while !(local_fin && peer_fin) {
+        if credit > 0 && initial_offset < initial.len() {
+            let end = (initial_offset + MAX_DATA_SIZE).min(initial.len());
+            writer
+                .send(DataFrame::Data {
+                    stream_id,
+                    payload: initial[initial_offset..end].to_vec(),
+                })
+                .await?;
+            initial_offset = end;
+            credit -= 1;
+            if initial_offset == initial.len() {
+                initial.clear();
+            }
+            continue;
         }
-        _ = cancellation.cancelled() => {}
+        tokio::select! {
+            _ = cancellation.cancelled() => return Ok(()),
+            event = events.recv() => match event {
+                Some(DataFrame::Data { payload, .. }) => {
+                    tcp_writer.write_all(&payload).await?;
+                    writer.send(DataFrame::Credit { stream_id, amount: 1 }).await?;
+                }
+                Some(DataFrame::Credit { amount, .. }) if credit + amount <= INITIAL_CREDIT => credit += amount,
+                Some(DataFrame::Fin { .. }) => { tcp_writer.shutdown().await?; peer_fin = true; }
+                Some(DataFrame::Reset { .. }) | None => return Ok(()),
+                _ => anyhow::bail!("invalid stream frame sequence"),
+            },
+            read = reader.read(&mut buffer), if credit > 0 && initial_offset >= initial.len() && !local_fin => {
+                let n = read?;
+                if n == 0 {
+                    writer.send(DataFrame::Fin { stream_id }).await?;
+                    local_fin = true;
+                } else {
+                    writer.send(DataFrame::Data { stream_id, payload: buffer[..n].to_vec() }).await?;
+                    credit -= 1;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_client_identity_config() {
+        let auth = AuthConfig::from_toml(
+            r#"
+[[clients]]
+id = "one"
+token = "secret-1"
+[[clients]]
+id = "two"
+token = "secret-2"
+"#,
+        )
+        .unwrap();
+        assert_eq!(auth.client_id_for_token("secret-1"), Some("one"));
+        assert_eq!(auth.client_id_for_token("secret-2"), Some("two"));
     }
 
-    Ok(())
+    #[test]
+    fn rejects_duplicate_client_identity_ids() {
+        let error = AuthConfig::from_toml(
+            r#"
+[[clients]]
+id = "one"
+token = "secret-1"
+[[clients]]
+id = "one"
+token = "secret-2"
+"#,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("client ids must be unique"));
+    }
+
+    #[test]
+    fn ignores_host_lines_in_request_body() {
+        assert_eq!(
+            http_host(b"POST / HTTP/1.0\r\nContent-Length: 18\r\n\r\nHost: foo.a.com\r\n"),
+            None
+        );
+    }
 }

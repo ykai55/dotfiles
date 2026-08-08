@@ -17,47 +17,37 @@ or `wss://a.com` for production. The internal control path is always appended
 by the client as `/_rproxy`. The server URL must not include another path, query,
 fragment, or embedded credentials.
 
-Each client keeps one control WebSocket open. When the server receives an
-external HTTP or TCP connection for that tunnel, it sends an `open` message on
-the control connection. The client then opens a second data WebSocket for that
-single connection and pipes raw bytes between the local service and the server.
-
-The first version intentionally avoids custom stream multiplexing. One inbound
-connection maps to one data WebSocket. This keeps connection lifecycle, back
-pressure, and error handling easier to reason about.
+Each registered tunnel keeps exactly two WebSockets open: one control connection
+and one data connection. The data connection multiplexes up to 64 active logical
+HTTP or TCP streams, so external connections do not perform additional
+WebSocket handshakes.
 
 ### Connection Lifecycle
 
-The control WebSocket owns the tunnel and all of its data connections. If it
-closes, the server releases the public route and cancels pending and active data
-connections. The client also closes its data WebSockets and local TCP
-connections before reconnecting the control WebSocket.
-
-After an external connection arrives, the server waits up to three seconds for
-the matching authenticated data WebSocket. A timeout or tunnel shutdown removes
-the pending connection state rather than leaving it allocated.
+The control WebSocket owns the tunnel and its data connection. If either closes,
+the server releases the public route and cancels all active logical streams. The
+client also closes local TCP connections before reconnecting both WebSockets.
+WebSocket handshakes, the first hello, data attachment, local TCP connects, and
+logical stream readiness all have explicit deadlines.
 
 ### Data Connection Protocol
 
-After the initial authenticated data `hello`, WebSocket binary frames carry TCP
-bytes unchanged. TCP EOF is directional, so either peer sends the following text
-frame after its TCP reader reaches EOF:
+After the authenticated data `hello` attaches a `session_id`, binary frames use
+`Open`, `Ready`, `Data`, `Credit`, `Fin`, and `Reset` opcodes keyed by a non-zero
+stream ID. `Data` payloads are limited to 16 KiB. Each direction starts with an
+eight-frame credit window and returns one credit only after writing a frame to
+TCP, preventing a slow stream from blocking the WebSocket reader.
 
-```json
-{"type":"half_close"}
-```
-
-The receiver shuts down only its TCP write half and continues forwarding bytes
-in the other direction. This supports protocols in which a requester sends EOF
-and then waits for a response. A WebSocket close or control-connection shutdown
-closes the whole data connection. Because `half_close` changes the data-plane
-protocol, deploy matching server and client versions together.
+`Fin` shuts down only the receiver's TCP write half and leaves the opposite
+direction active. `Reset` isolates protocol and overload failures to one logical
+stream. Server and client versions must match; the mux protocol does not support
+the older per-stream WebSocket protocol.
 
 ## Features
 
 - HTTP tunnels routed by `Host` header, for example `foo.a.com`.
 - TCP tunnels exposed on a requested or automatically allocated remote port.
-- Directional TCP half-close propagation through data WebSocket control frames.
+- Directional TCP half-close propagation through per-stream `Fin` frames.
 - Static client token authentication for control and data WebSocket connections.
   Servers can use one legacy token or a config file with multiple client
   identities.
@@ -204,18 +194,17 @@ file with normal filesystem permissions and do not log or publish real tokens.
 
 ## Performance Notes
 
-The current data path favors deployment simplicity over maximum throughput. Each
-external HTTP or TCP connection creates one data WebSocket back from the client
-to the server. The connection is then proxied as raw bytes over WebSocket binary
-frames, with the text control frame described above for half-close signaling.
+The current data path multiplexes every external HTTP or TCP connection over one
+long-lived data WebSocket per tunnel. Together with the control WebSocket, each
+registered tunnel uses exactly two connections to the control endpoint.
 
 This has a few important costs compared with a local reverse proxy such as
 nginx:
 
-- Every new external connection waits for the server to notify the client and
-  for the client to open a data WebSocket.
-- Data is wrapped in WebSocket frames instead of flowing over a raw TCP data
-  channel.
+- Data is wrapped in framed WebSocket messages instead of flowing over a raw TCP
+  data channel.
+- A tunnel supports at most 64 active logical streams; additional TCP accepts
+  remain backpressured until a stream permit is released.
 - HTTP routing reads the first request headers on a connection to choose the
   tunnel, then treats the rest of that connection as raw TCP. It does not parse
   every keep-alive request like a full HTTP reverse proxy.
@@ -228,28 +217,15 @@ Potential optimization directions:
    connect latency, bytes transferred, and connection duration. This identifies
    whether time is spent in tunnel setup, local connection setup, or byte
    forwarding.
-2. Add a raw TCP idle data pool. The client would pre-open N data TCP
-   connections to the server. When an external request arrives, the server takes
-   an idle connection and immediately starts piping bytes. The simplest version
-   uses each data TCP connection for one external connection, then closes it and
-   lets the client replenish the pool.
-3. Consider sequential reuse of raw data TCP connections only with explicit
-   framing. Reusing one data TCP connection for multiple external connections
-   requires in-band boundaries such as begin/data/fin/reset messages; a separate
-   control WebSocket cannot safely mark a raw byte stream idle because data and
-   control ordering are not guaranteed across different channels.
-4. Consider long-lived multiplexed data channels if higher throughput is needed.
-   This would use a small number of persistent data connections and carry many
-   logical streams over them. It removes per-connection setup costs but requires
-   stream IDs, framing, flow control, half-close handling, and error isolation.
-5. Revisit HTTP semantics if correctness across HTTP keep-alive requests with
+2. Tune bounded queue sizes and stream windows from measurements rather than
+   increasing them speculatively.
+3. Revisit HTTP semantics if correctness across HTTP keep-alive requests with
    different `Host` headers becomes important. A conservative approach is to
    close HTTP connections after one routed request. A more complete approach is
    to implement request-level HTTP proxying and route each request separately.
 
-The most practical next step is usually instrumentation, followed by a raw TCP
-idle data pool. Multiplexing should wait until measurements show the simpler
-pool model is not enough.
+The most practical next step is instrumentation around queue saturation, resets,
+and stream setup latency.
 
 ## Development
 

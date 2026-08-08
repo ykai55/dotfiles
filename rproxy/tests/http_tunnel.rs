@@ -342,28 +342,8 @@ token = "secret-2"
     else {
         panic!("expected registered message");
     };
-    let ServerMessage::Registered { .. } = serde_json::from_str(&text).unwrap() else {
+    let ServerMessage::Registered { session_id, .. } = serde_json::from_str(&text).unwrap() else {
         panic!("expected registered message");
-    };
-
-    let request = tokio::spawn(async move {
-        let mut stream = TcpStream::connect(http_listen).await.unwrap();
-        stream
-            .write_all(b"GET / HTTP/1.1\r\nHost: one.test\r\nConnection: close\r\n\r\n")
-            .await
-            .unwrap();
-        let mut buf = [0_u8; 16];
-        let _ = timeout(Duration::from_millis(250), stream.read(&mut buf)).await;
-    });
-
-    let Some(Ok(Message::Text(text))) = timeout(Duration::from_secs(3), control_socket.next())
-        .await
-        .unwrap()
-    else {
-        panic!("expected request data message");
-    };
-    let ServerMessage::Open { connection_id } = serde_json::from_str(&text).unwrap() else {
-        panic!("expected request data message");
     };
 
     let (mut data_socket, _) = connect_async(format!("ws://{control_listen}/_rproxy"))
@@ -373,7 +353,7 @@ token = "secret-2"
         .send(Message::Text(
             serde_json::to_string(&ClientHello::Data {
                 token: "secret-2".into(),
-                connection_id,
+                session_id,
             })
             .unwrap(),
         ))
@@ -391,7 +371,6 @@ token = "secret-2"
     };
     assert_eq!(code, ServerErrorCode::InvalidRequest);
 
-    let _ = request.await;
     let _ = fs::remove_file(config);
     server.abort();
 }
