@@ -6,7 +6,9 @@ use axum::extract::State;
 use axum::routing::get;
 use axum::Router;
 use futures_util::{SinkExt, StreamExt};
+use serde::Deserialize;
 use std::collections::HashMap;
+use std::fs;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use thiserror::Error;
@@ -26,8 +28,16 @@ pub struct RegisteredTunnel {
 #[derive(Debug, Clone)]
 pub struct TunnelHandle {
     pub client_id: String,
+    pub client_identity_id: String,
     pub local: String,
     pub control_tx: mpsc::UnboundedSender<ServerMessage>,
+}
+
+#[derive(Debug)]
+struct PendingDataConnection {
+    client_id: String,
+    client_identity_id: String,
+    sender: oneshot::Sender<WebSocket>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -42,6 +52,8 @@ pub enum ServerStateError {
     PortRangeExhausted,
     #[error("invalid port range")]
     InvalidPortRange,
+    #[error("invalid subdomain {0:?}")]
+    InvalidSubdomain(String),
 }
 
 impl From<AllocError> for ServerStateError {
@@ -52,6 +64,7 @@ impl From<AllocError> for ServerStateError {
             AllocError::PortUnavailable(port) => Self::PortUnavailable(port),
             AllocError::PortRangeExhausted => Self::PortRangeExhausted,
             AllocError::SubdomainUnavailable(subdomain) => Self::SubdomainUnavailable(subdomain),
+            AllocError::InvalidSubdomain(subdomain) => Self::InvalidSubdomain(subdomain),
         }
     }
 }
@@ -97,6 +110,70 @@ fn validate_http_public_scheme(scheme: &str) -> anyhow::Result<()> {
 }
 
 #[derive(Debug, Clone)]
+pub struct AuthConfig {
+    clients_by_token: HashMap<String, String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AuthConfigFile {
+    clients: Vec<ClientIdentityConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ClientIdentityConfig {
+    id: String,
+    token: String,
+}
+
+impl AuthConfig {
+    pub fn legacy_token(token: String) -> anyhow::Result<Self> {
+        Self::from_clients(vec![ClientIdentityConfig {
+            id: "legacy".into(),
+            token,
+        }])
+    }
+
+    pub fn from_file(path: &str) -> anyhow::Result<Self> {
+        let text = fs::read_to_string(path)?;
+        Self::from_toml(&text)
+    }
+
+    pub fn from_toml(text: &str) -> anyhow::Result<Self> {
+        let config: AuthConfigFile = toml::from_str(text)?;
+        Self::from_clients(config.clients)
+    }
+
+    pub fn client_id_for_token(&self, token: &str) -> Option<&str> {
+        self.clients_by_token.get(token).map(String::as_str)
+    }
+
+    fn from_clients(clients: Vec<ClientIdentityConfig>) -> anyhow::Result<Self> {
+        if clients.is_empty() {
+            anyhow::bail!("auth config must contain at least one client");
+        }
+
+        let mut clients_by_token = HashMap::new();
+        let mut client_ids = std::collections::HashSet::new();
+        for client in clients {
+            if client.id.trim().is_empty() {
+                anyhow::bail!("client id must not be empty");
+            }
+            if client.token.is_empty() {
+                anyhow::bail!("client token must not be empty");
+            }
+            if !client_ids.insert(client.id.clone()) {
+                anyhow::bail!("client ids must be unique");
+            }
+            if clients_by_token.insert(client.token, client.id).is_some() {
+                anyhow::bail!("client tokens must be unique");
+            }
+        }
+
+        Ok(Self { clients_by_token })
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct ServerState {
     inner: Arc<Mutex<InnerState>>,
 }
@@ -111,7 +188,7 @@ struct InnerState {
     http_tunnels: HashMap<String, TunnelHandle>,
     tcp_tunnels: HashMap<u16, TunnelHandle>,
     client_resources: HashMap<String, Vec<ClientResource>>,
-    pending_data: HashMap<String, oneshot::Sender<WebSocket>>,
+    pending_data: HashMap<String, PendingDataConnection>,
 }
 
 #[derive(Debug)]
@@ -123,14 +200,13 @@ enum ClientResource {
 impl ServerState {
     pub fn new(
         domain: String,
-        _token: String,
         port_allocator: PortAllocator,
         http_public_scheme: String,
         http_public_port: Option<u16>,
     ) -> Self {
         Self {
             inner: Arc::new(Mutex::new(InnerState {
-                domain,
+                domain: domain.trim_end_matches('.').to_ascii_lowercase(),
                 http_public_scheme,
                 http_public_port,
                 ports: port_allocator,
@@ -146,6 +222,7 @@ impl ServerState {
     pub async fn register_control(
         &self,
         client_id: String,
+        client_identity_id: String,
         service: ServiceRequest,
         control_tx: mpsc::UnboundedSender<ServerMessage>,
     ) -> Result<RegisteredTunnel, ServerStateError> {
@@ -155,6 +232,7 @@ impl ServerState {
                 let subdomain = inner.subdomains.allocate(subdomain.as_deref())?;
                 let handle = TunnelHandle {
                     client_id: client_id.clone(),
+                    client_identity_id,
                     local,
                     control_tx,
                 };
@@ -180,6 +258,7 @@ impl ServerState {
                 let port = inner.ports.allocate(remote_port)?;
                 let handle = TunnelHandle {
                     client_id: client_id.clone(),
+                    client_identity_id,
                     local,
                     control_tx,
                 };
@@ -216,6 +295,9 @@ impl ServerState {
                 }
             }
         }
+        inner
+            .pending_data
+            .retain(|_, pending| pending.client_id != client_id);
     }
 
     pub async fn http_tunnel_for_host(&self, host: &str) -> Option<TunnelHandle> {
@@ -232,32 +314,62 @@ impl ServerState {
     async fn open_data_connection(
         &self,
         tunnel: &TunnelHandle,
-    ) -> anyhow::Result<oneshot::Receiver<WebSocket>> {
+    ) -> anyhow::Result<(String, oneshot::Receiver<WebSocket>)> {
         let connection_id = Uuid::new_v4().to_string();
         let (tx, rx) = oneshot::channel();
-        self.inner
-            .lock()
-            .await
-            .pending_data
-            .insert(connection_id.clone(), tx);
+        self.inner.lock().await.pending_data.insert(
+            connection_id.clone(),
+            PendingDataConnection {
+                client_id: tunnel.client_id.clone(),
+                client_identity_id: tunnel.client_identity_id.clone(),
+                sender: tx,
+            },
+        );
 
         if tunnel
             .control_tx
-            .send(ServerMessage::Open { connection_id })
+            .send(ServerMessage::Open {
+                connection_id: connection_id.clone(),
+            })
             .is_err()
         {
+            self.inner.lock().await.pending_data.remove(&connection_id);
             anyhow::bail!("control connection closed");
         }
 
-        Ok(rx)
+        Ok((connection_id, rx))
     }
 
-    async fn attach_data_connection(&self, connection_id: &str, socket: WebSocket) -> bool {
-        let sender = self.inner.lock().await.pending_data.remove(connection_id);
-        if let Some(sender) = sender {
-            sender.send(socket).is_ok()
+    async fn await_data_connection(
+        &self,
+        tunnel: &TunnelHandle,
+        wait: Duration,
+    ) -> anyhow::Result<WebSocket> {
+        let (connection_id, receiver) = self.open_data_connection(tunnel).await?;
+        let result = timeout(wait, receiver).await;
+        self.inner.lock().await.pending_data.remove(&connection_id);
+        Ok(result??)
+    }
+
+    async fn attach_data_connection(
+        &self,
+        connection_id: &str,
+        client_identity_id: &str,
+        socket: WebSocket,
+    ) -> Result<(), WebSocket> {
+        let mut inner = self.inner.lock().await;
+        if let Some(pending) = inner.pending_data.get(connection_id) {
+            if pending.client_identity_id != client_identity_id {
+                return Err(socket);
+            }
+        }
+        let pending = inner.pending_data.remove(connection_id);
+        drop(inner);
+
+        if let Some(pending) = pending {
+            pending.sender.send(socket)
         } else {
-            false
+            Err(socket)
         }
     }
 }
@@ -272,7 +384,6 @@ mod tests {
     fn state() -> ServerState {
         ServerState::new(
             "a.com".into(),
-            "secret".into(),
             PortAllocator::new(20000, 20002).unwrap(),
             "http".into(),
             None,
@@ -287,6 +398,7 @@ mod tests {
         let registered = state
             .register_control(
                 "client-1".into(),
+                "identity-1".into(),
                 ServiceRequest::Http {
                     local: "127.0.0.1:3000".into(),
                     subdomain: Some("foo".into()),
@@ -309,6 +421,7 @@ mod tests {
         let registered = state
             .register_control(
                 "client-1".into(),
+                "identity-1".into(),
                 ServiceRequest::Tcp {
                     local: "127.0.0.1:5432".into(),
                     remote_port: Some(20001),
@@ -332,6 +445,7 @@ mod tests {
         state
             .register_control(
                 "client-1".into(),
+                "identity-1".into(),
                 ServiceRequest::Http {
                     local: "127.0.0.1:3000".into(),
                     subdomain: Some("foo".into()),
@@ -344,6 +458,7 @@ mod tests {
         let error = state
             .register_control(
                 "client-2".into(),
+                "identity-2".into(),
                 ServiceRequest::Http {
                     local: "127.0.0.1:4000".into(),
                     subdomain: Some("foo".into()),
@@ -364,6 +479,7 @@ mod tests {
         state
             .register_control(
                 "client-1".into(),
+                "identity-1".into(),
                 ServiceRequest::Tcp {
                     local: "127.0.0.1:5432".into(),
                     remote_port: Some(20001),
@@ -380,6 +496,7 @@ mod tests {
         let registered = state
             .register_control(
                 "client-2".into(),
+                "identity-2".into(),
                 ServiceRequest::Tcp {
                     local: "127.0.0.1:5432".into(),
                     remote_port: Some(20001),
@@ -389,6 +506,94 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(registered.remote_port, Some(20001));
+    }
+
+    #[tokio::test]
+    async fn removes_pending_data_when_control_channel_is_closed() {
+        let state = state();
+        let (tx, rx) = mpsc::unbounded_channel();
+        drop(rx);
+        state
+            .register_control(
+                "client-1".into(),
+                "identity-1".into(),
+                ServiceRequest::Http {
+                    local: "127.0.0.1:3000".into(),
+                    subdomain: Some("foo".into()),
+                },
+                tx,
+            )
+            .await
+            .unwrap();
+        let tunnel = state.http_tunnel_for_host("foo.a.com").await.unwrap();
+
+        assert!(state.open_data_connection(&tunnel).await.is_err());
+        assert_eq!(state.inner.lock().await.pending_data.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn release_client_removes_its_pending_data() {
+        let state = state();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        state
+            .register_control(
+                "client-1".into(),
+                "identity-1".into(),
+                ServiceRequest::Http {
+                    local: "127.0.0.1:3000".into(),
+                    subdomain: Some("foo".into()),
+                },
+                tx,
+            )
+            .await
+            .unwrap();
+        let tunnel = state.http_tunnel_for_host("foo.a.com").await.unwrap();
+        let _pending = state.open_data_connection(&tunnel).await.unwrap();
+
+        state.release_client("client-1").await;
+
+        assert_eq!(state.inner.lock().await.pending_data.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn data_connection_timeout_removes_pending_data() {
+        let state = state();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        state
+            .register_control(
+                "client-1".into(),
+                "identity-1".into(),
+                ServiceRequest::Http {
+                    local: "127.0.0.1:3000".into(),
+                    subdomain: Some("foo".into()),
+                },
+                tx,
+            )
+            .await
+            .unwrap();
+        let tunnel = state.http_tunnel_for_host("foo.a.com").await.unwrap();
+
+        assert!(state
+            .await_data_connection(&tunnel, Duration::from_millis(1))
+            .await
+            .is_err());
+        assert_eq!(state.inner.lock().await.pending_data.len(), 0);
+    }
+
+    #[test]
+    fn ignores_host_lines_in_request_body() {
+        assert_eq!(
+            http_host(b"POST / HTTP/1.0\r\nContent-Length: 18\r\n\r\nHost: foo.a.com\r\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_host_headers() {
+        assert_eq!(
+            http_host(b"GET / HTTP/1.1\r\nHost: foo.a.com\r\nHost: bar.a.com\r\n\r\n"),
+            None
+        );
     }
 
     #[test]
@@ -430,12 +635,58 @@ mod tests {
     fn recoverable_failures_are_warn() {
         assert_eq!(recoverable_failure_log_level(), tracing::Level::WARN);
     }
+
+    #[test]
+    fn parses_client_identity_config() {
+        let auth = AuthConfig::from_toml(
+            r#"
+[[clients]]
+id = "kai-laptop"
+token = "secret-1"
+
+[[clients]]
+id = "remote-relay"
+token = "secret-2"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(auth.client_id_for_token("secret-1"), Some("kai-laptop"));
+        assert_eq!(auth.client_id_for_token("secret-2"), Some("remote-relay"));
+        assert_eq!(auth.client_id_for_token("missing"), None);
+    }
+
+    #[test]
+    fn rejects_empty_client_identity_config() {
+        let error = AuthConfig::from_toml("clients = []").unwrap_err();
+
+        assert!(error.to_string().contains("at least one client"));
+    }
+
+    #[test]
+    fn rejects_duplicate_client_identity_ids() {
+        let error = AuthConfig::from_toml(
+            r#"
+[[clients]]
+id = "client-one"
+token = "secret-1"
+
+[[clients]]
+id = "client-one"
+token = "secret-2"
+"#,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("client ids must be unique"));
+    }
 }
 
 #[derive(Debug)]
 pub struct ServerConfig {
     pub domain: String,
-    pub token: String,
+    pub token: Option<String>,
+    pub config: Option<String>,
     pub control_listen: SocketAddr,
     pub http_listen: SocketAddr,
     pub tcp_port_range: String,
@@ -445,18 +696,23 @@ pub struct ServerConfig {
 
 pub async fn run(config: ServerConfig) -> anyhow::Result<()> {
     validate_http_public_scheme(&config.http_public_scheme)?;
+    let auth = match (config.token, config.config) {
+        (Some(token), None) => AuthConfig::legacy_token(token)?,
+        (None, Some(path)) => AuthConfig::from_file(&path)?,
+        (Some(_), Some(_)) => anyhow::bail!("--token and --config cannot be used together"),
+        (None, None) => anyhow::bail!("one of --token or --config is required"),
+    };
     let ports = PortAllocator::parse_range(&config.tcp_port_range)?;
     let domain = config.domain.clone();
     let state = ServerState::new(
         config.domain,
-        config.token.clone(),
         ports,
         config.http_public_scheme,
         config.http_public_port,
     );
     let app_state = AppState {
         state: state.clone(),
-        token: config.token,
+        auth,
     };
 
     let control_listener = TcpListener::bind(config.control_listen).await?;
@@ -484,7 +740,7 @@ pub async fn run(config: ServerConfig) -> anyhow::Result<()> {
 #[derive(Clone)]
 struct AppState {
     state: ServerState,
-    token: String,
+    auth: AuthConfig,
 }
 
 async fn control_ws(State(app): State<AppState>, ws: WebSocketUpgrade) -> axum::response::Response {
@@ -504,46 +760,69 @@ async fn handle_control_socket(app: AppState, mut socket: WebSocket) {
 
     match hello {
         ClientHello::Control { token, service } => {
-            if token != app.token {
+            let Some(client_identity_id) = app.auth.client_id_for_token(&token).map(str::to_owned)
+            else {
                 log_server_warn("control authentication failed");
                 let _ =
                     send_error(socket, ServerErrorCode::AuthFailed, "authentication failed").await;
                 return;
-            }
-            log_server_info("control authentication succeeded");
-            handle_registered_control(app.state, socket, service).await;
+            };
+            log_server_info(&format!(
+                "control authentication succeeded for client identity {client_identity_id}"
+            ));
+            handle_registered_control(app.state, socket, client_identity_id, service).await;
         }
         ClientHello::Data {
             token,
             connection_id,
         } => {
-            if token != app.token {
+            let Some(client_identity_id) = app.auth.client_id_for_token(&token).map(str::to_owned)
+            else {
                 log_server_warn(&format!("data authentication failed: {connection_id}"));
                 let _ =
                     send_error(socket, ServerErrorCode::AuthFailed, "authentication failed").await;
                 return;
-            }
-            if app
+            };
+            match app
                 .state
-                .attach_data_connection(&connection_id, socket)
+                .attach_data_connection(&connection_id, &client_identity_id, socket)
                 .await
             {
-                log_server_debug(&format!("data websocket attached: {connection_id}"));
-            } else {
-                log_server_debug(&format!(
-                    "data websocket has no pending connection: {connection_id}"
-                ));
+                Ok(()) => {
+                    log_server_debug(&format!("data websocket attached: {connection_id}"));
+                }
+                Err(socket) => {
+                    log_server_debug(&format!(
+                        "data websocket has no pending connection: {connection_id}"
+                    ));
+                    let _ = send_error(
+                        socket,
+                        ServerErrorCode::InvalidRequest,
+                        "unknown connection id",
+                    )
+                    .await;
+                }
             }
         }
     }
 }
 
-async fn handle_registered_control(state: ServerState, socket: WebSocket, service: ServiceRequest) {
+async fn handle_registered_control(
+    state: ServerState,
+    socket: WebSocket,
+    client_identity_id: String,
+    service: ServiceRequest,
+) {
     let client_id = Uuid::new_v4().to_string();
     let (control_tx, mut control_rx) = mpsc::unbounded_channel();
     let is_tcp = matches!(service, ServiceRequest::Tcp { .. });
     let registered = match state
-        .register_control(client_id.clone(), service, control_tx)
+        .register_control(
+            client_id.clone(),
+            client_identity_id.clone(),
+            service,
+            control_tx,
+        )
         .await
     {
         Ok(registered) => registered,
@@ -553,7 +832,9 @@ async fn handle_registered_control(state: ServerState, socket: WebSocket, servic
                 ServerStateError::PortUnavailable(_) => ServerErrorCode::PortUnavailable,
                 ServerStateError::PortNotAllowed(_) => ServerErrorCode::PortNotAllowed,
                 ServerStateError::PortRangeExhausted => ServerErrorCode::PortRangeExhausted,
-                ServerStateError::InvalidPortRange => ServerErrorCode::InvalidRequest,
+                ServerStateError::InvalidPortRange | ServerStateError::InvalidSubdomain(_) => {
+                    ServerErrorCode::InvalidRequest
+                }
             };
             log_server_warn(&format!("registration failed: {error}"));
             let _ = send_error(socket, code, &error.to_string()).await;
@@ -593,7 +874,7 @@ async fn handle_registered_control(state: ServerState, socket: WebSocket, servic
         remote_port: registered.remote_port,
     };
     log_server_info(&format!(
-        "registered tunnel for client {client_id}: {}",
+        "registered tunnel for client identity {client_identity_id}: {}",
         message_public(&message)
     ));
     if sender
@@ -687,13 +968,39 @@ async fn handle_tcp_stream(state: ServerState, port: u16, stream: TcpStream) -> 
         "tcp connection accepted: port {port} -> {}",
         tunnel.local
     ));
-    let rx = state.open_data_connection(&tunnel).await?;
-    let socket = timeout(Duration::from_secs(3), rx).await??;
+    let socket = state
+        .await_data_connection(&tunnel, Duration::from_secs(3))
+        .await?;
     proxy_tcp_with_websocket(stream, socket, None).await
 }
 
 async fn handle_http_stream(state: ServerState, mut stream: TcpStream) -> anyhow::Result<()> {
-    let initial = read_http_headers(&mut stream).await?;
+    let initial = match timeout(Duration::from_secs(5), read_http_headers(&mut stream)).await {
+        Ok(Ok(initial)) => initial,
+        Ok(Err(HttpHeaderError::TooLarge)) => {
+            stream
+                .write_all(
+                    b"HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await?;
+            return Ok(());
+        }
+        Ok(Err(HttpHeaderError::Incomplete)) => {
+            stream
+                .write_all(
+                    b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await?;
+            return Ok(());
+        }
+        Ok(Err(HttpHeaderError::Io(error))) => return Err(error.into()),
+        Err(_) => {
+            stream
+                .write_all(b"HTTP/1.1 408 Request Timeout\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .await?;
+            return Ok(());
+        }
+    };
     let Some(host) = http_host(&initial) else {
         log_server_debug("http request rejected without Host header");
         stream
@@ -713,34 +1020,55 @@ async fn handle_http_stream(state: ServerState, mut stream: TcpStream) -> anyhow
         "http request accepted: host {host} -> {}",
         tunnel.local
     ));
-    let rx = state.open_data_connection(&tunnel).await?;
-    let socket = timeout(Duration::from_secs(3), rx).await??;
+    let socket = state
+        .await_data_connection(&tunnel, Duration::from_secs(3))
+        .await?;
     proxy_tcp_with_websocket(stream, socket, Some(initial)).await
 }
 
-async fn read_http_headers(stream: &mut TcpStream) -> anyhow::Result<Vec<u8>> {
+#[derive(Debug, Error)]
+enum HttpHeaderError {
+    #[error("HTTP request headers exceed 64 KiB")]
+    TooLarge,
+    #[error("incomplete HTTP request headers")]
+    Incomplete,
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+}
+
+async fn read_http_headers(stream: &mut TcpStream) -> Result<Vec<u8>, HttpHeaderError> {
     let mut buffer = Vec::new();
     let mut chunk = [0; 1024];
     loop {
         let n = stream.read(&mut chunk).await?;
         if n == 0 {
-            break;
+            return Err(HttpHeaderError::Incomplete);
         }
         buffer.extend_from_slice(&chunk[..n]);
-        if buffer.windows(4).any(|window| window == b"\r\n\r\n") || buffer.len() > 64 * 1024 {
-            break;
+        if let Some(header_end) = buffer.windows(4).position(|window| window == b"\r\n\r\n") {
+            return if header_end + 4 <= 64 * 1024 {
+                Ok(buffer)
+            } else {
+                Err(HttpHeaderError::TooLarge)
+            };
+        }
+        if buffer.len() > 64 * 1024 {
+            return Err(HttpHeaderError::TooLarge);
         }
     }
-    Ok(buffer)
 }
 
 fn http_host(initial: &[u8]) -> Option<String> {
-    let request = std::str::from_utf8(initial).ok()?;
-    request.lines().find_map(|line| {
+    let header_end = initial
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")?;
+    let request = std::str::from_utf8(&initial[..header_end]).ok()?;
+    let mut hosts = request.split("\r\n").skip(1).filter_map(|line| {
         let (name, value) = line.split_once(':')?;
-        name.eq_ignore_ascii_case("host")
-            .then(|| value.trim().to_string())
-    })
+        name.eq_ignore_ascii_case("host").then(|| value.trim())
+    });
+    let host = hosts.next()?.to_string();
+    (!host.is_empty() && hosts.next().is_none()).then_some(host)
 }
 
 async fn proxy_tcp_with_websocket(

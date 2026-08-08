@@ -1,6 +1,11 @@
 pub fn subdomain_for_host(host: &str, domain: &str) -> Option<String> {
-    let host_without_port = host.split(':').next().unwrap_or(host).trim_end_matches('.');
-    let domain = domain.trim_end_matches('.');
+    let host_without_port = match host.split_once(':') {
+        Some((host, port)) if !host.contains(':') && port.parse::<u16>().is_ok() => host,
+        Some(_) => return None,
+        None => host,
+    };
+    let host_without_port = host_without_port.trim_end_matches('.').to_ascii_lowercase();
+    let domain = domain.trim_end_matches('.').to_ascii_lowercase();
     let suffix = format!(".{domain}");
 
     host_without_port
@@ -39,5 +44,16 @@ mod tests {
     #[test]
     fn rejects_nested_subdomain() {
         assert_eq!(subdomain_for_host("bar.foo.a.com", "a.com"), None);
+    }
+
+    #[test]
+    fn host_matching_is_case_insensitive() {
+        assert_eq!(subdomain_for_host("Foo.A.COM", "a.com"), Some("foo".into()));
+    }
+
+    #[test]
+    fn rejects_invalid_host_port() {
+        assert_eq!(subdomain_for_host("foo.a.com:not-a-port", "a.com"), None);
+        assert_eq!(subdomain_for_host("foo.a.com:80:garbage", "a.com"), None);
     }
 }

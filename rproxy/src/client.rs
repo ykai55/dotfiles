@@ -7,6 +7,7 @@ use tokio::net::TcpStream;
 use tokio::time::{sleep, Duration};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
+use url::Url;
 
 #[derive(Debug)]
 pub struct ClientConfig {
@@ -29,7 +30,7 @@ pub enum ClientServiceConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ClientError {
-    #[error("--server must start with ws:// or wss://")]
+    #[error("--server must be a ws:// or wss:// base URL without a path, query, fragment, or credentials")]
     InvalidServerUrl,
     #[error("--local must be a host:port address, got {0:?}; try 127.0.0.1:{0}")]
     InvalidLocalAddress(String),
@@ -44,11 +45,20 @@ enum ControlConnectionError {
 }
 
 pub fn control_url(server: &str) -> Result<String, ClientError> {
-    if !server.starts_with("ws://") && !server.starts_with("wss://") {
+    let mut url = Url::parse(server).map_err(|_| ClientError::InvalidServerUrl)?;
+    if !matches!(url.scheme(), "ws" | "wss")
+        || url.host().is_none()
+        || url.path() != "/"
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
         return Err(ClientError::InvalidServerUrl);
     }
 
-    Ok(format!("{}/_rproxy", server.trim_end_matches('/')))
+    url.set_path("/_rproxy");
+    Ok(url.into())
 }
 
 pub fn validate_local_addr(local: &str) -> Result<(), ClientError> {
@@ -289,6 +299,31 @@ mod tests {
         assert_eq!(
             control_url("a.com").unwrap_err(),
             ClientError::InvalidServerUrl
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_or_ambiguous_server_urls() {
+        for server in [
+            "ws://",
+            "ws://a.com/base",
+            "ws://a.com?query=value",
+            "ws://a.com/#fragment",
+            "ws://user:password@a.com",
+        ] {
+            assert_eq!(
+                control_url(server).unwrap_err(),
+                ClientError::InvalidServerUrl,
+                "accepted invalid server URL {server:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn maps_ipv6_server_to_control_url() {
+        assert_eq!(
+            control_url("ws://[::1]:7000").unwrap(),
+            "ws://[::1]:7000/_rproxy"
         );
     }
 

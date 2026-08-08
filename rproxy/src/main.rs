@@ -21,8 +21,21 @@ enum Command {
 pub struct ServerArgs {
     #[arg(short = 'd', long)]
     pub domain: String,
-    #[arg(short = 't', long)]
-    pub token: String,
+    #[arg(
+        short = 't',
+        long,
+        conflicts_with = "config",
+        required_unless_present = "config",
+        help = "Legacy single client token"
+    )]
+    pub token: Option<String>,
+    #[arg(
+        long,
+        conflicts_with = "token",
+        required_unless_present = "token",
+        help = "TOML file with [[clients]] id and token entries"
+    )]
+    pub config: Option<String>,
     #[arg(short = 'c', long, default_value = "127.0.0.1:7000")]
     pub control_listen: SocketAddr,
     #[arg(short = 'H', long, default_value = "0.0.0.0:8080")]
@@ -97,8 +110,20 @@ Purpose:
 
 Core commands:
   rproxy server --domain <domain> --token <token> --control-listen 127.0.0.1:7000 --http-listen 0.0.0.0:8080
+  rproxy server --domain <domain> --config clients.toml --control-listen 127.0.0.1:7000 --http-listen 0.0.0.0:8080
   rproxy client --server wss://rp.example.com --token <token> http --local 127.0.0.1:8000 --subdomain <name>
   rproxy client --server wss://rp.example.com --token <token> tcp --local 127.0.0.1:22 --remote-port <port>
+
+Server auth config:
+  Use --token for one legacy client token, or --config for multiple client identities. Do not pass both.
+  clients.toml format:
+    [[clients]]
+    id = "client-one"
+    token = "secret-one"
+
+    [[clients]]
+    id = "client-two"
+    token = "secret-two"
 
 Important rules:
   --server must start with ws:// or wss://; the client appends /_rproxy automatically.
@@ -142,6 +167,7 @@ fn server_config(args: ServerArgs) -> rproxy::server::ServerConfig {
     rproxy::server::ServerConfig {
         domain: args.domain,
         token: args.token,
+        config: args.config,
         control_listen: args.control_listen,
         http_listen: args.http_listen,
         tcp_port_range: args.tcp_port_range,
@@ -251,12 +277,55 @@ mod tests {
             panic!("expected server command");
         };
         assert_eq!(args.domain, "a.com");
-        assert_eq!(args.token, "secret");
+        assert_eq!(args.token.as_deref(), Some("secret"));
         assert_eq!(args.control_listen.to_string(), "127.0.0.1:7000");
         assert_eq!(args.http_listen.to_string(), "127.0.0.1:8080");
         assert_eq!(args.tcp_port_range, "20000-20010");
+        assert_eq!(args.config, None);
         assert_eq!(args.http_public_scheme, "http");
         assert_eq!(args.http_public_port, None);
+    }
+
+    #[test]
+    fn parses_server_config_file_flag() {
+        let cli = Cli::parse_from([
+            "rproxy",
+            "server",
+            "--domain",
+            "a.com",
+            "--config",
+            "clients.toml",
+        ]);
+
+        let Some(Command::Server(args)) = cli.command else {
+            panic!("expected server command");
+        };
+        assert_eq!(args.config.as_deref(), Some("clients.toml"));
+        assert_eq!(args.token, None);
+    }
+
+    #[test]
+    fn rejects_server_token_and_config_together() {
+        let error = Cli::try_parse_from([
+            "rproxy",
+            "server",
+            "--domain",
+            "a.com",
+            "--token",
+            "secret",
+            "--config",
+            "clients.toml",
+        ])
+        .unwrap_err();
+
+        assert!(error.to_string().contains("cannot be used with"));
+    }
+
+    #[test]
+    fn rejects_server_without_token_or_config() {
+        let error = Cli::try_parse_from(["rproxy", "server", "--domain", "a.com"]).unwrap_err();
+
+        assert!(error.to_string().contains("required"));
     }
 
     #[test]
@@ -298,6 +367,7 @@ mod tests {
 
         assert!(help.contains("rproxy --help-ai"));
         assert!(help.contains("rproxy server --domain <domain> --token <token>"));
+        assert!(help.contains("rproxy server --domain <domain> --config clients.toml"));
         assert!(help.contains(
             "rproxy client --server wss://rp.example.com --token <token> http --local 127.0.0.1:8000"
         ));

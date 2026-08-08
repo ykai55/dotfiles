@@ -14,6 +14,8 @@ pub enum AllocError {
     PortRangeExhausted,
     #[error("subdomain {0} is unavailable")]
     SubdomainUnavailable(String),
+    #[error("invalid subdomain {0:?}")]
+    InvalidSubdomain(String),
 }
 
 #[derive(Debug, Clone)]
@@ -25,7 +27,7 @@ pub struct PortAllocator {
 
 impl PortAllocator {
     pub fn new(start: u16, end: u16) -> Result<Self, AllocError> {
-        if start > end {
+        if start == 0 || start > end {
             return Err(AllocError::InvalidPortRange);
         }
 
@@ -81,7 +83,24 @@ impl SubdomainAllocator {
 
     pub fn allocate(&mut self, requested: Option<&str>) -> Result<String, AllocError> {
         if let Some(subdomain) = requested {
-            let subdomain = subdomain.to_string();
+            let subdomain = subdomain.to_ascii_lowercase();
+            let valid = !subdomain.is_empty()
+                && subdomain.len() <= 63
+                && subdomain.is_ascii()
+                && subdomain
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                && subdomain
+                    .as_bytes()
+                    .first()
+                    .is_some_and(u8::is_ascii_alphanumeric)
+                && subdomain
+                    .as_bytes()
+                    .last()
+                    .is_some_and(u8::is_ascii_alphanumeric);
+            if !valid {
+                return Err(AllocError::InvalidSubdomain(subdomain));
+            }
             if !self.used.insert(subdomain.clone()) {
                 return Err(AllocError::SubdomainUnavailable(subdomain));
             }
@@ -160,6 +179,23 @@ mod tests {
     }
 
     #[test]
+    fn rejects_port_zero() {
+        assert!(PortAllocator::new(0, 1).is_err());
+        assert!(PortAllocator::parse_range("0-0").is_err());
+    }
+
+    #[test]
+    fn allocates_maximum_port_without_overflow() {
+        let mut allocator = PortAllocator::new(u16::MAX, u16::MAX).unwrap();
+
+        assert_eq!(allocator.allocate(None).unwrap(), u16::MAX);
+        assert_eq!(
+            allocator.allocate(None).unwrap_err(),
+            AllocError::PortRangeExhausted
+        );
+    }
+
+    #[test]
     fn allocates_requested_subdomain_when_free() {
         let mut allocator = SubdomainAllocator::new();
 
@@ -175,6 +211,33 @@ mod tests {
             allocator.allocate(Some("foo")).unwrap_err(),
             AllocError::SubdomainUnavailable("foo".into())
         );
+    }
+
+    #[test]
+    fn normalizes_requested_subdomain_to_lowercase() {
+        let mut allocator = SubdomainAllocator::new();
+
+        assert_eq!(allocator.allocate(Some("Foo")).unwrap(), "foo");
+        assert!(allocator.allocate(Some("foo")).is_err());
+    }
+
+    #[test]
+    fn rejects_invalid_requested_subdomains() {
+        for subdomain in [
+            "",
+            "-foo",
+            "foo-",
+            "foo.bar",
+            "foo bar",
+            "foo_bar",
+            "é",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ] {
+            assert!(
+                SubdomainAllocator::new().allocate(Some(subdomain)).is_err(),
+                "accepted invalid subdomain {subdomain:?}"
+            );
+        }
     }
 
     #[test]

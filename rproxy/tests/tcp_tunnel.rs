@@ -47,7 +47,8 @@ async fn proxies_tcp_bytes_through_requested_port() {
 
     let server = tokio::spawn(rproxy::server::run(ServerConfig {
         domain: "test".into(),
-        token: "secret".into(),
+        token: Some("secret".into()),
+        config: None,
         control_listen,
         http_listen,
         tcp_port_range: format!("{remote_port}-{remote_port}"),
@@ -94,7 +95,8 @@ async fn tcp_registration_fails_when_remote_port_cannot_bind() {
 
     let server = tokio::spawn(rproxy::server::run(ServerConfig {
         domain: "test".into(),
-        token: "secret".into(),
+        token: Some("secret".into()),
+        config: None,
         control_listen,
         http_listen,
         tcp_port_range: format!("{remote_port}-{remote_port}"),
@@ -136,7 +138,8 @@ async fn tcp_listener_is_released_after_client_disconnects() {
 
     let server = tokio::spawn(rproxy::server::run(ServerConfig {
         domain: "test".into(),
-        token: "secret".into(),
+        token: Some("secret".into()),
+        config: None,
         control_listen,
         http_listen,
         tcp_port_range: format!("{remote_port}-{remote_port}"),

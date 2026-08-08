@@ -29,7 +29,9 @@ pressure, and error handling easier to reason about.
 
 - HTTP tunnels routed by `Host` header, for example `foo.a.com`.
 - TCP tunnels exposed on a requested or automatically allocated remote port.
-- Static token authentication for control and data WebSocket connections.
+- Static client token authentication for control and data WebSocket connections.
+  Servers can use one legacy token or a config file with multiple client
+  identities.
 - Temporary in-memory tunnel registrations. When the client disconnects, its
   ports, subdomains, and active connections are released.
 - HTTPS compatibility through external TLS termination. `rproxy` routes the
@@ -126,6 +128,34 @@ rproxy server \
 With a client subdomain of `foo`, the advertised URL is
 `https://foo.rp.ykai.cc:444`. Routing still uses the HTTP `Host` header
 `foo.rp.ykai.cc` after TLS termination.
+
+## Client Identity Config
+
+For one client identity, start the server with `--token` as shown in the local
+examples. For multiple client identities, write a TOML config file and start the
+server with `--config` instead. `--token` and `--config` are mutually exclusive.
+
+```toml
+[[clients]]
+id = "client-one"
+token = "secret-one"
+
+[[clients]]
+id = "client-two"
+token = "secret-two"
+```
+
+```bash
+rproxy server \
+  --domain example.com \
+  --config clients.toml \
+  --control-listen 127.0.0.1:7000 \
+  --http-listen 127.0.0.1:8080
+```
+
+The server reads the config file only at startup. Restart the server after token
+changes. Client tokens are plaintext in the first config format, so protect the
+file with normal filesystem permissions and do not log or publish real tokens.
 
 ## Performance Notes
 
