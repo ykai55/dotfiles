@@ -19,8 +19,8 @@ enum Command {
 
 #[derive(Debug, Args)]
 pub struct ServerArgs {
-    #[arg(short = 'd', long)]
-    pub domain: String,
+    #[arg(short = 'd', long, required_unless_present = "config")]
+    pub domain: Option<String>,
     #[arg(
         short = 't',
         long,
@@ -31,9 +31,20 @@ pub struct ServerArgs {
     pub token: Option<String>,
     #[arg(
         long,
-        conflicts_with_all = ["token", "auth_db"],
+        conflicts_with_all = [
+            "domain",
+            "token",
+            "auth_db",
+            "management_listen",
+            "management_token_file",
+            "control_listen",
+            "http_listen",
+            "tcp_port_range",
+            "http_public_scheme",
+            "http_public_port"
+        ],
         required_unless_present_any = ["token", "auth_db"],
-        help = "TOML file with [[clients]] id and token entries"
+        help = "Complete TOML server configuration"
     )]
     pub config: Option<String>,
     #[arg(
@@ -103,7 +114,7 @@ async fn main() -> anyhow::Result<()> {
 
     init_logging();
     match cli.command {
-        Some(Command::Server(args)) => rproxy::server::run(server_config(args)).await,
+        Some(Command::Server(args)) => rproxy::server::run(server_config(args)?).await,
         Some(Command::Client(args)) => rproxy::client::run(client_config(args)).await,
         None => {
             Cli::command().print_help()?;
@@ -122,21 +133,41 @@ Purpose:
 
 Core commands:
   rproxy server --domain <domain> --token <token> --control-listen 127.0.0.1:7000 --http-listen 0.0.0.0:8080
-  rproxy server --domain <domain> --config clients.toml --control-listen 127.0.0.1:7000 --http-listen 0.0.0.0:8080
+  rproxy server --config server.toml
   rproxy server --domain <domain> --auth-db auth.db --management-token-file management-token --control-listen 127.0.0.1:7000
   rproxy client --server wss://rp.example.com --token <token> http --local 127.0.0.1:8000 --subdomain <name>
   rproxy client --server wss://rp.example.com --token <token> tcp --local 127.0.0.1:22 --remote-port <port>
 
-Server auth config:
-  Use --token for one legacy client token, or --config for multiple client identities. Do not pass both.
-  clients.toml format:
-    [[clients]]
-    id = "client-one"
-    token = "secret-one"
+Server config:
+  --config is a complete TOML server configuration and cannot be combined with other server options.
+  It contains [server], [authentication], [management], and optional [[clients]] entries.
+  Config client identities and tokens stay in memory and are never written to SQLite.
+  server.toml example:
+    [server]
+    domain = "example.com"
+    control_listen = "127.0.0.1:7000"
+    http_listen = "0.0.0.0:8080"
+    tcp_port_range = "20000-30000"
+    http_public_scheme = "https"
+
+    [authentication]
+    database = "/var/lib/rproxy/auth.db"
+
+    [management]
+    listen = "127.0.0.1:7001"
+    token_file = "/run/secrets/rproxy-management-token"
+    requests_per_minute = 120
+    body_limit_bytes = 16384
 
     [[clients]]
-    id = "client-two"
-    token = "secret-two"
+    id = "build-agent"
+    subdomains = ["preview-*", "docs"]
+
+    [[clients.tokens]]
+    name = "primary"
+    label = "production"
+    token = "configured-secret"
+  On Unix, server.toml and the management token file must have mode 0600.
 
 Managed authentication:
   Start with --auth-db auth.db --management-token-file management-token.
@@ -161,9 +192,11 @@ Management API:
 
 Management API rules:
   Use Content-Type: application/json for POST and PATCH requests.
-  Subdomain rules are exact labels such as "docs", prefix wildcards such as "preview-*", or "*".
+  Subdomain rules are exact labels such as "docs", single-label wildcards such as "preview-*", "*-dev", "api-*-dev", or "*".
   Restricted identities must request an explicit subdomain.
   Token list/get responses never contain token secrets. Rotate by creating a new token, deploying it, then deleting the old token.
+  Config-managed resources appear in reads with managed_by="config"; mutation attempts return 409 managed_by_config.
+  The API cannot add tokens under a config-managed identity.
   Successful creates return 201, reads and updates return 200, and deletes return 204.
   Errors use {"error":{"code":"...","message":"..."}} and responses include X-Request-ID.
 
@@ -205,20 +238,27 @@ fn show_log_levels() -> bool {
     true
 }
 
-fn server_config(args: ServerArgs) -> rproxy::server::ServerConfig {
-    rproxy::server::ServerConfig {
-        domain: args.domain,
+fn server_config(args: ServerArgs) -> anyhow::Result<rproxy::server::ServerConfig> {
+    if let Some(path) = args.config {
+        return Ok(rproxy::config::load(path)?.into_server_config());
+    }
+    Ok(rproxy::server::ServerConfig {
+        domain: args
+            .domain
+            .expect("clap requires --domain without --config"),
         token: args.token,
-        config: args.config,
         auth_db: args.auth_db,
+        configured_credentials: Default::default(),
         management_listen: args.management_listen,
         management_token_file: args.management_token_file,
+        management_requests_per_minute: 120,
+        management_body_limit_bytes: 16 * 1024,
         control_listen: args.control_listen,
         http_listen: args.http_listen,
         tcp_port_range: args.tcp_port_range,
         http_public_scheme: args.http_public_scheme,
         http_public_port: args.http_public_port,
-    }
+    })
 }
 
 fn client_config(args: ClientArgs) -> rproxy::client::ClientConfig {
@@ -321,7 +361,7 @@ mod tests {
         let Some(Command::Server(args)) = cli.command else {
             panic!("expected server command");
         };
-        assert_eq!(args.domain, "a.com");
+        assert_eq!(args.domain.as_deref(), Some("a.com"));
         assert_eq!(args.token.as_deref(), Some("secret"));
         assert_eq!(args.control_listen.to_string(), "127.0.0.1:7000");
         assert_eq!(args.http_listen.to_string(), "127.0.0.1:8080");
@@ -333,19 +373,12 @@ mod tests {
 
     #[test]
     fn parses_server_config_file_flag() {
-        let cli = Cli::parse_from([
-            "rproxy",
-            "server",
-            "--domain",
-            "a.com",
-            "--config",
-            "clients.toml",
-        ]);
+        let cli = Cli::parse_from(["rproxy", "server", "--config", "server.toml"]);
 
         let Some(Command::Server(args)) = cli.command else {
             panic!("expected server command");
         };
-        assert_eq!(args.config.as_deref(), Some("clients.toml"));
+        assert_eq!(args.config.as_deref(), Some("server.toml"));
         assert_eq!(args.token, None);
     }
 
@@ -384,6 +417,21 @@ mod tests {
             "secret",
             "--config",
             "clients.toml",
+        ])
+        .unwrap_err();
+
+        assert!(error.to_string().contains("cannot be used with"));
+    }
+
+    #[test]
+    fn rejects_full_config_with_server_option() {
+        let error = Cli::try_parse_from([
+            "rproxy",
+            "server",
+            "--config",
+            "server.toml",
+            "--control-listen",
+            "127.0.0.1:7100",
         ])
         .unwrap_err();
 
@@ -436,7 +484,7 @@ mod tests {
 
         assert!(help.contains("rproxy --help-ai"));
         assert!(help.contains("rproxy server --domain <domain> --token <token>"));
-        assert!(help.contains("rproxy server --domain <domain> --config clients.toml"));
+        assert!(help.contains("rproxy server --config server.toml"));
         assert!(help.contains("rproxy server --domain <domain> --auth-db auth.db"));
         assert!(help.contains("POST   /v1/client-identities"));
         assert!(help.contains("DELETE /v1/client-identities/{identity_id}/tokens/{token_id}"));

@@ -12,14 +12,11 @@ configuration, or multiple root domains.
 
 ## Deployment interface
 
-Managed mode uses a SQLite database and a dedicated listener:
+Managed mode is configured by the complete server TOML and uses a SQLite
+database plus a dedicated listener:
 
 ```text
-rproxy server \
-  --domain example.com \
-  --auth-db /var/lib/rproxy/auth.db \
-  --management-listen 127.0.0.1:7001 \
-  --management-token-file /run/secrets/rproxy-management-token
+rproxy server --config /etc/rproxy/server.toml
 ```
 
 The management listener defaults to loopback and is separate from the control
@@ -27,8 +24,10 @@ WebSocket listener. A reverse proxy may expose it over HTTPS to the trusted
 operator. The management credential is read from a permission-restricted file,
 is compared in constant time, and is never accepted as a client token.
 
-`--token`, `--config`, and `--auth-db` are mutually exclusive authentication
-sources. Legacy and static-config modes do not start the management listener.
+Configured client records stay in memory, while SQLite contains only resources
+created through this API. Reads merge both sources; configured resources are
+reported with `managed_by = "config"` and cannot be mutated through this API.
+See `server-config-design.md` for the complete file schema and ownership rules.
 
 ## Resource model
 
@@ -50,10 +49,10 @@ Identity IDs are immutable, unique, non-empty operator-facing names. Disabling
 or deleting an identity immediately closes its active control connections and
 releases its tunnels.
 
-Subdomain rules are either an exact label (`docs`), a prefix wildcard
-(`preview-*`), or the unrestricted wildcard (`*`). Matching is ASCII
-case-insensitive after the same normalization used by routing. Patterns cannot
-contain dots, multiple wildcards, or a wildcard outside the final position.
+Subdomain rules are either an exact label (`docs`), a single-label wildcard
+(`preview-*`, `*-dev`, `api-*-dev`), or the unrestricted wildcard (`*`).
+Matching is ASCII case-insensitive after the same normalization used by routing.
+Patterns cannot contain dots or multiple wildcards.
 When the policy is restricted and the client omits `subdomain`, registration is
 rejected; this avoids surprising allocation outside the declared policy.
 
@@ -150,7 +149,7 @@ return `204`. Errors use a stable JSON shape:
 {
   "error": {
     "code": "subdomain_policy_invalid",
-    "message": "rule must be an exact label, prefix wildcard, or *"
+    "message": "rule must be an exact label, single-label wildcard, or *"
   }
 }
 ```

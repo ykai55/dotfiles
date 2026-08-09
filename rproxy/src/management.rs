@@ -1,6 +1,6 @@
 use crate::auth::{
-    ClientIdentity, ClientToken, CreateIdentity, CreateToken, CreatedToken, CredentialStore,
-    StoreError, UpdateIdentity,
+    normalize_identity_id, ClientIdentity, ClientToken, ConfiguredCredentials, CreateIdentity,
+    CreateToken, CreatedToken, CredentialStore, StoreError, UpdateIdentity,
 };
 use crate::server::{AdmissionGate, ServerState};
 use axum::extract::rejection::JsonRejection;
@@ -17,12 +17,11 @@ use tokio::sync::Mutex;
 use tokio::time::{Duration, Instant};
 use uuid::Uuid;
 
-const RATE_LIMIT_REQUESTS: u32 = 120;
 const RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
 
 #[derive(Clone)]
 struct ManagementState {
-    store: CredentialStore,
+    catalog: ManagementCatalog,
     server: ServerState,
     admission_gate: AdmissionGate,
     token_digest: [u8; 32],
@@ -31,16 +30,19 @@ struct ManagementState {
 
 pub fn router(
     store: CredentialStore,
+    configured: ConfiguredCredentials,
     server: ServerState,
     admission_gate: AdmissionGate,
     token: String,
+    requests_per_minute: u32,
+    body_limit_bytes: usize,
 ) -> Router {
     let state = ManagementState {
-        store,
+        catalog: ManagementCatalog { store, configured },
         server,
         admission_gate,
         token_digest: Sha256::digest(token.as_bytes()).into(),
-        rate_limiter: RateLimiter::new(),
+        rate_limiter: RateLimiter::new(requests_per_minute),
     };
     Router::new()
         .route(
@@ -63,12 +65,125 @@ pub fn router(
         )
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
-        .layer(DefaultBodyLimit::max(16 * 1024))
+        .layer(DefaultBodyLimit::max(body_limit_bytes))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             authenticate_request,
         ))
         .with_state(state)
+}
+
+#[derive(Clone)]
+struct ManagementCatalog {
+    store: CredentialStore,
+    configured: ConfiguredCredentials,
+}
+
+impl ManagementCatalog {
+    async fn create_identity(
+        &self,
+        mut input: CreateIdentity,
+        request_id: String,
+    ) -> Result<ClientIdentity, ManagementError> {
+        input.id = normalize_identity_id(&input.id)?;
+        if self.configured.contains_identity(&input.id) {
+            return Err(ManagementError::Store(StoreError::Conflict));
+        }
+        Ok(self.store.create_identity(input, request_id).await?)
+    }
+
+    async fn list_identities(&self) -> Result<Vec<ClientIdentity>, ManagementError> {
+        let mut identities = self.configured.list_identities();
+        identities.extend(self.store.list_identities().await?);
+        identities.sort_by(|left, right| left.id.cmp(&right.id));
+        Ok(identities)
+    }
+
+    async fn get_identity(&self, identity_id: &str) -> Result<ClientIdentity, ManagementError> {
+        if let Some(identity) = self.configured.get_identity(identity_id) {
+            return Ok(identity);
+        }
+        Ok(self.store.get_identity(identity_id).await?)
+    }
+
+    async fn update_identity(
+        &self,
+        identity_id: &str,
+        input: UpdateIdentity,
+        request_id: String,
+    ) -> Result<ClientIdentity, ManagementError> {
+        self.reject_config_identity(identity_id)?;
+        Ok(self
+            .store
+            .update_identity(identity_id, input, request_id)
+            .await?)
+    }
+
+    async fn delete_identity(
+        &self,
+        identity_id: &str,
+        request_id: String,
+    ) -> Result<(), ManagementError> {
+        self.reject_config_identity(identity_id)?;
+        Ok(self.store.delete_identity(identity_id, request_id).await?)
+    }
+
+    async fn create_token(
+        &self,
+        identity_id: &str,
+        input: CreateToken,
+        request_id: String,
+    ) -> Result<CreatedToken, ManagementError> {
+        self.reject_config_identity(identity_id)?;
+        Ok(self
+            .store
+            .create_token(
+                identity_id,
+                input,
+                self.configured.token_hashes().copied().collect(),
+                request_id,
+            )
+            .await?)
+    }
+
+    async fn list_tokens(&self, identity_id: &str) -> Result<Vec<ClientToken>, ManagementError> {
+        if let Some(tokens) = self.configured.list_tokens(identity_id) {
+            return Ok(tokens);
+        }
+        Ok(self.store.list_tokens(identity_id).await?)
+    }
+
+    async fn get_token(
+        &self,
+        identity_id: &str,
+        token_id: &str,
+    ) -> Result<ClientToken, ManagementError> {
+        if let Some(token) = self.configured.get_token(identity_id, token_id) {
+            return Ok(token);
+        }
+        Ok(self.store.get_token(identity_id, token_id).await?)
+    }
+
+    async fn delete_token(
+        &self,
+        identity_id: &str,
+        token_id: &str,
+        request_id: String,
+    ) -> Result<(), ManagementError> {
+        self.reject_config_identity(identity_id)?;
+        Ok(self
+            .store
+            .delete_token(identity_id, token_id, request_id)
+            .await?)
+    }
+
+    fn reject_config_identity(&self, identity_id: &str) -> Result<(), ManagementError> {
+        if self.configured.contains_identity(identity_id) {
+            Err(ManagementError::ManagedByConfig)
+        } else {
+            Ok(())
+        }
+    }
 }
 
 async fn not_found() -> ManagementError {
@@ -114,14 +229,16 @@ struct RateLimiter {
 struct RateLimitWindow {
     started_at: Instant,
     requests: u32,
+    max_requests: u32,
 }
 
 impl RateLimiter {
-    fn new() -> Self {
+    fn new(max_requests: u32) -> Self {
         Self {
             window: Arc::new(Mutex::new(RateLimitWindow {
                 started_at: Instant::now(),
                 requests: 0,
+                max_requests,
             })),
         }
     }
@@ -132,7 +249,7 @@ impl RateLimiter {
             window.started_at = Instant::now();
             window.requests = 0;
         }
-        if window.requests >= RATE_LIMIT_REQUESTS {
+        if window.requests >= window.max_requests {
             return false;
         }
         window.requests += 1;
@@ -154,7 +271,7 @@ async fn create_identity(
 ) -> Result<(StatusCode, Json<ClientIdentity>), ManagementError> {
     let Json(input) = input.map_err(ManagementError::InvalidJson)?;
     let _admission = state.admission_gate.write().await;
-    let identity = state.store.create_identity(input, request_id.0).await?;
+    let identity = state.catalog.create_identity(input, request_id.0).await?;
     state
         .server
         .apply_identity(
@@ -169,14 +286,14 @@ async fn create_identity(
 async fn list_identities(
     State(state): State<ManagementState>,
 ) -> Result<Json<Vec<ClientIdentity>>, ManagementError> {
-    Ok(Json(state.store.list_identities().await?))
+    Ok(Json(state.catalog.list_identities().await?))
 }
 
 async fn get_identity(
     State(state): State<ManagementState>,
     Path(identity_id): Path<String>,
 ) -> Result<Json<ClientIdentity>, ManagementError> {
-    Ok(Json(state.store.get_identity(&identity_id).await?))
+    Ok(Json(state.catalog.get_identity(&identity_id).await?))
 }
 
 async fn update_identity(
@@ -188,7 +305,7 @@ async fn update_identity(
     let Json(input) = input.map_err(ManagementError::InvalidJson)?;
     let _admission = state.admission_gate.write().await;
     let identity = state
-        .store
+        .catalog
         .update_identity(&identity_id, input, request_id.0)
         .await?;
     state
@@ -209,7 +326,7 @@ async fn delete_identity(
 ) -> Result<StatusCode, ManagementError> {
     let _admission = state.admission_gate.write().await;
     state
-        .store
+        .catalog
         .delete_identity(&identity_id, request_id.0)
         .await?;
     state.server.delete_identity(&identity_id).await;
@@ -225,7 +342,7 @@ async fn create_token(
     let Json(input) = input.map_err(ManagementError::InvalidJson)?;
     let _admission = state.admission_gate.write().await;
     let token = state
-        .store
+        .catalog
         .create_token(&identity_id, input, request_id.0)
         .await?;
     Ok((StatusCode::CREATED, Json(token)))
@@ -235,14 +352,16 @@ async fn list_tokens(
     State(state): State<ManagementState>,
     Path(identity_id): Path<String>,
 ) -> Result<Json<Vec<ClientToken>>, ManagementError> {
-    Ok(Json(state.store.list_tokens(&identity_id).await?))
+    Ok(Json(state.catalog.list_tokens(&identity_id).await?))
 }
 
 async fn get_token(
     State(state): State<ManagementState>,
     Path((identity_id, token_id)): Path<(String, String)>,
 ) -> Result<Json<ClientToken>, ManagementError> {
-    Ok(Json(state.store.get_token(&identity_id, &token_id).await?))
+    Ok(Json(
+        state.catalog.get_token(&identity_id, &token_id).await?,
+    ))
 }
 
 async fn delete_token(
@@ -252,7 +371,7 @@ async fn delete_token(
 ) -> Result<StatusCode, ManagementError> {
     let _admission = state.admission_gate.write().await;
     state
-        .store
+        .catalog
         .delete_token(&identity_id, &token_id, request_id.0)
         .await?;
     state.server.revoke_token(&token_id).await;
@@ -283,6 +402,7 @@ enum ManagementError {
     RateLimited,
     RouteNotFound,
     MethodNotAllowed,
+    ManagedByConfig,
     InvalidJson(JsonRejection),
     Store(StoreError),
 }
@@ -326,6 +446,11 @@ impl IntoResponse for ManagementError {
                 StatusCode::METHOD_NOT_ALLOWED,
                 "method_not_allowed",
                 "method not allowed".to_string(),
+            ),
+            Self::ManagedByConfig => (
+                StatusCode::CONFLICT,
+                "managed_by_config",
+                "resource is managed by the server configuration".to_string(),
             ),
             Self::InvalidJson(error) => (
                 StatusCode::BAD_REQUEST,

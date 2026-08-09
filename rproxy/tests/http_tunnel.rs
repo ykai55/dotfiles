@@ -1,4 +1,5 @@
 use futures_util::{SinkExt, StreamExt};
+use rproxy::auth::{ConfiguredClient, ConfiguredCredentials, ConfiguredToken, SubdomainPolicy};
 use rproxy::client::{ClientConfig, ClientServiceConfig};
 use rproxy::protocol::{ClientHello, ServerErrorCode, ServerMessage, ServiceRequest};
 use rproxy::server::ServerConfig;
@@ -16,10 +17,47 @@ fn free_addr() -> SocketAddr {
     listener.local_addr().unwrap()
 }
 
-fn write_client_config(contents: &str) -> String {
-    let path = std::env::temp_dir().join(format!("rproxy-clients-{}.toml", Uuid::new_v4()));
-    fs::write(&path, contents).unwrap();
-    path.to_string_lossy().into_owned()
+fn configured_credentials() -> ConfiguredCredentials {
+    ConfiguredCredentials::new(vec![
+        ConfiguredClient {
+            id: "client-one".into(),
+            enabled: true,
+            subdomain_policy: SubdomainPolicy::unrestricted(),
+            tokens: vec![ConfiguredToken {
+                name: "primary".into(),
+                label: None,
+                secret: "secret-1".into(),
+                expires_at: None,
+            }],
+        },
+        ConfiguredClient {
+            id: "client-two".into(),
+            enabled: true,
+            subdomain_policy: SubdomainPolicy::unrestricted(),
+            tokens: vec![ConfiguredToken {
+                name: "primary".into(),
+                label: None,
+                secret: "secret-2".into(),
+                expires_at: None,
+            }],
+        },
+    ])
+    .unwrap()
+}
+
+fn managed_files() -> (String, String) {
+    let database = std::env::temp_dir().join(format!("rproxy-auth-{}.db", Uuid::new_v4()));
+    let token_file = std::env::temp_dir().join(format!("rproxy-token-{}", Uuid::new_v4()));
+    fs::write(&token_file, "management-secret").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&token_file, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    (
+        database.to_string_lossy().into_owned(),
+        token_file.to_string_lossy().into_owned(),
+    )
 }
 
 async fn start_echo_http() -> SocketAddr {
@@ -63,10 +101,12 @@ async fn proxies_http_request_by_host_header() {
     let server = tokio::spawn(rproxy::server::run(ServerConfig {
         domain: "test".into(),
         token: Some("secret".into()),
-        config: None,
         auth_db: None,
+        configured_credentials: Default::default(),
         management_listen: free_addr(),
         management_token_file: None,
+        management_requests_per_minute: 120,
+        management_body_limit_bytes: 16 * 1024,
         control_listen,
         http_listen,
         tcp_port_range: "20000-20010".into(),
@@ -125,10 +165,12 @@ async fn registers_http_tunnel_with_configured_public_url() {
     let server = tokio::spawn(rproxy::server::run(ServerConfig {
         domain: "test".into(),
         token: Some("secret".into()),
-        config: None,
         auth_db: None,
+        configured_credentials: Default::default(),
         management_listen: free_addr(),
         management_token_file: None,
+        management_requests_per_minute: 120,
+        management_body_limit_bytes: 16 * 1024,
         control_listen,
         http_listen,
         tcp_port_range: "20000-20010".into(),
@@ -176,10 +218,12 @@ async fn rejects_http_headers_larger_than_64_kib() {
     let server = tokio::spawn(rproxy::server::run(ServerConfig {
         domain: "test".into(),
         token: Some("secret".into()),
-        config: None,
         auth_db: None,
+        configured_credentials: Default::default(),
         management_listen: free_addr(),
         management_token_file: None,
+        management_requests_per_minute: 120,
+        management_body_limit_bytes: 16 * 1024,
         control_listen,
         http_listen,
         tcp_port_range: "20000-20010".into(),
@@ -209,28 +253,20 @@ async fn rejects_http_headers_larger_than_64_kib() {
 }
 
 #[tokio::test]
-async fn authenticates_multiple_client_tokens_from_config_file() {
+async fn authenticates_multiple_configured_client_tokens() {
     let control_listen = free_addr();
     let http_listen = free_addr();
-    let config = write_client_config(
-        r#"
-[[clients]]
-id = "client-one"
-token = "secret-1"
-
-[[clients]]
-id = "client-two"
-token = "secret-2"
-"#,
-    );
+    let (database, token_file) = managed_files();
 
     let server = tokio::spawn(rproxy::server::run(ServerConfig {
         domain: "test".into(),
         token: None,
-        config: Some(config.clone()),
-        auth_db: None,
+        auth_db: Some(database.clone()),
+        configured_credentials: configured_credentials(),
         management_listen: free_addr(),
-        management_token_file: None,
+        management_token_file: Some(token_file.clone()),
+        management_requests_per_minute: 120,
+        management_body_limit_bytes: 16 * 1024,
         control_listen,
         http_listen,
         tcp_port_range: "20000-20010".into(),
@@ -298,7 +334,8 @@ token = "secret-2"
     };
     assert_eq!(code, rproxy::protocol::ServerErrorCode::AuthFailed);
 
-    let _ = fs::remove_file(config);
+    let _ = fs::remove_file(database);
+    let _ = fs::remove_file(token_file);
     server.abort();
 }
 
@@ -306,25 +343,17 @@ token = "secret-2"
 async fn rejects_data_connection_from_different_client_identity() {
     let control_listen = free_addr();
     let http_listen = free_addr();
-    let config = write_client_config(
-        r#"
-[[clients]]
-id = "client-one"
-token = "secret-1"
-
-[[clients]]
-id = "client-two"
-token = "secret-2"
-"#,
-    );
+    let (database, token_file) = managed_files();
 
     let server = tokio::spawn(rproxy::server::run(ServerConfig {
         domain: "test".into(),
         token: None,
-        config: Some(config.clone()),
-        auth_db: None,
+        auth_db: Some(database.clone()),
+        configured_credentials: configured_credentials(),
         management_listen: free_addr(),
-        management_token_file: None,
+        management_token_file: Some(token_file.clone()),
+        management_requests_per_minute: 120,
+        management_body_limit_bytes: 16 * 1024,
         control_listen,
         http_listen,
         tcp_port_range: "20000-20010".into(),
@@ -386,6 +415,7 @@ token = "secret-2"
     };
     assert_eq!(code, ServerErrorCode::InvalidRequest);
 
-    let _ = fs::remove_file(config);
+    let _ = fs::remove_file(database);
+    let _ = fs::remove_file(token_file);
     server.abort();
 }

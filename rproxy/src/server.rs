@@ -1,5 +1,7 @@
 use crate::alloc::{AllocError, PortAllocator, SubdomainAllocator};
-use crate::auth::{AuthenticatedCredential, CredentialStore, SubdomainPolicy};
+use crate::auth::{
+    AuthenticatedCredential, ConfiguredCredentials, CredentialStore, SubdomainPolicy,
+};
 use crate::protocol::{
     ClientHello, DataFrame, ServerErrorCode, ServerMessage, ServiceRequest, INITIAL_CREDIT,
     MAX_DATA_SIZE,
@@ -13,9 +15,9 @@ use axum::routing::get;
 use axum::Router;
 use futures_util::stream::SplitStream;
 use futures_util::{SinkExt, StreamExt};
-use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
-use std::fs;
+use std::fs::File;
+use std::io::Read;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use thiserror::Error;
@@ -129,68 +131,6 @@ fn validate_http_public_scheme(scheme: &str) -> anyhow::Result<()> {
     match scheme {
         "http" | "https" => Ok(()),
         _ => anyhow::bail!("--http-public-scheme must be http or https"),
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct AuthConfig {
-    clients_by_token: HashMap<String, String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct AuthConfigFile {
-    clients: Vec<ClientIdentityConfig>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ClientIdentityConfig {
-    id: String,
-    token: String,
-}
-
-impl AuthConfig {
-    pub fn legacy_token(token: String) -> anyhow::Result<Self> {
-        Self::from_clients(vec![ClientIdentityConfig {
-            id: "legacy".into(),
-            token,
-        }])
-    }
-
-    pub fn from_file(path: &str) -> anyhow::Result<Self> {
-        Self::from_toml(&fs::read_to_string(path)?)
-    }
-
-    pub fn from_toml(text: &str) -> anyhow::Result<Self> {
-        Self::from_clients(toml::from_str::<AuthConfigFile>(text)?.clients)
-    }
-
-    pub fn authenticate(&self, token: &str) -> Option<AuthenticatedCredential> {
-        let identity_id = self.clients_by_token.get(token)?.clone();
-        Some(AuthenticatedCredential {
-            token_id: identity_id.clone(),
-            identity_id,
-            subdomain_policy: SubdomainPolicy::unrestricted(),
-        })
-    }
-
-    fn from_clients(clients: Vec<ClientIdentityConfig>) -> anyhow::Result<Self> {
-        if clients.is_empty() {
-            anyhow::bail!("auth config must contain at least one client");
-        }
-        let mut clients_by_token = HashMap::new();
-        let mut client_ids = HashSet::new();
-        for client in clients {
-            if client.id.trim().is_empty() || client.token.is_empty() {
-                anyhow::bail!("client id and token must not be empty");
-            }
-            if !client_ids.insert(client.id.clone()) {
-                anyhow::bail!("client ids must be unique");
-            }
-            if clients_by_token.insert(client.token, client.id).is_some() {
-                anyhow::bail!("client tokens must be unique");
-            }
-        }
-        Ok(Self { clients_by_token })
     }
 }
 
@@ -498,21 +438,30 @@ pub type AdmissionGate = Arc<RwLock<()>>;
 
 #[derive(Clone)]
 enum AuthBackend {
-    Static(AuthConfig),
-    Managed(CredentialStore),
+    Static(ConfiguredCredentials),
+    Managed {
+        configured: ConfiguredCredentials,
+        store: CredentialStore,
+    },
 }
 
 impl AuthBackend {
     async fn authenticate(&self, token: &str) -> Option<AuthenticatedCredential> {
         match self {
             Self::Static(config) => config.authenticate(token),
-            Self::Managed(store) => match store.authenticate(token).await {
-                Ok(credential) => credential,
-                Err(error) => {
-                    tracing::error!("managed authentication backend failed: {error}");
-                    None
+            Self::Managed { configured, store } => {
+                if let Some(credential) = configured.authenticate(token) {
+                    Some(credential)
+                } else {
+                    match store.authenticate(token).await {
+                        Ok(credential) => credential,
+                        Err(error) => {
+                            tracing::error!("managed authentication backend failed: {error}");
+                            None
+                        }
+                    }
                 }
-            },
+            }
         }
     }
 }
@@ -521,10 +470,12 @@ impl AuthBackend {
 pub struct ServerConfig {
     pub domain: String,
     pub token: Option<String>,
-    pub config: Option<String>,
     pub auth_db: Option<String>,
+    pub configured_credentials: ConfiguredCredentials,
     pub management_listen: SocketAddr,
     pub management_token_file: Option<String>,
+    pub management_requests_per_minute: u32,
+    pub management_body_limit_bytes: usize,
     pub control_listen: SocketAddr,
     pub http_listen: SocketAddr,
     pub tcp_port_range: String,
@@ -534,14 +485,25 @@ pub struct ServerConfig {
 
 pub async fn run(config: ServerConfig) -> anyhow::Result<()> {
     validate_http_public_scheme(&config.http_public_scheme)?;
-    let (auth, managed) = match (config.token, config.config, config.auth_db) {
-        (Some(token), None, None) => (AuthBackend::Static(AuthConfig::legacy_token(token)?), None),
-        (None, Some(path), None) => (AuthBackend::Static(AuthConfig::from_file(&path)?), None),
-        (None, None, Some(path)) => {
+    let (auth, managed) = match (config.token, config.auth_db) {
+        (Some(token), None) => (
+            AuthBackend::Static(ConfiguredCredentials::legacy_token(token)?),
+            None,
+        ),
+        (None, Some(path)) => {
             let store = CredentialStore::open(path)?;
-            (AuthBackend::Managed(store.clone()), Some(store))
+            store
+                .ensure_no_conflicts(&config.configured_credentials)
+                .await?;
+            (
+                AuthBackend::Managed {
+                    configured: config.configured_credentials.clone(),
+                    store: store.clone(),
+                },
+                Some((store, config.configured_credentials.clone())),
+            )
         }
-        _ => anyhow::bail!("exactly one of --token, --config, or --auth-db is required"),
+        _ => anyhow::bail!("exactly one authentication mode is required"),
     };
     let state = ServerState::new(
         config.domain.clone(),
@@ -549,6 +511,26 @@ pub async fn run(config: ServerConfig) -> anyhow::Result<()> {
         config.http_public_scheme,
         config.http_public_port,
     );
+    let admission_gate = Arc::new(RwLock::new(()));
+    let management = if let Some((store, configured)) = managed {
+        let token_file = config
+            .management_token_file
+            .ok_or_else(|| anyhow::anyhow!("--management-token-file is required with --auth-db"))?;
+        let management_token = read_management_token(&token_file)?;
+        let listener = TcpListener::bind(config.management_listen).await?;
+        let app = crate::management::router(
+            store,
+            configured,
+            state.clone(),
+            admission_gate.clone(),
+            management_token,
+            config.management_requests_per_minute,
+            config.management_body_limit_bytes,
+        );
+        Some((listener, app))
+    } else {
+        None
+    };
     let control_listener = TcpListener::bind(config.control_listen).await?;
     let http_listener = TcpListener::bind(config.http_listen).await?;
     log_server_info(&format!(
@@ -556,7 +538,6 @@ pub async fn run(config: ServerConfig) -> anyhow::Result<()> {
         config.control_listen, config.domain
     ));
     log_server_info(&format!("http listening on {}", config.http_listen));
-    let admission_gate = Arc::new(RwLock::new(()));
     let app = Router::new()
         .route("/_rproxy", get(control_ws))
         .with_state(AppState {
@@ -573,17 +554,11 @@ pub async fn run(config: ServerConfig) -> anyhow::Result<()> {
             .map_err(anyhow::Error::from)
     });
     tasks.spawn(run_http_listener(state.clone(), http_listener));
-    if let Some(store) = managed {
-        let token_file = config
-            .management_token_file
-            .ok_or_else(|| anyhow::anyhow!("--management-token-file is required with --auth-db"))?;
-        let management_token = read_management_token(&token_file)?;
-        let listener = TcpListener::bind(config.management_listen).await?;
+    if let Some((listener, app)) = management {
         log_server_info(&format!(
             "management listening on {}",
             config.management_listen
         ));
-        let app = crate::management::router(store, state.clone(), admission_gate, management_token);
         tasks.spawn(async move {
             axum::serve(listener, app)
                 .await
@@ -596,16 +571,19 @@ pub async fn run(config: ServerConfig) -> anyhow::Result<()> {
 }
 
 fn read_management_token(path: &str) -> anyhow::Result<String> {
+    let mut file = File::open(path)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
 
-        let metadata = fs::metadata(path)?;
-        if !metadata.is_file() || metadata.permissions().mode() & 0o077 != 0 {
+        let metadata = file.metadata()?;
+        if !metadata.is_file() || metadata.permissions().mode() & 0o777 != 0o600 {
             anyhow::bail!("management token file must be a regular file with mode 0600");
         }
     }
-    let token = fs::read_to_string(path)?.trim().to_string();
+    let mut token = String::new();
+    file.read_to_string(&mut token)?;
+    let token = token.trim().to_string();
     if token.is_empty() {
         anyhow::bail!("management token must not be empty");
     }
@@ -1117,39 +1095,6 @@ async fn run_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parses_client_identity_config() {
-        let auth = AuthConfig::from_toml(
-            r#"
-[[clients]]
-id = "one"
-token = "secret-1"
-[[clients]]
-id = "two"
-token = "secret-2"
-"#,
-        )
-        .unwrap();
-        assert_eq!(auth.authenticate("secret-1").unwrap().identity_id, "one");
-        assert_eq!(auth.authenticate("secret-2").unwrap().identity_id, "two");
-    }
-
-    #[test]
-    fn rejects_duplicate_client_identity_ids() {
-        let error = AuthConfig::from_toml(
-            r#"
-[[clients]]
-id = "one"
-token = "secret-1"
-[[clients]]
-id = "one"
-token = "secret-2"
-"#,
-        )
-        .unwrap_err();
-        assert!(error.to_string().contains("client ids must be unique"));
-    }
 
     #[test]
     fn ignores_host_lines_in_request_body() {

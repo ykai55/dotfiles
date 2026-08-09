@@ -19,7 +19,8 @@ _Avoid_: global token, password
 
 **Subdomain Policy**:
 The set of single-label subdomain rules a client identity is allowed to request
-under the server's domain. A restricted policy requires an explicit subdomain.
+under the server's domain. Rules may be exact labels or contain one `*` wildcard
+inside a single label. A restricted policy requires an explicit subdomain.
 _Avoid_: domain, route
 
 **Management Credential**:

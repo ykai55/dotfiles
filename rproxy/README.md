@@ -148,52 +148,52 @@ With a client subdomain of `foo`, the advertised URL is
 `https://foo.rp.ykai.cc:444`. Routing still uses the HTTP `Host` header
 `foo.rp.ykai.cc` after TLS termination.
 
-## Client Identity Config
+## Server Configuration
 
-For one client identity, start the server with `--token` as shown in the local
-examples. For multiple client identities, write a TOML config file and start the
-server with `--config` instead. `--token` and `--config` are mutually exclusive.
+`--config` loads the complete server configuration and cannot be combined with
+other server options. The file must have mode `0600` on Unix because configured
+client tokens are plaintext.
 
 ```toml
-[[clients]]
-id = "client-one"
-token = "secret-one"
+[server]
+domain = "example.com"
+control_listen = "127.0.0.1:7000"
+http_listen = "0.0.0.0:8080"
+tcp_port_range = "20000-30000"
+http_public_scheme = "https"
+
+[authentication]
+database = "/var/lib/rproxy/auth.db"
+
+[management]
+listen = "127.0.0.1:7001"
+token_file = "/run/secrets/rproxy-management-token"
+requests_per_minute = 120
+body_limit_bytes = 16384
 
 [[clients]]
-id = "client-two"
-token = "secret-two"
+id = "build-agent"
+subdomains = ["preview-*", "docs"]
+
+[[clients.tokens]]
+name = "primary"
+label = "production"
+token = "configured-secret"
 ```
 
 ```bash
-rproxy server \
-  --domain example.com \
-  --config clients.toml \
-  --control-listen 127.0.0.1:7000 \
-  --http-listen 127.0.0.1:8080
+chmod 600 server.toml /run/secrets/rproxy-management-token
+rproxy server --config server.toml
 ```
 
-The server reads the config file only at startup. Restart the server after token
-changes. Client tokens are plaintext in the first config format, so protect the
-file with normal filesystem permissions and do not log or publish real tokens.
+Configured identities and tokens remain in memory and are never written to
+SQLite. The management API can read them but returns `409 managed_by_config` for
+mutations. SQLite contains only identities and tokens created by the management
+API. Startup fails if config and SQLite contain the same Identity ID or token
+secret.
 
-## Managed Authentication
-
-Use managed mode when a trusted operator needs to add, rotate, revoke, or list
-client tokens without restarting the server. Managed mode stores identities,
-token hashes, and subdomain policies in SQLite and starts a separate management
-listener on loopback.
-
-```bash
-rproxy server \
-  --domain example.com \
-  --auth-db /var/lib/rproxy/auth.db \
-  --management-token-file /run/secrets/rproxy-management-token \
-  --management-listen 127.0.0.1:7001
-```
-
-`--token`, `--config`, and `--auth-db` are mutually exclusive. The management
-token file must contain a non-empty bearer token. Keep the listener private or
-put it behind an HTTPS reverse proxy reachable only by the trusted operator.
+Keep the management listener private or put it behind an HTTPS reverse proxy
+reachable only by the trusted operator.
 
 Create an identity and token:
 
@@ -216,7 +216,9 @@ disabling or deleting an identity, or restricting its subdomain policy closes
 affected active tunnels immediately.
 
 Management endpoints are documented in
-[`docs/management-api-design.md`](docs/management-api-design.md).
+[`docs/management-api-design.md`](docs/management-api-design.md). The complete
+configuration schema and ownership rules are documented in
+[`docs/server-config-design.md`](docs/server-config-design.md).
 
 ## Input Boundaries
 
@@ -224,6 +226,9 @@ Management endpoints are documented in
   DNS label of at most 63 characters. Letters, digits, and internal hyphens are
   accepted; empty labels, dots, spaces, underscores, and leading or trailing
   hyphens are rejected.
+- Subdomain policy rules may be exact labels, `*`, or one wildcard inside a
+  single label, for example `preview-*`, `*-dev`, or `api-*-dev`. Multi-level
+  rules such as `*.dev` are not supported.
 - TCP port ranges cannot include port `0`. Requested ports must be inside the
   configured range; port `65535` is supported.
 - HTTP `Host` matching is case-insensitive. Missing, empty, duplicate, or

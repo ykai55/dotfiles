@@ -7,6 +7,7 @@ use rand::RngCore;
 use rusqlite::{params, Connection, ErrorCode, OptionalExtension, Transaction};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
@@ -16,7 +17,15 @@ use uuid::Uuid;
 pub struct AuthenticatedCredential {
     pub identity_id: String,
     pub token_id: String,
+    pub managed_by: ManagedBy,
     pub subdomain_policy: SubdomainPolicy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ManagedBy {
+    Config,
+    Api,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -44,20 +53,16 @@ impl SubdomainPolicy {
                 normalized.push(rule);
                 continue;
             }
-            if let Some(prefix) = rule.strip_suffix('*') {
-                if !prefix.ends_with('-') || prefix[..prefix.len() - 1].contains('*') {
+            if rule.contains('*') {
+                if rule.matches('*').count() != 1 || rule.contains('.') {
                     return Err(StoreError::Invalid(format!(
                         "invalid subdomain rule {rule:?}"
                     )));
                 }
-                normalize_subdomain_label(prefix.trim_end_matches('-'))?;
+                let sample = rule.replace('*', "x");
+                normalize_subdomain_label(&sample)?;
                 normalized.push(rule);
                 continue;
-            }
-            if rule.contains('*') {
-                return Err(StoreError::Invalid(format!(
-                    "invalid subdomain rule {rule:?}"
-                )));
             }
             normalized.push(normalize_subdomain_label(&rule)?);
         }
@@ -74,13 +79,18 @@ impl SubdomainPolicy {
             return false;
         };
         self.rules.iter().any(|rule| {
-            rule == "*"
-                || rule == &requested
-                || rule
-                    .strip_suffix('*')
-                    .is_some_and(|prefix| requested.starts_with(prefix))
+            rule == "*" || rule == &requested || wildcard_rule_matches(rule, &requested)
         })
     }
+}
+
+fn wildcard_rule_matches(rule: &str, requested: &str) -> bool {
+    let Some((prefix, suffix)) = rule.split_once('*') else {
+        return false;
+    };
+    requested.starts_with(prefix)
+        && requested.ends_with(suffix)
+        && requested.len() >= prefix.len() + suffix.len()
 }
 
 impl From<crate::alloc::AllocError> for StoreError {
@@ -94,8 +104,11 @@ pub struct ClientIdentity {
     pub id: String,
     pub enabled: bool,
     pub subdomain_policy: SubdomainPolicy,
-    pub created_at: String,
-    pub updated_at: String,
+    pub managed_by: ManagedBy,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -115,7 +128,9 @@ pub struct ClientToken {
     pub id: String,
     pub client_identity_id: String,
     pub label: Option<String>,
-    pub created_at: String,
+    pub managed_by: ManagedBy,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
     pub expires_at: Option<String>,
     pub last_used_at: Option<String>,
 }
@@ -130,6 +145,167 @@ pub struct CreateToken {
 pub struct CreatedToken {
     pub token: ClientToken,
     pub secret: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConfiguredClient {
+    pub id: String,
+    pub enabled: bool,
+    pub subdomain_policy: SubdomainPolicy,
+    pub tokens: Vec<ConfiguredToken>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConfiguredToken {
+    pub name: String,
+    pub label: Option<String>,
+    pub secret: String,
+    pub expires_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ConfiguredCredentials {
+    identities: HashMap<String, ClientIdentity>,
+    tokens: HashMap<String, Vec<ClientToken>>,
+    credentials_by_hash: HashMap<[u8; 32], ConfiguredCredential>,
+}
+
+#[derive(Debug, Clone)]
+struct ConfiguredCredential {
+    identity_id: String,
+    token_id: String,
+    subdomain_policy: SubdomainPolicy,
+    expires_at: Option<DateTime<Utc>>,
+}
+
+impl ConfiguredCredentials {
+    pub fn legacy_token(token: String) -> Result<Self, StoreError> {
+        Self::new(vec![ConfiguredClient {
+            id: "legacy".into(),
+            enabled: true,
+            subdomain_policy: SubdomainPolicy::unrestricted(),
+            tokens: vec![ConfiguredToken {
+                name: "legacy".into(),
+                label: None,
+                secret: token,
+                expires_at: None,
+            }],
+        }])
+    }
+
+    pub fn new(clients: Vec<ConfiguredClient>) -> Result<Self, StoreError> {
+        let mut result = Self::default();
+        for client in clients {
+            let id = normalize_identity_id(&client.id)?;
+            if result.identities.contains_key(&id) {
+                return Err(StoreError::Invalid(format!(
+                    "duplicate config client identity {id:?}"
+                )));
+            }
+            let policy = SubdomainPolicy::new(client.subdomain_policy.rules)?;
+            let mut token_names = HashSet::new();
+            let mut tokens = Vec::new();
+            for token in client.tokens {
+                if token.name.trim().is_empty() || !token_names.insert(token.name.clone()) {
+                    return Err(StoreError::Invalid(format!(
+                        "config token names must be non-empty and unique for identity {id:?}"
+                    )));
+                }
+                if token.secret.is_empty() {
+                    return Err(StoreError::Invalid("config token must not be empty".into()));
+                }
+                let hash = token_hash(&token.secret);
+                if result.credentials_by_hash.contains_key(&hash) {
+                    return Err(StoreError::Invalid(
+                        "config token plaintext values must be unique".into(),
+                    ));
+                }
+                let expires_at = token
+                    .expires_at
+                    .as_deref()
+                    .map(parse_timestamp)
+                    .transpose()?;
+                let token_id = format!("config:{id}:{}", token.name);
+                result.credentials_by_hash.insert(
+                    hash,
+                    ConfiguredCredential {
+                        identity_id: id.clone(),
+                        token_id: token_id.clone(),
+                        subdomain_policy: policy.clone(),
+                        expires_at,
+                    },
+                );
+                tokens.push(ClientToken {
+                    id: token_id,
+                    client_identity_id: id.clone(),
+                    label: token.label,
+                    managed_by: ManagedBy::Config,
+                    created_at: None,
+                    expires_at: token.expires_at,
+                    last_used_at: None,
+                });
+            }
+            result.identities.insert(
+                id.clone(),
+                ClientIdentity {
+                    id: id.clone(),
+                    enabled: client.enabled,
+                    subdomain_policy: policy,
+                    managed_by: ManagedBy::Config,
+                    created_at: None,
+                    updated_at: None,
+                },
+            );
+            result.tokens.insert(id, tokens);
+        }
+        Ok(result)
+    }
+
+    pub fn authenticate(&self, secret: &str) -> Option<AuthenticatedCredential> {
+        let credential = self.credentials_by_hash.get(&token_hash(secret))?;
+        let identity = self.identities.get(&credential.identity_id)?;
+        if !identity.enabled
+            || credential
+                .expires_at
+                .is_some_and(|expires_at| expires_at <= Utc::now())
+        {
+            return None;
+        }
+        Some(AuthenticatedCredential {
+            identity_id: credential.identity_id.clone(),
+            token_id: credential.token_id.clone(),
+            managed_by: ManagedBy::Config,
+            subdomain_policy: credential.subdomain_policy.clone(),
+        })
+    }
+
+    pub fn contains_identity(&self, id: &str) -> bool {
+        self.identities.contains_key(id)
+    }
+
+    pub fn token_hashes(&self) -> impl Iterator<Item = &[u8; 32]> {
+        self.credentials_by_hash.keys()
+    }
+
+    pub fn list_identities(&self) -> Vec<ClientIdentity> {
+        self.identities.values().cloned().collect()
+    }
+
+    pub fn get_identity(&self, id: &str) -> Option<ClientIdentity> {
+        self.identities.get(id).cloned()
+    }
+
+    pub fn list_tokens(&self, identity_id: &str) -> Option<Vec<ClientToken>> {
+        self.tokens.get(identity_id).cloned()
+    }
+
+    pub fn get_token(&self, identity_id: &str, token_id: &str) -> Option<ClientToken> {
+        self.tokens
+            .get(identity_id)?
+            .iter()
+            .find(|token| token.id == token_id)
+            .cloned()
+    }
 }
 
 #[derive(Debug, Error)]
@@ -252,8 +428,54 @@ WHERE t.token_hash = ?1 AND i.enabled = 1
             Ok(Some(AuthenticatedCredential {
                 identity_id,
                 token_id,
+                managed_by: ManagedBy::Api,
                 subdomain_policy: policy,
             }))
+        })
+        .await
+    }
+
+    pub async fn ensure_no_conflicts(
+        &self,
+        configured: &ConfiguredCredentials,
+    ) -> Result<(), StoreError> {
+        let identity_ids = configured
+            .identities
+            .keys()
+            .cloned()
+            .collect::<HashSet<_>>();
+        let token_hashes = configured.token_hashes().copied().collect::<HashSet<_>>();
+        self.run(move |connection| {
+            let mut identities = connection
+                .prepare("SELECT id FROM client_identities")
+                .map_err(internal)?;
+            for id in identities
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(internal)?
+            {
+                let id = id.map_err(internal)?;
+                if identity_ids.contains(&id) {
+                    return Err(StoreError::Conflict);
+                }
+            }
+            drop(identities);
+            let mut tokens = connection
+                .prepare("SELECT token_hash FROM client_tokens")
+                .map_err(internal)?;
+            for hash in tokens
+                .query_map([], |row| row.get::<_, Vec<u8>>(0))
+                .map_err(internal)?
+            {
+                let hash = hash.map_err(internal)?;
+                if hash.len() == 32 {
+                    let mut digest = [0_u8; 32];
+                    digest.copy_from_slice(&hash);
+                    if token_hashes.contains(&digest) {
+                        return Err(StoreError::Conflict);
+                    }
+                }
+            }
+            Ok(())
         })
         .await
     }
@@ -263,7 +485,7 @@ WHERE t.token_hash = ?1 AND i.enabled = 1
         input: CreateIdentity,
         request_id: String,
     ) -> Result<ClientIdentity, StoreError> {
-        let id = validate_identity_id(&input.id)?;
+        let id = normalize_identity_id(&input.id)?;
         let policy = SubdomainPolicy::new(input.subdomain_policy.rules)?;
         self.run(move |connection| {
             let timestamp = now();
@@ -281,8 +503,9 @@ WHERE t.token_hash = ?1 AND i.enabled = 1
                 id,
                 enabled: true,
                 subdomain_policy: policy,
-                created_at: timestamp.clone(),
-                updated_at: timestamp,
+                managed_by: ManagedBy::Api,
+                created_at: Some(timestamp.clone()),
+                updated_at: Some(timestamp),
             })
         })
         .await
@@ -314,8 +537,9 @@ WHERE t.token_hash = ?1 AND i.enabled = 1
                         subdomain_policy: load_policy(connection, &id)?,
                         id,
                         enabled,
-                        created_at,
-                        updated_at,
+                        managed_by: ManagedBy::Api,
+                        created_at: Some(created_at),
+                        updated_at: Some(updated_at),
                     })
                 })
                 .collect()
@@ -359,8 +583,9 @@ WHERE t.token_hash = ?1 AND i.enabled = 1
                 id,
                 enabled,
                 subdomain_policy: policy,
+                managed_by: ManagedBy::Api,
                 created_at: current.created_at,
-                updated_at: timestamp,
+                updated_at: Some(timestamp),
             })
         })
         .await
@@ -387,6 +612,7 @@ WHERE t.token_hash = ?1 AND i.enabled = 1
         &self,
         identity_id: &str,
         input: CreateToken,
+        forbidden_hashes: HashSet<[u8; 32]>,
         request_id: String,
     ) -> Result<CreatedToken, StoreError> {
         let identity_id = identity_id.to_string();
@@ -399,14 +625,20 @@ WHERE t.token_hash = ?1 AND i.enabled = 1
             .transpose()?;
         self.run(move |connection| {
             load_identity(connection, &identity_id)?;
-            let mut random = [0_u8; 32];
-            OsRng.fill_bytes(&mut random);
-            let secret = format!("rpt_{}", URL_SAFE_NO_PAD.encode(random));
+            let secret = loop {
+                let mut random = [0_u8; 32];
+                OsRng.fill_bytes(&mut random);
+                let secret = format!("rpt_{}", URL_SAFE_NO_PAD.encode(random));
+                if !forbidden_hashes.contains(&token_hash(&secret)) {
+                    break secret;
+                }
+            };
             let token = ClientToken {
                 id: Uuid::new_v4().to_string(),
                 client_identity_id: identity_id.clone(),
                 label: input.label,
-                created_at: now(),
+                managed_by: ManagedBy::Api,
+                created_at: Some(now()),
                 expires_at,
                 last_used_at: None,
             };
@@ -437,7 +669,8 @@ WHERE t.token_hash = ?1 AND i.enabled = 1
                         id: row.get(0)?,
                         client_identity_id: identity_id.clone(),
                         label: row.get(1)?,
-                        created_at: row.get(2)?,
+                        managed_by: ManagedBy::Api,
+                        created_at: Some(row.get(2)?),
                         expires_at: row.get(3)?,
                         last_used_at: row.get(4)?,
                     })
@@ -514,7 +747,7 @@ fn prepare_database_file(path: &PathBuf) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn validate_identity_id(id: &str) -> Result<String, StoreError> {
+pub fn normalize_identity_id(id: &str) -> Result<String, StoreError> {
     let id = id.trim();
     if id.is_empty() || id.len() > 128 || !id.is_ascii() {
         return Err(StoreError::Invalid(
@@ -572,8 +805,9 @@ fn load_identity(connection: &Connection, id: &str) -> Result<ClientIdentity, St
         id: id.to_string(),
         enabled,
         subdomain_policy: load_policy(connection, id)?,
-        created_at,
-        updated_at,
+        managed_by: ManagedBy::Api,
+        created_at: Some(created_at),
+        updated_at: Some(updated_at),
     })
 }
 
@@ -591,7 +825,8 @@ fn load_token(
                     id: token_id.to_string(),
                     client_identity_id: identity_id.to_string(),
                     label: row.get(0)?,
-                    created_at: row.get(1)?,
+                    managed_by: ManagedBy::Api,
+                    created_at: Some(row.get(1)?),
                     expires_at: row.get(2)?,
                     last_used_at: row.get(3)?,
                 })
@@ -661,11 +896,29 @@ mod tests {
 
     #[test]
     fn validates_and_matches_subdomain_policy() {
-        let policy = SubdomainPolicy::new(vec!["Docs".into(), "preview-*".into()]).unwrap();
+        let policy = SubdomainPolicy::new(vec![
+            "Docs".into(),
+            "preview-*".into(),
+            "*-dev".into(),
+            "api-*-dev".into(),
+        ])
+        .unwrap();
         assert!(policy.allows(Some("docs")));
         assert!(policy.allows(Some("preview-123")));
+        assert!(policy.allows(Some("api-dev")));
+        assert!(policy.allows(Some("api-blue-dev")));
         assert!(!policy.allows(Some("other")));
         assert!(!policy.allows(None));
+    }
+
+    #[test]
+    fn rejects_multi_level_and_multi_wildcard_subdomain_rules() {
+        for rule in ["*.dev", "api.*.dev", "api-*-*-dev"] {
+            assert!(
+                SubdomainPolicy::new(vec![rule.into()]).is_err(),
+                "accepted invalid rule {rule:?}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -688,6 +941,7 @@ mod tests {
                     label: None,
                     expires_at: None,
                 },
+                HashSet::new(),
                 "request-2".into(),
             )
             .await
@@ -697,5 +951,71 @@ mod tests {
         assert_eq!(authenticated.identity_id, "agent");
         assert_eq!(authenticated.token_id, created.token.id);
         assert!(store.authenticate("wrong").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn rejects_identity_and_token_conflicts_across_sources() {
+        let identity_store = CredentialStore::open(":memory:").unwrap();
+        identity_store
+            .create_identity(
+                CreateIdentity {
+                    id: "shared".into(),
+                    subdomain_policy: SubdomainPolicy::unrestricted(),
+                },
+                "request-1".into(),
+            )
+            .await
+            .unwrap();
+        let configured = ConfiguredCredentials::new(vec![ConfiguredClient {
+            id: "shared".into(),
+            enabled: true,
+            subdomain_policy: SubdomainPolicy::unrestricted(),
+            tokens: Vec::new(),
+        }])
+        .unwrap();
+        assert!(matches!(
+            identity_store.ensure_no_conflicts(&configured).await,
+            Err(StoreError::Conflict)
+        ));
+
+        let token_store = CredentialStore::open(":memory:").unwrap();
+        token_store
+            .create_identity(
+                CreateIdentity {
+                    id: "api".into(),
+                    subdomain_policy: SubdomainPolicy::unrestricted(),
+                },
+                "request-2".into(),
+            )
+            .await
+            .unwrap();
+        let created = token_store
+            .create_token(
+                "api",
+                CreateToken {
+                    label: None,
+                    expires_at: None,
+                },
+                HashSet::new(),
+                "request-3".into(),
+            )
+            .await
+            .unwrap();
+        let configured = ConfiguredCredentials::new(vec![ConfiguredClient {
+            id: "config".into(),
+            enabled: true,
+            subdomain_policy: SubdomainPolicy::unrestricted(),
+            tokens: vec![ConfiguredToken {
+                name: "primary".into(),
+                label: None,
+                secret: created.secret,
+                expires_at: None,
+            }],
+        }])
+        .unwrap();
+        assert!(matches!(
+            token_store.ensure_no_conflicts(&configured).await,
+            Err(StoreError::Conflict)
+        ));
     }
 }

@@ -40,10 +40,12 @@ async fn start_managed_server() -> (
     let server = tokio::spawn(rproxy::server::run(ServerConfig {
         domain: "test".into(),
         token: None,
-        config: None,
         auth_db: Some(database.to_string_lossy().into_owned()),
+        configured_credentials: Default::default(),
         management_listen,
         management_token_file: Some(token_file.to_string_lossy().into_owned()),
+        management_requests_per_minute: 120,
+        management_body_limit_bytes: 16 * 1024,
         control_listen,
         http_listen: free_addr(),
         tcp_port_range: "20000-20010".into(),
@@ -281,4 +283,122 @@ async fn revoking_token_closes_its_active_tunnel() {
     server.abort();
     let _ = fs::remove_file(database);
     let _ = fs::remove_file(token_file);
+}
+
+#[tokio::test]
+async fn full_config_keeps_config_credentials_out_of_sqlite() {
+    let control_listen = free_addr();
+    let http_listen = free_addr();
+    let management_listen = free_addr();
+    let database = temp_path("full-config-auth.db");
+    let token_file = temp_path("full-config-management-token");
+    let config_file = temp_path("server.toml");
+    fs::write(&token_file, "management-secret\n").unwrap();
+    fs::write(
+        &config_file,
+        format!(
+            r#"
+[server]
+domain = "test"
+control_listen = "{control_listen}"
+http_listen = "{http_listen}"
+tcp_port_range = "20000-20010"
+http_public_scheme = "http"
+
+[authentication]
+database = "{}"
+
+[management]
+listen = "{management_listen}"
+token_file = "{}"
+
+[[clients]]
+id = "config-agent"
+subdomains = ["configured"]
+
+[[clients.tokens]]
+name = "primary"
+token = "config-secret"
+"#,
+            database.display(),
+            token_file.display()
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&token_file, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::set_permissions(&config_file, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    let server = tokio::spawn(rproxy::server::run(
+        rproxy::config::load(&config_file)
+            .unwrap()
+            .into_server_config(),
+    ));
+    sleep(Duration::from_millis(150)).await;
+    let base_url = format!("http://{management_listen}");
+
+    let (_, registered) = register_http(control_listen, "config-secret", Some("configured")).await;
+    assert!(matches!(registered, ServerMessage::Registered { .. }));
+
+    let client = reqwest::Client::new();
+    let identities: Value = client
+        .get(format!("{base_url}/v1/client-identities"))
+        .bearer_auth("management-secret")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(identities[0]["id"], "config-agent");
+    assert_eq!(identities[0]["managed_by"], "config");
+
+    let response = client
+        .delete(format!("{base_url}/v1/client-identities/config-agent"))
+        .bearer_auth("management-secret")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        response.json::<Value>().await.unwrap()["error"]["code"],
+        "managed_by_config"
+    );
+
+    let response = client
+        .post(format!(
+            "{base_url}/v1/client-identities/config-agent/tokens"
+        ))
+        .bearer_auth("management-secret")
+        .json(&json!({ "label": "forbidden", "expires_at": null }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+
+    let response = client
+        .post(format!("{base_url}/v1/client-identities"))
+        .bearer_auth("management-secret")
+        .json(&json!({
+            "id": "api-agent",
+            "subdomain_policy": { "rules": ["api"] }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    server.abort();
+    let _ = server.await;
+    let store = rproxy::auth::CredentialStore::open(&database).unwrap();
+    let stored = store.list_identities().await.unwrap();
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].id, "api-agent");
+
+    let _ = fs::remove_file(database);
+    let _ = fs::remove_file(token_file);
+    let _ = fs::remove_file(config_file);
 }

@@ -21,10 +21,12 @@ async fn server_closes_websocket_that_does_not_send_hello_before_deadline() {
     let server = tokio::spawn(rproxy::server::run(ServerConfig {
         domain: "test".into(),
         token: Some("secret".into()),
-        config: None,
         auth_db: None,
+        configured_credentials: Default::default(),
         management_listen: free_addr(),
         management_token_file: None,
+        management_requests_per_minute: 120,
+        management_body_limit_bytes: 16 * 1024,
         control_listen,
         http_listen: free_addr(),
         tcp_port_range: "20000-20010".into(),
