@@ -30,6 +30,8 @@
       "/private/tmp/**": "allow",
       "~/dotfiles/": "allow",
       "~/dotfiles/**": "allow",
+      "~/.sdkman": "allow",
+      "~/.sdkman/**": "allow",
     }
   },
   "agent": {
