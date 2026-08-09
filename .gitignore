@@ -4,6 +4,8 @@ tmux/tmux/plugins/tpm_log.txt
 __pycache__/
 .coverage
 target/
+rproxy/*.db*
+rproxy/management-token
 ha_helper/config.toml
 bin/.downloads/
 .managed/

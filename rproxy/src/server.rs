@@ -1,4 +1,5 @@
 use crate::alloc::{AllocError, PortAllocator, SubdomainAllocator};
+use crate::auth::{AuthenticatedCredential, CredentialStore, SubdomainPolicy};
 use crate::protocol::{
     ClientHello, DataFrame, ServerErrorCode, ServerMessage, ServiceRequest, INITIAL_CREDIT,
     MAX_DATA_SIZE,
@@ -20,7 +21,9 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{mpsc, oneshot, Mutex, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{
+    mpsc, oneshot, Mutex, Notify, OwnedRwLockReadGuard, OwnedSemaphorePermit, RwLock, Semaphore,
+};
 use tokio::task::JoinSet;
 use tokio::time::{timeout, Duration};
 use tokio_util::sync::CancellationToken;
@@ -62,6 +65,7 @@ pub struct TunnelHandle {
 struct PendingDataConnection {
     client_id: String,
     client_identity_id: String,
+    client_token_id: String,
     sender: oneshot::Sender<WebSocket>,
 }
 
@@ -79,6 +83,10 @@ pub enum ServerStateError {
     InvalidPortRange,
     #[error("invalid subdomain {0:?}")]
     InvalidSubdomain(String),
+    #[error("subdomain is not allowed for this client identity")]
+    SubdomainNotAllowed,
+    #[error("client credential is no longer active")]
+    CredentialInactive,
 }
 
 impl From<AllocError> for ServerStateError {
@@ -156,8 +164,13 @@ impl AuthConfig {
         Self::from_clients(toml::from_str::<AuthConfigFile>(text)?.clients)
     }
 
-    pub fn client_id_for_token(&self, token: &str) -> Option<&str> {
-        self.clients_by_token.get(token).map(String::as_str)
+    pub fn authenticate(&self, token: &str) -> Option<AuthenticatedCredential> {
+        let identity_id = self.clients_by_token.get(token)?.clone();
+        Some(AuthenticatedCredential {
+            token_id: identity_id.clone(),
+            identity_id,
+            subdomain_policy: SubdomainPolicy::unrestricted(),
+        })
     }
 
     fn from_clients(clients: Vec<ClientIdentityConfig>) -> anyhow::Result<Self> {
@@ -184,6 +197,7 @@ impl AuthConfig {
 #[derive(Debug, Clone)]
 pub struct ServerState {
     inner: Arc<Mutex<InnerState>>,
+    sessions_changed: Arc<Notify>,
 }
 
 #[derive(Debug)]
@@ -196,7 +210,19 @@ struct InnerState {
     http_tunnels: HashMap<String, TunnelHandle>,
     tcp_tunnels: HashMap<u16, TunnelHandle>,
     client_resources: HashMap<String, Vec<ClientResource>>,
+    active_clients: HashMap<String, ActiveClient>,
+    blocked_identities: HashSet<String>,
+    blocked_tokens: HashSet<String>,
+    policy_overrides: HashMap<String, SubdomainPolicy>,
     pending_data: HashMap<String, PendingDataConnection>,
+}
+
+#[derive(Debug)]
+struct ActiveClient {
+    identity_id: String,
+    token_id: String,
+    subdomain: Option<String>,
+    cancellation: CancellationToken,
 }
 
 #[derive(Debug)]
@@ -222,15 +248,20 @@ impl ServerState {
                 http_tunnels: HashMap::new(),
                 tcp_tunnels: HashMap::new(),
                 client_resources: HashMap::new(),
+                active_clients: HashMap::new(),
+                blocked_identities: HashSet::new(),
+                blocked_tokens: HashSet::new(),
+                policy_overrides: HashMap::new(),
                 pending_data: HashMap::new(),
             })),
+            sessions_changed: Arc::new(Notify::new()),
         }
     }
 
     async fn register_control(
         &self,
         client_id: String,
-        client_identity_id: String,
+        credential: AuthenticatedCredential,
         service: ServiceRequest,
         open_tx: mpsc::Sender<OpenCommand>,
         cancellation: CancellationToken,
@@ -238,6 +269,16 @@ impl ServerState {
         let session_id = Uuid::new_v4().to_string();
         let (data_tx, data_rx) = oneshot::channel();
         let mut inner = self.inner.lock().await;
+        if inner.blocked_identities.contains(&credential.identity_id)
+            || inner.blocked_tokens.contains(&credential.token_id)
+        {
+            return Err(ServerStateError::CredentialInactive);
+        }
+        let policy = inner
+            .policy_overrides
+            .get(&credential.identity_id)
+            .unwrap_or(&credential.subdomain_policy)
+            .clone();
         let common = |local: String| TunnelHandle {
             local,
             open_tx: open_tx.clone(),
@@ -246,6 +287,9 @@ impl ServerState {
         };
         let registered = match service {
             ServiceRequest::Http { local, subdomain } => {
+                if !policy.allows(subdomain.as_deref()) {
+                    return Err(ServerStateError::SubdomainNotAllowed);
+                }
                 let subdomain = inner.subdomains.allocate(subdomain.as_deref())?;
                 inner.http_tunnels.insert(subdomain.clone(), common(local));
                 inner
@@ -281,11 +325,21 @@ impl ServerState {
                 }
             }
         };
+        inner.active_clients.insert(
+            client_id.clone(),
+            ActiveClient {
+                identity_id: credential.identity_id.clone(),
+                token_id: credential.token_id.clone(),
+                subdomain: registered.subdomain.clone(),
+                cancellation,
+            },
+        );
         inner.pending_data.insert(
             session_id,
             PendingDataConnection {
                 client_id,
-                client_identity_id,
+                client_identity_id: credential.identity_id,
+                client_token_id: credential.token_id,
                 sender: data_tx,
             },
         );
@@ -294,6 +348,7 @@ impl ServerState {
 
     pub async fn release_client(&self, client_id: &str) {
         let mut inner = self.inner.lock().await;
+        inner.active_clients.remove(client_id);
         if let Some(resources) = inner.client_resources.remove(client_id) {
             for resource in resources {
                 match resource {
@@ -315,6 +370,8 @@ impl ServerState {
         inner
             .pending_data
             .retain(|_, pending| pending.client_id != client_id);
+        drop(inner);
+        self.sessions_changed.notify_waiters();
     }
 
     pub async fn http_tunnel_for_host(&self, host: &str) -> Option<TunnelHandle> {
@@ -330,15 +387,16 @@ impl ServerState {
     async fn attach_data_connection(
         &self,
         session_id: &str,
-        client_identity_id: &str,
+        credential: &AuthenticatedCredential,
         socket: WebSocket,
     ) -> Result<(), WebSocket> {
         let mut inner = self.inner.lock().await;
-        if inner
-            .pending_data
-            .get(session_id)
-            .is_some_and(|pending| pending.client_identity_id != client_identity_id)
-        {
+        if inner.pending_data.get(session_id).is_some_and(|pending| {
+            pending.client_identity_id != credential.identity_id
+                || pending.client_token_id != credential.token_id
+                || inner.blocked_identities.contains(&credential.identity_id)
+                || inner.blocked_tokens.contains(&credential.token_id)
+        }) {
             return Err(socket);
         }
         let pending = inner.pending_data.remove(session_id);
@@ -348,6 +406,115 @@ impl ServerState {
             None => Err(socket),
         }
     }
+
+    pub async fn apply_identity(&self, identity_id: &str, enabled: bool, policy: SubdomainPolicy) {
+        let mut inner = self.inner.lock().await;
+        inner
+            .policy_overrides
+            .insert(identity_id.to_string(), policy.clone());
+        if enabled {
+            inner.blocked_identities.remove(identity_id);
+        } else {
+            inner.blocked_identities.insert(identity_id.to_string());
+        }
+        let targets = inner
+            .active_clients
+            .iter()
+            .filter(|(_, client)| {
+                client.identity_id == identity_id
+                    && (!enabled
+                        || client
+                            .subdomain
+                            .as_deref()
+                            .is_some_and(|subdomain| !policy.allows(Some(subdomain))))
+            })
+            .map(|(client_id, client)| (client_id.clone(), client.cancellation.clone()))
+            .collect::<Vec<_>>();
+        drop(inner);
+        for (_, cancellation) in &targets {
+            cancellation.cancel();
+        }
+        self.wait_for_clients(targets.into_iter().map(|(id, _)| id).collect())
+            .await;
+    }
+
+    pub async fn delete_identity(&self, identity_id: &str) {
+        let mut inner = self.inner.lock().await;
+        inner.blocked_identities.insert(identity_id.to_string());
+        inner.policy_overrides.remove(identity_id);
+        let targets = inner
+            .active_clients
+            .iter()
+            .filter(|(_, client)| client.identity_id == identity_id)
+            .map(|(client_id, client)| (client_id.clone(), client.cancellation.clone()))
+            .collect::<Vec<_>>();
+        drop(inner);
+        for (_, cancellation) in &targets {
+            cancellation.cancel();
+        }
+        self.wait_for_clients(targets.into_iter().map(|(id, _)| id).collect())
+            .await;
+    }
+
+    pub async fn revoke_token(&self, token_id: &str) {
+        let mut inner = self.inner.lock().await;
+        inner.blocked_tokens.insert(token_id.to_string());
+        let targets = inner
+            .active_clients
+            .iter()
+            .filter(|(_, client)| client.token_id == token_id)
+            .map(|(client_id, client)| (client_id.clone(), client.cancellation.clone()))
+            .collect::<Vec<_>>();
+        drop(inner);
+        for (_, cancellation) in &targets {
+            cancellation.cancel();
+        }
+        self.wait_for_clients(targets.into_iter().map(|(id, _)| id).collect())
+            .await;
+    }
+
+    async fn wait_for_clients(&self, client_ids: HashSet<String>) {
+        if client_ids.is_empty() {
+            return;
+        }
+        loop {
+            let changed = self.sessions_changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            let inner = self.inner.lock().await;
+            let released = client_ids
+                .iter()
+                .all(|client_id| !inner.active_clients.contains_key(client_id));
+            drop(inner);
+            if released {
+                return;
+            }
+            changed.await;
+        }
+    }
+}
+
+pub type AdmissionGate = Arc<RwLock<()>>;
+
+#[derive(Clone)]
+enum AuthBackend {
+    Static(AuthConfig),
+    Managed(CredentialStore),
+}
+
+impl AuthBackend {
+    async fn authenticate(&self, token: &str) -> Option<AuthenticatedCredential> {
+        match self {
+            Self::Static(config) => config.authenticate(token),
+            Self::Managed(store) => match store.authenticate(token).await {
+                Ok(credential) => credential,
+                Err(error) => {
+                    tracing::error!("managed authentication backend failed: {error}");
+                    None
+                }
+            },
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -355,6 +522,9 @@ pub struct ServerConfig {
     pub domain: String,
     pub token: Option<String>,
     pub config: Option<String>,
+    pub auth_db: Option<String>,
+    pub management_listen: SocketAddr,
+    pub management_token_file: Option<String>,
     pub control_listen: SocketAddr,
     pub http_listen: SocketAddr,
     pub tcp_port_range: String,
@@ -364,11 +534,14 @@ pub struct ServerConfig {
 
 pub async fn run(config: ServerConfig) -> anyhow::Result<()> {
     validate_http_public_scheme(&config.http_public_scheme)?;
-    let auth = match (config.token, config.config) {
-        (Some(token), None) => AuthConfig::legacy_token(token)?,
-        (None, Some(path)) => AuthConfig::from_file(&path)?,
-        (Some(_), Some(_)) => anyhow::bail!("--token and --config cannot be used together"),
-        (None, None) => anyhow::bail!("one of --token or --config is required"),
+    let (auth, managed) = match (config.token, config.config, config.auth_db) {
+        (Some(token), None, None) => (AuthBackend::Static(AuthConfig::legacy_token(token)?), None),
+        (None, Some(path), None) => (AuthBackend::Static(AuthConfig::from_file(&path)?), None),
+        (None, None, Some(path)) => {
+            let store = CredentialStore::open(path)?;
+            (AuthBackend::Managed(store.clone()), Some(store))
+        }
+        _ => anyhow::bail!("exactly one of --token, --config, or --auth-db is required"),
     };
     let state = ServerState::new(
         config.domain.clone(),
@@ -383,11 +556,13 @@ pub async fn run(config: ServerConfig) -> anyhow::Result<()> {
         config.control_listen, config.domain
     ));
     log_server_info(&format!("http listening on {}", config.http_listen));
+    let admission_gate = Arc::new(RwLock::new(()));
     let app = Router::new()
         .route("/_rproxy", get(control_ws))
         .with_state(AppState {
             state: state.clone(),
             auth,
+            admission_gate: admission_gate.clone(),
             hello_permits: Arc::new(Semaphore::new(MAX_PENDING_HELLOS)),
         });
     let mut tasks = JoinSet::new();
@@ -397,16 +572,51 @@ pub async fn run(config: ServerConfig) -> anyhow::Result<()> {
             .await
             .map_err(anyhow::Error::from)
     });
-    tasks.spawn(run_http_listener(state, http_listener));
+    tasks.spawn(run_http_listener(state.clone(), http_listener));
+    if let Some(store) = managed {
+        let token_file = config
+            .management_token_file
+            .ok_or_else(|| anyhow::anyhow!("--management-token-file is required with --auth-db"))?;
+        let management_token = read_management_token(&token_file)?;
+        let listener = TcpListener::bind(config.management_listen).await?;
+        log_server_info(&format!(
+            "management listening on {}",
+            config.management_listen
+        ));
+        let app = crate::management::router(store, state.clone(), admission_gate, management_token);
+        tasks.spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .map_err(anyhow::Error::from)
+        });
+    }
     tasks.join_next().await.unwrap()??;
     tasks.abort_all();
     Ok(())
 }
 
+fn read_management_token(path: &str) -> anyhow::Result<String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let metadata = fs::metadata(path)?;
+        if !metadata.is_file() || metadata.permissions().mode() & 0o077 != 0 {
+            anyhow::bail!("management token file must be a regular file with mode 0600");
+        }
+    }
+    let token = fs::read_to_string(path)?.trim().to_string();
+    if token.is_empty() {
+        anyhow::bail!("management token must not be empty");
+    }
+    Ok(token)
+}
+
 #[derive(Clone)]
 struct AppState {
     state: ServerState,
-    auth: AuthConfig,
+    auth: AuthBackend,
+    admission_gate: AdmissionGate,
     hello_permits: Arc<Semaphore>,
 }
 
@@ -432,22 +642,24 @@ async fn handle_socket(app: AppState, mut socket: WebSocket, hello_permit: Owned
     drop(hello_permit);
     match hello {
         ClientHello::Control { token, service } => {
-            let Some(identity) = app.auth.client_id_for_token(&token).map(str::to_owned) else {
+            let admission = app.admission_gate.clone().read_owned().await;
+            let Some(credential) = app.auth.authenticate(&token).await else {
                 let _ =
                     send_error(socket, ServerErrorCode::AuthFailed, "authentication failed").await;
                 return;
             };
-            handle_registered_control(app.state, socket, identity, service).await;
+            handle_registered_control(app.state, socket, credential, service, admission).await;
         }
         ClientHello::Data { token, session_id } => {
-            let Some(identity) = app.auth.client_id_for_token(&token).map(str::to_owned) else {
+            let _admission = app.admission_gate.read().await;
+            let Some(credential) = app.auth.authenticate(&token).await else {
                 let _ =
                     send_error(socket, ServerErrorCode::AuthFailed, "authentication failed").await;
                 return;
             };
             if let Err(socket) = app
                 .state
-                .attach_data_connection(&session_id, &identity, socket)
+                .attach_data_connection(&session_id, &credential, socket)
                 .await
             {
                 let _ = send_error(
@@ -464,23 +676,25 @@ async fn handle_socket(app: AppState, mut socket: WebSocket, hello_permit: Owned
 async fn handle_registered_control(
     state: ServerState,
     mut socket: WebSocket,
-    client_identity_id: String,
+    credential: AuthenticatedCredential,
     service: ServiceRequest,
+    admission: OwnedRwLockReadGuard<()>,
 ) {
     let client_id = Uuid::new_v4().to_string();
     let cancellation = CancellationToken::new();
     let (open_tx, open_rx) = mpsc::channel(OPEN_QUEUE_SIZE);
     let is_tcp = matches!(service, ServiceRequest::Tcp { .. });
-    let (registered, data_rx) = match state
+    let registration = state
         .register_control(
             client_id.clone(),
-            client_identity_id.clone(),
+            credential.clone(),
             service,
             open_tx,
             cancellation.clone(),
         )
-        .await
-    {
+        .await;
+    drop(admission);
+    let (registered, data_rx) = match registration {
         Ok(value) => value,
         Err(error) => {
             let code = match error {
@@ -491,6 +705,8 @@ async fn handle_registered_control(
                 ServerStateError::InvalidPortRange | ServerStateError::InvalidSubdomain(_) => {
                     ServerErrorCode::InvalidRequest
                 }
+                ServerStateError::SubdomainNotAllowed => ServerErrorCode::SubdomainNotAllowed,
+                ServerStateError::CredentialInactive => ServerErrorCode::AuthFailed,
             };
             let _ = send_error(socket, code, &error.to_string()).await;
             return;
@@ -531,7 +747,8 @@ async fn handle_registered_control(
         cancellation.cancel();
     } else {
         log_server_info(&format!(
-            "registered tunnel for client identity {client_identity_id}: {}",
+            "registered tunnel for client identity {}: {}",
+            credential.identity_id,
             message_public(&message)
         ));
         let (sender, mut receiver) = socket.split();
@@ -558,11 +775,11 @@ async fn handle_registered_control(
         drop(sender);
     }
     cancellation.cancel();
-    state.release_client(&client_id).await;
     if let Some(task) = listener_task {
         task.abort();
         let _ = task.await;
     }
+    state.release_client(&client_id).await;
 }
 
 async fn wait_for_control_close(receiver: &mut SplitStream<WebSocket>) {
@@ -914,8 +1131,8 @@ token = "secret-2"
 "#,
         )
         .unwrap();
-        assert_eq!(auth.client_id_for_token("secret-1"), Some("one"));
-        assert_eq!(auth.client_id_for_token("secret-2"), Some("two"));
+        assert_eq!(auth.authenticate("secret-1").unwrap().identity_id, "one");
+        assert_eq!(auth.authenticate("secret-2").unwrap().identity_id, "two");
     }
 
     #[test]

@@ -24,18 +24,30 @@ pub struct ServerArgs {
     #[arg(
         short = 't',
         long,
-        conflicts_with = "config",
-        required_unless_present = "config",
+        conflicts_with_all = ["config", "auth_db"],
+        required_unless_present_any = ["config", "auth_db"],
         help = "Legacy single client token"
     )]
     pub token: Option<String>,
     #[arg(
         long,
-        conflicts_with = "token",
-        required_unless_present = "token",
+        conflicts_with_all = ["token", "auth_db"],
+        required_unless_present_any = ["token", "auth_db"],
         help = "TOML file with [[clients]] id and token entries"
     )]
     pub config: Option<String>,
+    #[arg(
+        long,
+        conflicts_with_all = ["token", "config"],
+        required_unless_present_any = ["token", "config"],
+        requires = "management_token_file",
+        help = "SQLite authentication database managed through the management interface"
+    )]
+    pub auth_db: Option<String>,
+    #[arg(long, default_value = "127.0.0.1:7001")]
+    pub management_listen: SocketAddr,
+    #[arg(long, requires = "auth_db")]
+    pub management_token_file: Option<String>,
     #[arg(short = 'c', long, default_value = "127.0.0.1:7000")]
     pub control_listen: SocketAddr,
     #[arg(short = 'H', long, default_value = "0.0.0.0:8080")]
@@ -111,6 +123,7 @@ Purpose:
 Core commands:
   rproxy server --domain <domain> --token <token> --control-listen 127.0.0.1:7000 --http-listen 0.0.0.0:8080
   rproxy server --domain <domain> --config clients.toml --control-listen 127.0.0.1:7000 --http-listen 0.0.0.0:8080
+  rproxy server --domain <domain> --auth-db auth.db --management-token-file management-token --control-listen 127.0.0.1:7000
   rproxy client --server wss://rp.example.com --token <token> http --local 127.0.0.1:8000 --subdomain <name>
   rproxy client --server wss://rp.example.com --token <token> tcp --local 127.0.0.1:22 --remote-port <port>
 
@@ -124,6 +137,35 @@ Server auth config:
     [[clients]]
     id = "client-two"
     token = "secret-two"
+
+Managed authentication:
+  Start with --auth-db auth.db --management-token-file management-token.
+  The management listener defaults to http://127.0.0.1:7001.
+  Send this header on every management request:
+    Authorization: Bearer <management-token>
+
+Management API:
+  POST   /v1/client-identities
+    Body: {"id":"build-agent","subdomain_policy":{"rules":["preview-*","docs"]}}
+  GET    /v1/client-identities
+  GET    /v1/client-identities/{identity_id}
+  PATCH  /v1/client-identities/{identity_id}
+    Body: {"enabled":true,"subdomain_policy":{"rules":["docs"]}}
+  DELETE /v1/client-identities/{identity_id}
+  POST   /v1/client-identities/{identity_id}/tokens
+    Body: {"label":"production","expires_at":null}
+    Returns the token secret exactly once in the "secret" field.
+  GET    /v1/client-identities/{identity_id}/tokens
+  GET    /v1/client-identities/{identity_id}/tokens/{token_id}
+  DELETE /v1/client-identities/{identity_id}/tokens/{token_id}
+
+Management API rules:
+  Use Content-Type: application/json for POST and PATCH requests.
+  Subdomain rules are exact labels such as "docs", prefix wildcards such as "preview-*", or "*".
+  Restricted identities must request an explicit subdomain.
+  Token list/get responses never contain token secrets. Rotate by creating a new token, deploying it, then deleting the old token.
+  Successful creates return 201, reads and updates return 200, and deletes return 204.
+  Errors use {"error":{"code":"...","message":"..."}} and responses include X-Request-ID.
 
 Important rules:
   --server must start with ws:// or wss://; the client appends /_rproxy automatically.
@@ -168,6 +210,9 @@ fn server_config(args: ServerArgs) -> rproxy::server::ServerConfig {
         domain: args.domain,
         token: args.token,
         config: args.config,
+        auth_db: args.auth_db,
+        management_listen: args.management_listen,
+        management_token_file: args.management_token_file,
         control_listen: args.control_listen,
         http_listen: args.http_listen,
         tcp_port_range: args.tcp_port_range,
@@ -305,6 +350,30 @@ mod tests {
     }
 
     #[test]
+    fn parses_managed_server_flags() {
+        let cli = Cli::parse_from([
+            "rproxy",
+            "server",
+            "--domain",
+            "a.com",
+            "--auth-db",
+            "auth.db",
+            "--management-token-file",
+            "management-token",
+        ]);
+
+        let Some(Command::Server(args)) = cli.command else {
+            panic!("expected server command");
+        };
+        assert_eq!(args.auth_db.as_deref(), Some("auth.db"));
+        assert_eq!(
+            args.management_token_file.as_deref(),
+            Some("management-token")
+        );
+        assert_eq!(args.management_listen.to_string(), "127.0.0.1:7001");
+    }
+
+    #[test]
     fn rejects_server_token_and_config_together() {
         let error = Cli::try_parse_from([
             "rproxy",
@@ -322,7 +391,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_server_without_token_or_config() {
+    fn rejects_server_without_auth_source() {
         let error = Cli::try_parse_from(["rproxy", "server", "--domain", "a.com"]).unwrap_err();
 
         assert!(error.to_string().contains("required"));
@@ -368,6 +437,11 @@ mod tests {
         assert!(help.contains("rproxy --help-ai"));
         assert!(help.contains("rproxy server --domain <domain> --token <token>"));
         assert!(help.contains("rproxy server --domain <domain> --config clients.toml"));
+        assert!(help.contains("rproxy server --domain <domain> --auth-db auth.db"));
+        assert!(help.contains("POST   /v1/client-identities"));
+        assert!(help.contains("DELETE /v1/client-identities/{identity_id}/tokens/{token_id}"));
+        assert!(help.contains("Returns the token secret exactly once"));
+        assert!(help.contains("Authorization: Bearer <management-token>"));
         assert!(help.contains(
             "rproxy client --server wss://rp.example.com --token <token> http --local 127.0.0.1:8000"
         ));

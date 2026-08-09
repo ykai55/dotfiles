@@ -60,6 +60,7 @@ pub enum ServerMessage {
 pub enum ServerErrorCode {
     AuthFailed,
     InvalidRequest,
+    SubdomainNotAllowed,
     SubdomainUnavailable,
     PortUnavailable,
     PortNotAllowed,

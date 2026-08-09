@@ -12,9 +12,20 @@ A client identity may create many control connections over time.
 _Avoid_: client connection, tunnel, user
 
 **Client Token**:
-A secret assigned to one client identity and presented when registering a tunnel
-or opening data connections for that tunnel.
+A revocable bearer credential assigned to one client identity and presented
+when registering a tunnel or opening data connections for that tunnel. A client
+identity may temporarily hold multiple client tokens during rotation.
 _Avoid_: global token, password
+
+**Subdomain Policy**:
+The set of single-label subdomain rules a client identity is allowed to request
+under the server's domain. A restricted policy requires an explicit subdomain.
+_Avoid_: domain, route
+
+**Management Credential**:
+A server-level bearer credential used by a trusted operator to manage client
+identities, client tokens, and subdomain policies. It is never a client token.
+_Avoid_: admin client token, root client
 
 **Control Connection**:
 The WebSocket connection a client identity uses to authenticate and register one

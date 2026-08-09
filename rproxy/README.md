@@ -176,6 +176,48 @@ The server reads the config file only at startup. Restart the server after token
 changes. Client tokens are plaintext in the first config format, so protect the
 file with normal filesystem permissions and do not log or publish real tokens.
 
+## Managed Authentication
+
+Use managed mode when a trusted operator needs to add, rotate, revoke, or list
+client tokens without restarting the server. Managed mode stores identities,
+token hashes, and subdomain policies in SQLite and starts a separate management
+listener on loopback.
+
+```bash
+rproxy server \
+  --domain example.com \
+  --auth-db /var/lib/rproxy/auth.db \
+  --management-token-file /run/secrets/rproxy-management-token \
+  --management-listen 127.0.0.1:7001
+```
+
+`--token`, `--config`, and `--auth-db` are mutually exclusive. The management
+token file must contain a non-empty bearer token. Keep the listener private or
+put it behind an HTTPS reverse proxy reachable only by the trusted operator.
+
+Create an identity and token:
+
+```bash
+curl -X POST http://127.0.0.1:7001/v1/client-identities \
+  -H "Authorization: Bearer $RPROXY_MANAGEMENT_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"id":"build-agent","subdomain_policy":{"rules":["preview-*","docs"]}}'
+
+curl -X POST http://127.0.0.1:7001/v1/client-identities/build-agent/tokens \
+  -H "Authorization: Bearer $RPROXY_MANAGEMENT_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"label":"production","expires_at":null}'
+```
+
+The token secret is returned only by the create request. List and get endpoints
+return metadata, never the secret. Rotate a token by creating a replacement,
+deploying it to the client, and deleting the old token. Deleting a token,
+disabling or deleting an identity, or restricting its subdomain policy closes
+affected active tunnels immediately.
+
+Management endpoints are documented in
+[`docs/management-api-design.md`](docs/management-api-design.md).
+
 ## Input Boundaries
 
 - Requested HTTP subdomains are normalized to lowercase and must be one ASCII

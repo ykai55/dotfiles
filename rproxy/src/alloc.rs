@@ -76,6 +76,29 @@ pub struct SubdomainAllocator {
     used: HashSet<String>,
 }
 
+pub fn normalize_subdomain_label(subdomain: &str) -> Result<String, AllocError> {
+    let subdomain = subdomain.to_ascii_lowercase();
+    let valid = !subdomain.is_empty()
+        && subdomain.len() <= 63
+        && subdomain.is_ascii()
+        && subdomain
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        && subdomain
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphanumeric)
+        && subdomain
+            .as_bytes()
+            .last()
+            .is_some_and(u8::is_ascii_alphanumeric);
+    if valid {
+        Ok(subdomain)
+    } else {
+        Err(AllocError::InvalidSubdomain(subdomain))
+    }
+}
+
 impl SubdomainAllocator {
     pub fn new() -> Self {
         Self::default()
@@ -83,24 +106,7 @@ impl SubdomainAllocator {
 
     pub fn allocate(&mut self, requested: Option<&str>) -> Result<String, AllocError> {
         if let Some(subdomain) = requested {
-            let subdomain = subdomain.to_ascii_lowercase();
-            let valid = !subdomain.is_empty()
-                && subdomain.len() <= 63
-                && subdomain.is_ascii()
-                && subdomain
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-                && subdomain
-                    .as_bytes()
-                    .first()
-                    .is_some_and(u8::is_ascii_alphanumeric)
-                && subdomain
-                    .as_bytes()
-                    .last()
-                    .is_some_and(u8::is_ascii_alphanumeric);
-            if !valid {
-                return Err(AllocError::InvalidSubdomain(subdomain));
-            }
+            let subdomain = normalize_subdomain_label(subdomain)?;
             if !self.used.insert(subdomain.clone()) {
                 return Err(AllocError::SubdomainUnavailable(subdomain));
             }
