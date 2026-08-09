@@ -11,11 +11,12 @@ The binary has two modes:
 
 ## Design
 
-The client connects to the server over WebSocket. Users pass only a WebSocket
-service prefix with `--server`, such as `ws://127.0.0.1:7000` for local testing
-or `wss://a.com` for production. The internal control path is always appended
-by the client as `/_rproxy`. The server URL must not include another path, query,
-fragment, or embedded credentials.
+The client connects to the server over WebSocket. Users pass a domain such as
+`a.com`, or a WebSocket service prefix such as `ws://127.0.0.1:7000`. A bare
+domain defaults to `ws://`; HTTP redirects are followed and an `https://`
+redirect is connected to as `wss://`. The internal control path is always
+appended by the client as `/_rproxy`. The server URL must not include another
+path, query, fragment, or embedded credentials.
 
 Each registered tunnel keeps exactly two WebSockets open: one control connection
 and one data connection. The data connection multiplexes up to 64 active logical
@@ -236,8 +237,10 @@ configuration schema and ownership rules are documented in
 - Initial HTTP request headers are limited to 64 KiB and must complete within
   five seconds. Oversized headers receive `431`, incomplete headers receive
   `400`, and timed-out headers receive `408`.
-- `--server` accepts a `ws://` or `wss://` base URL with a host and optional
-  port. Paths, queries, fragments, and URL credentials are rejected.
+- `--server` accepts a bare domain or a `ws://` or `wss://` base URL with a host
+  and optional port. Bare domains default to `ws://`; redirects are followed,
+  with `https://` locations mapped to `wss://`. Paths, queries, fragments, and
+  URL credentials are rejected.
 
 ## Performance Notes
 

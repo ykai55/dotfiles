@@ -135,8 +135,8 @@ Core commands:
   rproxy server --domain <domain> --token <token> --control-listen 127.0.0.1:7000 --http-listen 0.0.0.0:8080
   rproxy server --config server.toml
   rproxy server --domain <domain> --auth-db auth.db --management-token-file management-token --control-listen 127.0.0.1:7000
-  rproxy client --server wss://rp.example.com --token <token> http --local 127.0.0.1:8000 --subdomain <name>
-  rproxy client --server wss://rp.example.com --token <token> tcp --local 127.0.0.1:22 --remote-port <port>
+  rproxy client --server rp.example.com --token <token> http --local 127.0.0.1:8000 --subdomain <name>
+  rproxy client --server rp.example.com --token <token> tcp --local 127.0.0.1:22 --remote-port <port>
 
 Server config:
   --config is a complete TOML server configuration and cannot be combined with other server options.
@@ -201,7 +201,8 @@ Management API rules:
   Errors use {"error":{"code":"...","message":"..."}} and responses include X-Request-ID.
 
 Important rules:
-  --server must start with ws:// or wss://; the client appends /_rproxy automatically.
+  --server accepts a domain or a ws:// or wss:// base URL; the client appends /_rproxy automatically.
+  A domain defaults to ws://, and an https:// redirect is followed as wss://.
   --local must be host:port, for example 127.0.0.1:8000. Do not pass a URL.
   HTTP routing uses the Host header. HTTPS is handled by an external TLS terminator such as nginx or Caddy.
   Tunnel registrations live only while the client control WebSocket stays connected.
@@ -491,7 +492,7 @@ mod tests {
         assert!(help.contains("Returns the token secret exactly once"));
         assert!(help.contains("Authorization: Bearer <management-token>"));
         assert!(help.contains(
-            "rproxy client --server wss://rp.example.com --token <token> http --local 127.0.0.1:8000"
+            "rproxy client --server rp.example.com --token <token> http --local 127.0.0.1:8000"
         ));
         assert!(help.contains("client appends /_rproxy automatically"));
         assert!(help.contains("HTTP routing uses the Host header"));

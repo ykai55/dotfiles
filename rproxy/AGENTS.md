@@ -42,8 +42,9 @@ Local HTTP smoke test:
 
 ## Behavior Notes
 
-- `--server` must include `ws://` or `wss://`; the client appends the internal
-  `/_rproxy` path itself.
+- `--server` accepts a bare domain or a `ws://` or `wss://` base URL. Bare
+  domains default to `ws://`; redirects are followed, with `https://` locations
+  mapped to `wss://`. The client appends the internal `/_rproxy` path itself.
 - Runtime logs use `tracing` and are written to stderr. Keep default output
   useful for manual CLI runs; use stable `[rproxy server]` and
   `[rproxy client]` prefixes for human-readable messages.

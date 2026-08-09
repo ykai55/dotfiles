@@ -12,6 +12,7 @@ use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
 use tokio::time::{sleep, timeout, Duration};
 use tokio_tungstenite::connect_async_with_config;
+use tokio_tungstenite::tungstenite::error::Error as WebSocketError;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
@@ -23,6 +24,7 @@ const WRITER_QUEUE_SIZE: usize = 128;
 const WEBSOCKET_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const REGISTRATION_TIMEOUT: Duration = Duration::from_secs(5);
 const LOCAL_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_WEBSOCKET_REDIRECTS: usize = 5;
 
 #[derive(Debug)]
 pub struct ClientConfig {
@@ -45,7 +47,7 @@ pub enum ClientServiceConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ClientError {
-    #[error("--server must be a ws:// or wss:// base URL without a path, query, fragment, or credentials")]
+    #[error("--server must be a domain or ws:// or wss:// base URL without a path, query, fragment, or credentials")]
     InvalidServerUrl,
     #[error("--local must be a host:port address, got {0:?}; try 127.0.0.1:{0}")]
     InvalidLocalAddress(String),
@@ -60,7 +62,12 @@ enum ControlConnectionError {
 }
 
 pub fn control_url(server: &str) -> Result<String, ClientError> {
-    let mut url = Url::parse(server).map_err(|_| ClientError::InvalidServerUrl)?;
+    let server = if server.contains("://") {
+        server.to_string()
+    } else {
+        format!("ws://{server}")
+    };
+    let mut url = Url::parse(&server).map_err(|_| ClientError::InvalidServerUrl)?;
     if !matches!(url.scheme(), "ws" | "wss")
         || url.host().is_none()
         || url.path() != "/"
@@ -138,20 +145,67 @@ async fn connect_websocket(
     url: &str,
 ) -> anyhow::Result<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>>
 {
-    let websocket_config = WebSocketConfig {
-        max_write_buffer_size: 256 * 1024,
-        max_message_size: Some(MAX_DATA_SIZE + 5),
-        max_frame_size: Some(MAX_DATA_SIZE + 5),
-        ..WebSocketConfig::default()
+    let mut current_url = url.to_string();
+    for redirect_count in 0..=MAX_WEBSOCKET_REDIRECTS {
+        let websocket_config = WebSocketConfig {
+            max_write_buffer_size: 256 * 1024,
+            max_message_size: Some(MAX_DATA_SIZE + 5),
+            max_frame_size: Some(MAX_DATA_SIZE + 5),
+            ..WebSocketConfig::default()
+        };
+        let result = timeout(
+            WEBSOCKET_HANDSHAKE_TIMEOUT,
+            connect_async_with_config(&current_url, Some(websocket_config), true),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("websocket handshake timed out"))?;
+
+        match result {
+            Ok((socket, _)) => return Ok(socket),
+            Err(WebSocketError::Http(response)) if response.status().is_redirection() => {
+                if redirect_count == MAX_WEBSOCKET_REDIRECTS {
+                    anyhow::bail!(
+                        "websocket handshake exceeded {MAX_WEBSOCKET_REDIRECTS} redirects"
+                    );
+                }
+                let location = response
+                    .headers()
+                    .get("location")
+                    .ok_or_else(|| anyhow::anyhow!("websocket redirect has no Location header"))?
+                    .to_str()
+                    .map_err(|_| {
+                        anyhow::anyhow!("websocket redirect has an invalid Location header")
+                    })?;
+                current_url = websocket_redirect_url(&current_url, location)?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    unreachable!()
+}
+
+fn websocket_redirect_url(current_url: &str, location: &str) -> anyhow::Result<String> {
+    let current = Url::parse(current_url)?;
+    let mut redirect = current.join(location)?;
+    let websocket_scheme = match redirect.scheme() {
+        "http" | "ws" => "ws",
+        "https" | "wss" => "wss",
+        scheme => anyhow::bail!("websocket redirect uses unsupported scheme {scheme:?}"),
     };
-    timeout(
-        WEBSOCKET_HANDSHAKE_TIMEOUT,
-        connect_async_with_config(url, Some(websocket_config), true),
-    )
-    .await
-    .map_err(|_| anyhow::anyhow!("websocket handshake timed out"))?
-    .map(|(socket, _)| socket)
-    .map_err(anyhow::Error::from)
+    if current.scheme() == "wss" && websocket_scheme == "ws" {
+        anyhow::bail!("websocket redirect cannot downgrade wss to ws");
+    }
+    redirect
+        .set_scheme(websocket_scheme)
+        .map_err(|_| anyhow::anyhow!("invalid websocket redirect scheme"))?;
+    if redirect.host().is_none()
+        || !redirect.username().is_empty()
+        || redirect.password().is_some()
+        || redirect.fragment().is_some()
+    {
+        anyhow::bail!("websocket redirect target is invalid");
+    }
+    Ok(redirect.into())
 }
 
 async fn run_control_connection(
@@ -380,6 +434,69 @@ mod tests {
             control_url("ws://127.0.0.1:7000").unwrap(),
             "ws://127.0.0.1:7000/_rproxy"
         );
+    }
+
+    #[test]
+    fn maps_bare_server_domain_to_ws_control_url() {
+        assert_eq!(
+            control_url("rp.example.com").unwrap(),
+            "ws://rp.example.com/_rproxy"
+        );
+    }
+
+    #[test]
+    fn maps_https_redirect_to_wss() {
+        assert_eq!(
+            websocket_redirect_url(
+                "ws://rp.example.com/_rproxy",
+                "https://rp.example.com/_rproxy"
+            )
+            .unwrap(),
+            "wss://rp.example.com/_rproxy"
+        );
+    }
+
+    #[test]
+    fn rejects_wss_redirect_downgrade() {
+        assert!(websocket_redirect_url(
+            "wss://rp.example.com/_rproxy",
+            "http://rp.example.com/_rproxy"
+        )
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn follows_websocket_handshake_redirect() {
+        let target = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_addr = target.local_addr().unwrap();
+        let target_task = tokio::spawn(async move {
+            let (stream, _) = target.accept().await.unwrap();
+            tokio_tungstenite::accept_async(stream).await.unwrap()
+        });
+
+        let redirect = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let redirect_addr = redirect.local_addr().unwrap();
+        let redirect_task = tokio::spawn(async move {
+            let (mut stream, _) = redirect.accept().await.unwrap();
+            let mut request = [0; 1024];
+            stream.read(&mut request).await.unwrap();
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 302 Found\r\nLocation: ws://{target_addr}/_rproxy\r\nContent-Length: 0\r\n\r\n"
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+
+        let socket = connect_websocket(&format!("ws://{redirect_addr}/_rproxy"))
+            .await
+            .unwrap();
+        drop(socket);
+        redirect_task.await.unwrap();
+        drop(target_task.await.unwrap());
     }
 
     #[test]
