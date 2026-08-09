@@ -8,6 +8,7 @@ CERT_DIR="./certs/example.com"
 ALIYUN_REGION_ID="cn-beijing"
 ALIYUN_PROFILE="default"
 ALIYUN_CAS_ENDPOINT="cas.aliyuncs.com"
+ALIYUN_CERT_REGION="cn-hangzhou"
 ACME_DIRECTORY_URL="https://acme-staging-v02.api.letsencrypt.org/directory"
 DNS_PROPAGATION_SECONDS="90"
 
@@ -15,6 +16,8 @@ DNS_PROPAGATION_SECONDS="90"
 ALB_LISTENER_IDS=(
   "lsn-test-example"
 )
+
+CDN_DOMAINS=()
 
 # Format: bucket:custom-domain. Use only a test bucket/domain for rollout.
 OSS_CNAME_TARGETS=(
@@ -32,6 +35,9 @@ PROTECTED_SERVER_HOSTS=(
 )
 PROTECTED_ALB_LISTENER_IDS=(
   "lsn-production-example"
+)
+PROTECTED_CDN_DOMAINS=(
+  "cdn.example.com"
 )
 PROTECTED_OSS_CNAME_TARGETS=(
   "production-bucket-example:assets.example.com"

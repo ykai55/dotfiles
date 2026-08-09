@@ -61,6 +61,7 @@ class RenewAliyunCertsTests(unittest.TestCase):
                     'ACME_DIRECTORY_URL="https://acme-staging-v02.api.letsencrypt.org/directory"',
                     'DNS_PROPAGATION_SECONDS="1"',
                     'ALB_LISTENER_IDS=("lsn-test-example")',
+                    'CDN_DOMAINS=("cdn-test.example.com")',
                     'OSS_CNAME_TARGETS=("test-bucket-example:test-u.example.com")',
                     'SERVER_DEPLOYS=("admin@test.example.com:/tmp:fullchain.pem,privkey.pem:true")',
                     'PROTECTED_SERVER_HOSTS=("prod.example.com")',
@@ -79,6 +80,7 @@ class RenewAliyunCertsTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("DRY RUN", result.stdout)
         self.assertIn("lsn-test-example", result.stdout)
+        self.assertIn("cdn-test.example.com", result.stdout)
         self.assertIn("test-bucket-example:test-u.example.com", result.stdout)
         self.assertIn("admin@test.example.com", result.stdout)
 
@@ -114,6 +116,17 @@ class RenewAliyunCertsTests(unittest.TestCase):
             result = self.run_script("--dry-run", cwd=directory)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("protected OSS target", result.stderr)
+
+    def test_protected_cdn_domain_requires_explicit_allow_flag(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            self.write_config(
+                directory,
+                'PROTECTED_CDN_DOMAINS=("cdn-test.example.com")',
+            )
+            result = self.run_script("--dry-run", cwd=directory)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("protected CDN domain", result.stderr)
 
     def test_dry_run_rejects_invalid_oss_target(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -199,6 +212,12 @@ class RenewAliyunCertsTests(unittest.TestCase):
         script = SCRIPT.read_text()
         self.assertIn('aliyun --force --profile "$ALIYUN_PROFILE"', script)
 
+    def test_cdn_deployment_uses_uploaded_cas_certificate(self) -> None:
+        script = SCRIPT.read_text()
+        self.assertIn("SetCdnDomainSSLCertificate", script)
+        self.assertIn('--CertId "$cert_id"', script)
+        self.assertIn('--CertRegion "$ALIYUN_CERT_REGION"', script)
+
     def test_server_deploy_accepts_new_host_keys_noninteractively(self) -> None:
         script = SCRIPT.read_text()
         self.assertIn("StrictHostKeyChecking=accept-new", script)
@@ -271,6 +290,26 @@ class RenewAliyunCertsTests(unittest.TestCase):
                 hashlib.sha256(canonical.encode()).digest()
             ).rstrip(b"=").decode()
             self.assertEqual(result.stdout, expected)
+
+    def test_empty_key_files_are_regenerated(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cert_dir = Path(tmp) / "certs"
+            cert_dir.mkdir()
+            (cert_dir / "account.key").touch()
+            (cert_dir / "domain.key").touch()
+            command = (
+                'RENEW_ALIYUN_CERTS_TESTING=1 source "$1"; '
+                'CERT_DIR="$2"; ensure_keys'
+            )
+            result = subprocess.run(
+                ["bash", "-c", command, "bash", str(SCRIPT), str(cert_dir)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertGreater((cert_dir / "account.key").stat().st_size, 0)
+            self.assertGreater((cert_dir / "domain.key").stat().st_size, 0)
 
 
 if __name__ == "__main__":

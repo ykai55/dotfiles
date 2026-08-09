@@ -111,13 +111,16 @@ validate_config() {
   require_var ACME_DIRECTORY_URL
   DNS_PROPAGATION_SECONDS="${DNS_PROPAGATION_SECONDS:-90}"
   ALIYUN_CAS_ENDPOINT="${ALIYUN_CAS_ENDPOINT:-cas.aliyuncs.com}"
+  ALIYUN_CERT_REGION="${ALIYUN_CERT_REGION:-cn-hangzhou}"
 
   ensure_array ALT_NAMES
   ensure_array ALB_LISTENER_IDS
+  ensure_array CDN_DOMAINS
   ensure_array OSS_CNAME_TARGETS
   ensure_array SERVER_DEPLOYS
   ensure_array PROTECTED_SERVER_HOSTS
   ensure_array PROTECTED_ALB_LISTENER_IDS
+  ensure_array PROTECTED_CDN_DOMAINS
   ensure_array PROTECTED_OSS_CNAME_TARGETS
 
   local target remote dest files reload_command bucket domain file
@@ -159,6 +162,13 @@ validate_config() {
         fi
       done
     done
+    for target in "${CDN_DOMAINS[@]}"; do
+      for protected_target in "${PROTECTED_CDN_DOMAINS[@]}"; do
+        if [[ -n "$protected_target" && "$target" == "$protected_target" ]]; then
+          die "Refusing protected CDN domain without ALLOW_PRODUCTION_TARGETS=1: $target"
+        fi
+      done
+    done
     for target in "${OSS_CNAME_TARGETS[@]}"; do
       for protected_target in "${PROTECTED_OSS_CNAME_TARGETS[@]}"; do
         if [[ -n "$protected_target" && "$target" == "$protected_target" ]]; then
@@ -174,6 +184,7 @@ print_dry_run_summary() {
   printf 'Domain: %s\n' "$DOMAIN"
   printf 'Certificate directory: %s\n' "$CERT_DIR"
   printf 'ALB listeners: %s\n' "${ALB_LISTENER_IDS[*]:-(none)}"
+  printf 'CDN domains: %s\n' "${CDN_DOMAINS[*]:-(none)}"
   printf 'OSS CNAME targets: %s\n' "${OSS_CNAME_TARGETS[*]:-(none)}"
   printf 'Server deploys: %s\n' "${SERVER_DEPLOYS[*]:-(none)}"
 }
@@ -220,12 +231,12 @@ json_quote() {
 ensure_keys() {
   mkdir -p "$CERT_DIR"
   chmod 700 "$CERT_DIR"
-  if [[ ! -f "$CERT_DIR/account.key" ]]; then
+  if [[ ! -s "$CERT_DIR/account.key" ]]; then
     log "Generating ACME account key"
     openssl genrsa -out "$CERT_DIR/account.key" 4096 >/dev/null 2>&1
     chmod 600 "$CERT_DIR/account.key"
   fi
-  if [[ ! -f "$CERT_DIR/domain.key" ]]; then
+  if [[ ! -s "$CERT_DIR/domain.key" ]]; then
     log "Generating domain key"
     openssl genrsa -out "$CERT_DIR/domain.key" 4096 >/dev/null 2>&1
     chmod 600 "$CERT_DIR/domain.key"
@@ -521,6 +532,21 @@ deploy_alb_listeners() {
   done
 }
 
+deploy_cdn_domains() {
+  local cert_id="$1"
+  local domain
+  for domain in "${CDN_DOMAINS[@]}"; do
+    [[ -n "$domain" ]] || continue
+    log "Updating CDN certificate $domain"
+    aliyun --profile "$ALIYUN_PROFILE" cdn SetCdnDomainSSLCertificate \
+      --DomainName "$domain" \
+      --SSLProtocol on \
+      --CertType cas \
+      --CertId "$cert_id" \
+      --CertRegion "$ALIYUN_CERT_REGION" >/dev/null
+  done
+}
+
 xml_escape_file() {
   local file="$1"
   sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' "$file"
@@ -595,6 +621,7 @@ main() {
   cert_id="$(upload_aliyun_certificate)"
   log "Uploaded Aliyun certificate ID: $cert_id"
   deploy_alb_listeners "$cert_id"
+  deploy_cdn_domains "$cert_id"
   deploy_oss_cnames "$cert_id"
   deploy_servers
   log "Done"
