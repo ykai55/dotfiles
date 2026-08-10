@@ -15,6 +15,14 @@ Before formal implementation begins, you are explicitly encouraged to question a
 
 - Do not use git worktrees by default unless the user explicitly requests or mentions them.
 
+## Workspace Boundaries
+
+- Treat the active workspace or Git worktree root as the default filesystem boundary for every task. Start discovery there and keep it there whenever the workspace contains enough information to proceed.
+- Avoid recursively listing, globbing, grepping, searching, or inspecting parent directories, the home directory, filesystem roots, sibling repositories, or broad temporary-directory scopes.
+- Expand outside the workspace only when the task genuinely requires external information and workspace-local evidence is insufficient, or when the user explicitly names an external path or resource. Start from the narrowest known relevant path instead of using an external directory as a broad discovery root.
+- Do not search outside the workspace merely to discover projects, dependencies, configuration, caches, or tool installations. Prefer workspace manifests, project-provided commands, and configured references; if the necessary external location is unknown or the expansion would be broad, ask the user first.
+- Apply these rules equally to shell commands, file tools, delegated subagents, and MCP tools. Give subagents the same workspace-first guidance.
+
 # Code Style
 
 ## Minimal Abstraction Rule

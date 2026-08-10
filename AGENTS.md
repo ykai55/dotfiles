@@ -63,10 +63,12 @@ General
 - Prefer minimal, direct changes; these scripts are small and focused.
 - Keep changes ASCII-only unless the file already contains non-ASCII.
 - Use descriptive variable names; avoid unnecessary abbreviations.
-- Do not run broad content searches from large scopes such as the home directory
-  or filesystem root by default. Filename searches are fine; content/string
-  matching over those scopes requires either an explicit user request or prior
-  user approval.
+- Keep filename and content searches within this repository by default. Expand
+  outside it only when the task genuinely requires external information and
+  repository-local evidence is insufficient, or when the user names an external
+  path. Start from the narrowest relevant path rather than recursively searching
+  parent directories, the home directory, filesystem roots, sibling repositories,
+  or broad temporary-directory scopes.
 
 Python (tmux-dump, tmux-load)
 - Shebang: `#!/usr/bin/env python3`.
