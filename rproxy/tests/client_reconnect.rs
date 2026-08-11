@@ -16,6 +16,69 @@ fn free_addr() -> SocketAddr {
 }
 
 #[tokio::test]
+async fn reconnects_after_initial_connection_failure() {
+    let listen = free_addr();
+    let listener = TcpListener::bind(listen).await.unwrap();
+    let first_attempt_failed = Arc::new(Notify::new());
+    let first_attempt_failed_for_server = first_attempt_failed.clone();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        drop(stream);
+        first_attempt_failed_for_server.notify_one();
+
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut control = accept_async(stream).await.unwrap();
+        let Some(Ok(Message::Text(text))) = control.next().await else {
+            panic!("expected control hello");
+        };
+        assert!(matches!(
+            serde_json::from_str::<ClientHello>(&text).unwrap(),
+            ClientHello::Control { .. }
+        ));
+        control
+            .send(Message::Text(
+                serde_json::to_string(&ServerMessage::Registered {
+                    session_id: "session-after-outage".into(),
+                    public: "http://foo.test".into(),
+                    subdomain: Some("foo".into()),
+                    remote_port: None,
+                })
+                .unwrap(),
+            ))
+            .await
+            .unwrap();
+
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut data = accept_async(stream).await.unwrap();
+        let Some(Ok(Message::Text(text))) = data.next().await else {
+            panic!("expected data hello");
+        };
+        assert!(matches!(
+            serde_json::from_str::<ClientHello>(&text).unwrap(),
+            ClientHello::Data { .. }
+        ));
+    });
+
+    let client = tokio::spawn(rproxy::client::run(ClientConfig {
+        server: format!("ws://{listen}"),
+        token: "secret".into(),
+        service: ClientServiceConfig::Http {
+            local: "127.0.0.1:1".into(),
+            subdomain: Some("foo".into()),
+        },
+    }));
+
+    timeout(Duration::from_secs(1), first_attempt_failed.notified())
+        .await
+        .expect("client should make an initial connection attempt");
+    timeout(Duration::from_secs(3), server)
+        .await
+        .expect("client should reconnect after the initial connection fails")
+        .unwrap();
+    client.abort();
+}
+
+#[tokio::test]
 async fn reconnects_after_control_websocket_closes() {
     let listen = free_addr();
     let listener = TcpListener::bind(listen).await.unwrap();

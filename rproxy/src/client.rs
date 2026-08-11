@@ -8,9 +8,9 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{mpsc, watch, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
-use tokio::time::{sleep, timeout, Duration};
+use tokio::time::{sleep, timeout, Duration, Instant};
 use tokio_tungstenite::connect_async_with_config;
 use tokio_tungstenite::tungstenite::error::Error as WebSocketError;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
@@ -25,6 +25,11 @@ const WEBSOCKET_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const REGISTRATION_TIMEOUT: Duration = Duration::from_secs(5);
 const LOCAL_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_WEBSOCKET_REDIRECTS: usize = 5;
+const CONTROL_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
+const CONTROL_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(10);
+const DATA_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
+const STABLE_CONNECTION_DURATION: Duration = Duration::from_secs(60);
 
 #[derive(Debug)]
 pub struct ClientConfig {
@@ -57,6 +62,11 @@ pub enum ClientError {
 enum ControlConnectionError {
     #[error(transparent)]
     Disconnected(#[from] anyhow::Error),
+    #[error("{source}")]
+    EstablishedConnectionLost {
+        source: anyhow::Error,
+        connected_for: Duration,
+    },
     #[error("server error {0:?}: {1}")]
     Rejected(crate::protocol::ServerErrorCode, String),
 }
@@ -106,8 +116,13 @@ fn log_client_warn(message: &str) {
     tracing::warn!("{}", client_log_line(message));
 }
 
-fn control_reconnect_delay() -> Duration {
-    Duration::from_secs(1)
+fn control_reconnect_delay(consecutive_failures: u32, jitter: f64) -> Duration {
+    let exponent = consecutive_failures.saturating_sub(1).min(5);
+    let base = Duration::from_secs((1_u64 << exponent).min(MAX_RECONNECT_DELAY.as_secs()));
+    let jitter_factor = 0.5 + jitter.clamp(0.0, 1.0) * 0.5;
+    Duration::from_secs_f64(
+        (base.as_secs_f64() * jitter_factor).min(MAX_RECONNECT_DELAY.as_secs_f64()),
+    )
 }
 
 pub async fn run(config: ClientConfig) -> anyhow::Result<()> {
@@ -126,18 +141,33 @@ pub async fn run(config: ClientConfig) -> anyhow::Result<()> {
             remote_port: *remote_port,
         },
     };
+    let mut consecutive_failures = 0_u32;
     loop {
         match run_control_connection(&url, &config, service.clone()).await {
             Ok(()) => {}
             Err(ControlConnectionError::Disconnected(error)) => {
                 log_client_warn(&format!("control websocket disconnected: {error}"));
             }
+            Err(ControlConnectionError::EstablishedConnectionLost {
+                source,
+                connected_for,
+            }) => {
+                log_client_warn(&format!("control websocket disconnected: {source}"));
+                if connected_for >= STABLE_CONNECTION_DURATION {
+                    consecutive_failures = 0;
+                }
+            }
             Err(ControlConnectionError::Rejected(code, message)) => {
                 anyhow::bail!("server error {code:?}: {message}");
             }
         }
-        sleep(control_reconnect_delay()).await;
-        log_client_info("reconnecting control websocket");
+        consecutive_failures = consecutive_failures.saturating_add(1);
+        let delay = control_reconnect_delay(consecutive_failures, rand::random());
+        log_client_info(&format!(
+            "reconnecting control websocket in {:.1}s",
+            delay.as_secs_f64()
+        ));
+        sleep(delay).await;
     }
 }
 
@@ -258,24 +288,82 @@ async fn run_control_connection(
         .await
         .map_err(anyhow::Error::from)?;
 
+    let connected_at = Instant::now();
     let cancellation = CancellationToken::new();
-    let (control_sender, mut control_receiver) = control.split();
-    let mut mux = Box::pin(run_client_mux(data, local, cancellation.clone()));
+    let mut control_monitor = Box::pin(monitor_control_connection(
+        control,
+        CONTROL_HEARTBEAT_INTERVAL,
+        CONTROL_HEARTBEAT_TIMEOUT,
+    ));
+    let mut mux = Box::pin(run_client_mux(
+        data,
+        local,
+        cancellation.clone(),
+        CONTROL_HEARTBEAT_INTERVAL,
+        CONTROL_HEARTBEAT_TIMEOUT,
+    ));
     let result = tokio::select! {
         result = &mut mux => result,
-        _ = async {
-            while let Some(message) = control_receiver.next().await {
-                if matches!(message, Ok(Message::Close(_)) | Err(_)) {
-                    break;
-                }
-            }
-        } => {
+        result = &mut control_monitor => {
             cancellation.cancel();
-            mux.await
+            let _ = mux.await;
+            result
         }
     };
-    drop(control_sender);
-    result.map_err(ControlConnectionError::Disconnected)
+    result.map_err(|source| ControlConnectionError::EstablishedConnectionLost {
+        source,
+        connected_for: connected_at.elapsed(),
+    })
+}
+
+async fn monitor_control_connection<S>(
+    mut control: tokio_tungstenite::WebSocketStream<S>,
+    heartbeat_interval: Duration,
+    heartbeat_timeout: Duration,
+) -> anyhow::Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let mut sequence = 0_u64;
+    let heartbeat = sleep(heartbeat_interval);
+    tokio::pin!(heartbeat);
+    loop {
+        tokio::select! {
+            incoming = control.next() => match incoming {
+                Some(Err(error)) => return Err(error.into()),
+                Some(Ok(Message::Close(_))) | None => {
+                    anyhow::bail!("control websocket closed")
+                }
+                Some(Ok(_)) => {}
+            },
+            _ = &mut heartbeat => {
+                sequence = sequence.wrapping_add(1);
+                let payload = sequence.to_be_bytes().to_vec();
+                timeout(
+                    heartbeat_timeout,
+                    control.send(Message::Ping(payload.clone())),
+                )
+                .await
+                .map_err(|_| anyhow::anyhow!("control heartbeat write timed out"))??;
+
+                timeout(heartbeat_timeout, async {
+                    loop {
+                        match control.next().await {
+                            Some(Ok(Message::Pong(received))) if received == payload => return Ok(()),
+                            Some(Err(error)) => return Err(error.into()),
+                            Some(Ok(Message::Close(_))) | None => {
+                                anyhow::bail!("control websocket closed")
+                            }
+                            Some(Ok(_)) => {}
+                        }
+                    }
+                })
+                .await
+                .map_err(|_| anyhow::anyhow!("control heartbeat timed out"))??;
+                heartbeat.as_mut().reset(Instant::now() + heartbeat_interval);
+            }
+        }
+    }
 }
 
 struct StreamEntry {
@@ -287,32 +375,80 @@ async fn run_client_mux<S>(
     socket: tokio_tungstenite::WebSocketStream<S>,
     local: String,
     cancellation: CancellationToken,
+    heartbeat_interval: Duration,
+    heartbeat_timeout: Duration,
 ) -> anyhow::Result<()>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     let (mut ws_sender, mut ws_receiver) = socket.split();
     let (writer_tx, mut writer_rx) = mpsc::channel::<DataFrame>(WRITER_QUEUE_SIZE);
+    let (heartbeat_ack_tx, mut heartbeat_ack_rx) = watch::channel(0_u64);
+    let writer_cancellation = cancellation.clone();
     let mut writer = tokio::spawn(async move {
-        while let Some(frame) = writer_rx.recv().await {
-            ws_sender.send(Message::Binary(frame.encode()?)).await?;
+        let mut heartbeat_sequence = 0_u64;
+        let heartbeat = sleep(heartbeat_interval);
+        tokio::pin!(heartbeat);
+        loop {
+            tokio::select! {
+                _ = writer_cancellation.cancelled() => return Ok(()),
+                outgoing = writer_rx.recv() => {
+                    let Some(frame) = outgoing else { return Ok(()); };
+                    let encoded = frame.encode()?;
+                    tokio::select! {
+                        _ = writer_cancellation.cancelled() => return Ok(()),
+                        result = timeout(DATA_WRITE_TIMEOUT, ws_sender.send(Message::Binary(encoded))) => {
+                            result.map_err(|_| anyhow::anyhow!("data websocket write timed out"))??;
+                        }
+                    }
+                }
+                _ = &mut heartbeat => {
+                    heartbeat_sequence = heartbeat_sequence.wrapping_add(1);
+                    let payload = heartbeat_sequence.to_be_bytes().to_vec();
+                    tokio::select! {
+                        _ = writer_cancellation.cancelled() => return Ok(()),
+                        result = timeout(heartbeat_timeout, ws_sender.send(Message::Ping(payload))) => {
+                            result.map_err(|_| anyhow::anyhow!("data heartbeat write timed out"))??;
+                        }
+                    }
+                    tokio::select! {
+                        _ = writer_cancellation.cancelled() => return Ok(()),
+                        result = timeout(heartbeat_timeout, heartbeat_ack_rx.wait_for(|ack| *ack == heartbeat_sequence)) => {
+                            result.map_err(|_| anyhow::anyhow!("data heartbeat timed out"))?
+                                .map_err(|_| anyhow::anyhow!("data heartbeat acknowledgement channel closed"))?;
+                        }
+                    }
+                    heartbeat.as_mut().reset(Instant::now() + heartbeat_interval);
+                }
+            }
         }
-        anyhow::Ok(())
     });
     let permits = Arc::new(Semaphore::new(MAX_STREAMS));
     let mut streams = HashMap::<u32, StreamEntry>::new();
     let mut tasks = JoinSet::<u32>::new();
-    let result = loop {
-        tokio::select! {
-            _ = cancellation.cancelled() => break Ok(()),
-            result = &mut writer => break match result { Ok(result) => result, Err(error) => Err(error.into()) },
+    let mut writer_finished = false;
+    let result = async {
+        loop {
+            tokio::select! {
+                _ = cancellation.cancelled() => break Ok(()),
+                result = &mut writer => {
+                    writer_finished = true;
+                    break match result { Ok(result) => result, Err(error) => Err(error.into()) };
+                }
             Some(result) = tasks.join_next() => {
                 if let Ok(stream_id) = result { streams.remove(&stream_id); }
             }
             incoming = ws_receiver.next() => {
                 let frame = match incoming {
                     Some(Ok(Message::Binary(data))) => DataFrame::decode(&data)?,
-                    Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break Err(anyhow::anyhow!("data websocket closed")),
+                    Some(Ok(Message::Pong(received))) if received.len() == 8 => {
+                        let mut sequence = [0_u8; 8];
+                        sequence.copy_from_slice(&received);
+                        heartbeat_ack_tx.send_replace(u64::from_be_bytes(sequence));
+                        continue;
+                    }
+                    Some(Err(error)) => break Err(error.into()),
+                    Some(Ok(Message::Close(_))) | None => break Err(anyhow::anyhow!("data websocket closed")),
                     Some(Ok(_)) => continue,
                 };
                 let stream_id = frame.stream_id();
@@ -321,7 +457,8 @@ where
                         break Err(anyhow::anyhow!("duplicate stream id {stream_id}"));
                     }
                     let Ok(permit) = permits.clone().try_acquire_owned() else {
-                        writer_tx.send(DataFrame::Reset { stream_id }).await?;
+                        writer_tx.try_send(DataFrame::Reset { stream_id })
+                            .map_err(|_| anyhow::anyhow!("data websocket writer queue full"))?;
                         continue;
                     };
                     let (events_tx, events_rx) = mpsc::channel(STREAM_QUEUE_SIZE);
@@ -341,24 +478,30 @@ where
                     if matches!(frame, DataFrame::Reset { .. }) {
                         continue;
                     }
-                    writer_tx.send(DataFrame::Reset { stream_id }).await?;
+                    writer_tx.try_send(DataFrame::Reset { stream_id })
+                        .map_err(|_| anyhow::anyhow!("data websocket writer queue full"))?;
                     continue;
                 };
                 if entry.events.try_send(frame).is_err() {
                     if let Some(entry) = streams.remove(&stream_id) { entry.cancellation.cancel(); }
-                    writer_tx.send(DataFrame::Reset { stream_id }).await?;
+                    writer_tx.try_send(DataFrame::Reset { stream_id })
+                        .map_err(|_| anyhow::anyhow!("data websocket writer queue full"))?;
                 }
             }
+            }
         }
-    };
+    }
+    .await;
     cancellation.cancel();
     for entry in streams.values() {
         entry.cancellation.cancel();
     }
     tasks.abort_all();
     while tasks.join_next().await.is_some() {}
-    writer.abort();
-    let _ = writer.await;
+    if !writer_finished {
+        writer.abort();
+        let _ = writer.await;
+    }
     result
 }
 
@@ -523,7 +666,127 @@ mod tests {
     }
 
     #[test]
-    fn reconnect_delay_is_short() {
-        assert_eq!(control_reconnect_delay(), Duration::from_secs(1));
+    fn reconnect_delay_increases_and_stays_bounded() {
+        assert_eq!(control_reconnect_delay(1, 1.0), Duration::from_secs(1));
+        assert_eq!(control_reconnect_delay(2, 1.0), Duration::from_secs(2));
+        assert_eq!(control_reconnect_delay(20, 1.0), Duration::from_secs(30));
+        assert_eq!(control_reconnect_delay(20, 0.0), Duration::from_secs(15));
+    }
+
+    #[tokio::test]
+    async fn control_heartbeat_times_out_when_peer_stops_responding() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let _socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            sleep(Duration::from_secs(1)).await;
+        });
+        let socket = connect_websocket(&format!("ws://{address}")).await.unwrap();
+
+        let error = monitor_control_connection(
+            socket,
+            Duration::from_millis(50),
+            Duration::from_millis(150),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("heartbeat timed out"));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn control_heartbeat_keeps_responsive_connection_alive() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while socket.next().await.is_some() {}
+        });
+        let socket = connect_websocket(&format!("ws://{address}")).await.unwrap();
+        let monitor = monitor_control_connection(
+            socket,
+            Duration::from_millis(50),
+            Duration::from_millis(150),
+        );
+
+        assert!(timeout(Duration::from_millis(500), monitor).await.is_err());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn data_heartbeat_times_out_when_peer_stops_responding() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let _socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            sleep(Duration::from_secs(1)).await;
+        });
+        let socket = connect_websocket(&format!("ws://{address}")).await.unwrap();
+
+        let error = run_client_mux(
+            socket,
+            "127.0.0.1:1".into(),
+            CancellationToken::new(),
+            Duration::from_millis(50),
+            Duration::from_millis(100),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("data heartbeat timed out"));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn data_heartbeat_keeps_responsive_connection_alive() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while socket.next().await.is_some() {}
+        });
+        let socket = connect_websocket(&format!("ws://{address}")).await.unwrap();
+        let mux = run_client_mux(
+            socket,
+            "127.0.0.1:1".into(),
+            CancellationToken::new(),
+            Duration::from_millis(50),
+            Duration::from_millis(150),
+        );
+
+        assert!(timeout(Duration::from_millis(500), mux).await.is_err());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn data_mux_stops_promptly_when_cancelled() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let _socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            sleep(Duration::from_secs(1)).await;
+        });
+        let socket = connect_websocket(&format!("ws://{address}")).await.unwrap();
+        let cancellation = CancellationToken::new();
+        let mux = run_client_mux(
+            socket,
+            "127.0.0.1:1".into(),
+            cancellation.clone(),
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+        );
+        cancellation.cancel();
+
+        timeout(Duration::from_millis(200), mux)
+            .await
+            .expect("data mux should stop when its control connection is cancelled")
+            .unwrap();
+        server.abort();
     }
 }
