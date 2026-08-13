@@ -130,7 +130,7 @@ class TmuxLoadWindowRestoreTests(CapturingTestCase):
                 fallback_dir="/",
             )
 
-        set_calls = [c for c in queue_calls if c and c[0] == "set-window-option"]
+        set_calls = [c for c in queue_calls if c and c[:4] == ["set-window-option", "-t", "@2", "automatic-rename"]]
         self.assertEqual(len(set_calls), 1)
         self.assertEqual(set_calls[0], ["set-window-option", "-t", "@2", "automatic-rename", "on"])
 
@@ -166,7 +166,7 @@ class TmuxLoadWindowRestoreTests(CapturingTestCase):
                 fallback_dir="/",
             )
 
-        set_calls = [c for c in queue_calls if c and c[0] == "set-window-option"]
+        set_calls = [c for c in queue_calls if c and "automatic-rename" in c]
         self.assertEqual(len(set_calls), 0)
 
     def test_restore_applies_zoomed_window(self):
@@ -274,7 +274,8 @@ class TmuxLoadWindowRestoreTests(CapturingTestCase):
             mock.patch.object(self.tmux_load, "ensure_window_panes", side_effect=ensure_window_panes), \
             mock.patch.object(self.tmux_load, "is_empty_session", return_value=True), \
             mock.patch.object(self.tmux_load, "current_session_name", return_value="cur"), \
-            mock.patch.object(self.tmux_load, "session_exists", return_value=True):
+            mock.patch.object(self.tmux_load, "session_exists", return_value=True), \
+            mock.patch.dict(self.tmux_load.os.environ, {"TMUX": "1"}, clear=True):
             self.tmux_load.restore_from_dump(
                 data,
                 force=False,
@@ -287,14 +288,14 @@ class TmuxLoadWindowRestoreTests(CapturingTestCase):
 
         new_session_calls = [c for c in calls if c and c[0] == "new-session"]
         new_window_calls = [c for c in calls if c and c[0] == "new-window"]
-        kill_window_calls = [c for c in queue_calls if c and c[0] == "kill-window"]
+        cleanup_calls = [c for c in calls if c and c[0] == "run-shell"]
         select_window_calls = [c for c in queue_calls if c and c[0] == "select-window"]
         self.assertEqual(len(new_session_calls), 0)
         self.assertEqual(len(new_window_calls), 3)
         self.assertEqual(len(ensure_calls), 3)
-        self.assertEqual(len(kill_window_calls), 1)
+        self.assertEqual(len(cleanup_calls), 1)
         self.assertEqual(len(select_window_calls), 1)
-        self.assertIn("@orig", kill_window_calls[0])
+        self.assertIn("@orig", cleanup_calls[0][-1])
         self.assertIn("-n", new_window_calls[0])
         self.assertIn("w1", new_window_calls[0])
         self.assertIn("-c", new_window_calls[0])
@@ -355,7 +356,8 @@ class TmuxLoadWindowRestoreTests(CapturingTestCase):
             mock.patch.object(self.tmux_load, "ensure_window_panes", side_effect=ensure_window_panes), \
             mock.patch.object(self.tmux_load, "is_empty_session", return_value=True), \
             mock.patch.object(self.tmux_load, "current_session_name", return_value="cur"), \
-            mock.patch.object(self.tmux_load, "session_exists", return_value=True):
+            mock.patch.object(self.tmux_load, "session_exists", return_value=True), \
+            mock.patch.dict(self.tmux_load.os.environ, {"TMUX": "1"}, clear=True):
             self.tmux_load.restore_from_dump(
                 data,
                 force=False,
@@ -367,11 +369,11 @@ class TmuxLoadWindowRestoreTests(CapturingTestCase):
             )
 
         new_window_calls = [c for c in calls if c and c[0] == "new-window"]
-        kill_window_calls = [c for c in queue_calls if c and c[0] == "kill-window"]
+        cleanup_calls = [c for c in calls if c and c[0] == "run-shell"]
         self.assertEqual(len(new_window_calls), 2)
         self.assertEqual(ensure_calls, [("@1", 2), ("@2", 3)])
-        self.assertEqual(len(kill_window_calls), 1)
-        self.assertIn("@orig", kill_window_calls[0])
+        self.assertEqual(len(cleanup_calls), 1)
+        self.assertIn("@orig", cleanup_calls[0][-1])
         self.assertIn("-n", new_window_calls[0])
         self.assertIn("w1", new_window_calls[0])
         self.assertIn("-c", new_window_calls[0])
@@ -451,6 +453,7 @@ class TmuxLoadWindowRestoreTests(CapturingTestCase):
             mock.patch.object(self.tmux_load, "tmux_flush"), \
             mock.patch.object(self.tmux_load, "ensure_window_panes"), \
             mock.patch.object(self.tmux_load, "apply_window_options"), \
+            mock.patch.object(self.tmux_load, "restore_directory", side_effect=lambda path, fallback: path), \
             mock.patch.object(self.tmux_load, "session_exists", return_value=False):
             self.tmux_load.restore_from_dump(
                 data,
@@ -469,7 +472,7 @@ class TmuxLoadWindowRestoreTests(CapturingTestCase):
         self.assertIn("-c", new_session_calls[0])
         self.assertIn("/base", new_session_calls[0])
         self.assertIn("-c", new_window_calls[0])
-        self.assertIn("/fromdump1", new_window_calls[0])
+        self.assertIn("/base", new_window_calls[0])
         self.assertIn("-c", new_window_calls[1])
         self.assertIn("/fromdump2", new_window_calls[1])
         kill_window_calls = [c for c in queue_calls if c and c[0] == "kill-window"]
@@ -499,6 +502,7 @@ class TmuxLoadWindowRestoreTests(CapturingTestCase):
             return ""
 
         with mock.patch.object(self.tmux_load, "tmux_out", side_effect=tmux_out), \
+            mock.patch.object(self.tmux_load, "tmux_flush"), \
             mock.patch.object(self.tmux_load, "session_exists", return_value=False):
             self.tmux_load.restore_from_dump(
                 data,
@@ -570,8 +574,10 @@ class TmuxLoadWindowRestoreTests(CapturingTestCase):
             )
 
         clear_calls = [c for c in queue_calls if c and c[0] == "kill-window"]
-        self.assertEqual(len(clear_calls), 1)
-        self.assertIn("-a", clear_calls[0])
+        self.assertEqual(clear_calls, [])
+        cleanup_calls = [c for c in calls if c and c[0] == "run-shell"]
+        self.assertEqual(len(cleanup_calls), 1)
+        self.assertIn("kill-window -t @orig", cleanup_calls[0][-1])
 
     def test_append_keeps_target_session(self):
         data = {
@@ -607,6 +613,109 @@ class TmuxLoadWindowRestoreTests(CapturingTestCase):
         kill_calls = [c for c in queue_calls if c and c[0] == "kill-session"]
         self.assertEqual(len(kill_calls), 0)
 
+    def test_append_keeps_empty_target_window(self):
+        data = {
+            "name": "sess",
+            "windows": [
+                {"index": 0, "name": "restored", "panes": [{"index": 0, "path": "/"}]},
+            ],
+        }
+        queue_calls = []
+
+        def tmux_out(args):
+            if args and args[0] == "new-window":
+                return "@new"
+            return ""
+
+        with mock.patch.object(self.tmux_load, "tmux_out", side_effect=tmux_out), \
+            mock.patch.object(self.tmux_load, "tmux_queue", side_effect=queue_calls.append), \
+            mock.patch.object(self.tmux_load, "tmux_flush"), \
+            mock.patch.object(self.tmux_load, "session_exists", return_value=True), \
+            mock.patch.object(self.tmux_load, "is_empty_session", return_value=True), \
+            mock.patch.object(self.tmux_load, "current_session_name", return_value=None):
+            self.tmux_load.restore_from_dump(
+                data, False, True, False, "sess", "", "/"
+            )
+
+        self.assertFalse(any(call[0] == "kill-window" for call in queue_calls))
+
+    def test_first_pane_shell_command_runs_once(self):
+        data = {
+            "name": "sess",
+            "windows": [
+                {
+                    "index": 0,
+                    "name": "w",
+                    "panes": [
+                        {
+                            "index": 0,
+                            "path": "/",
+                            "processes": [
+                                {"pid": 1, "ppid": 0, "command": ["fish"]},
+                                {"pid": 2, "ppid": 1, "command": ["nvim", "README.md"]},
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+        queue_calls = []
+
+        def tmux_out(args):
+            if args and args[0] == "new-session":
+                return "@placeholder"
+            if args and args[0] == "new-window":
+                return "@new"
+            return ""
+
+        with mock.patch.object(self.tmux_load, "tmux_out", side_effect=tmux_out), \
+            mock.patch.object(self.tmux_load, "tmux_queue", side_effect=queue_calls.append), \
+            mock.patch.object(self.tmux_load, "tmux_flush"), \
+            mock.patch.object(self.tmux_load, "session_exists", return_value=False), \
+            mock.patch.object(self.tmux_load, "current_session_name", return_value=None), \
+            mock.patch.object(self.tmux_load, "list_pane_ids_by_index", return_value={0: "%1"}):
+            self.tmux_load.restore_from_dump(
+                data, False, False, True, "sess", "", "/"
+            )
+
+        literal_sends = [call for call in queue_calls if call[:4] == ["send-keys", "-t", "%1", "-l"]]
+        self.assertEqual(literal_sends, [["send-keys", "-t", "%1", "-l", "nvim README.md"]])
+
+    def test_base_dir_overrides_first_restored_window(self):
+        data = {
+            "name": "sess",
+            "windows": [
+                {"index": 0, "name": "w1", "panes": [{"index": 0, "path": "/dump1"}]},
+                {"index": 1, "name": "w2", "panes": [{"index": 0, "path": "/dump2"}]},
+            ],
+        }
+        direct_calls = []
+
+        def tmux_out(args):
+            direct_calls.append(args)
+            if args and args[0] == "new-session":
+                return "@placeholder"
+            if args and args[0] == "new-window":
+                return f"@{len(direct_calls)}"
+            return ""
+
+        with mock.patch.object(self.tmux_load, "tmux_out", side_effect=tmux_out), \
+            mock.patch.object(self.tmux_load, "tmux_queue"), \
+            mock.patch.object(self.tmux_load, "tmux_flush"), \
+            mock.patch.object(self.tmux_load, "session_exists", return_value=False), \
+            mock.patch.object(self.tmux_load, "current_session_name", return_value=None), \
+            mock.patch.object(self.tmux_load, "restore_directory", side_effect=lambda path, fallback: path), \
+            mock.patch.object(self.tmux_load, "ensure_window_panes"):
+            self.tmux_load.restore_from_dump(
+                data, False, False, False, "sess", "/override", "/fallback"
+            )
+
+        new_windows = [call for call in direct_calls if call[0] == "new-window"]
+        first_cwd = new_windows[0][new_windows[0].index("-c") + 1]
+        second_cwd = new_windows[1][new_windows[1].index("-c") + 1]
+        self.assertEqual(first_cwd, "/override")
+        self.assertEqual(second_cwd, "/dump2")
+
 
 class TmuxLoadMainTests(unittest.TestCase):
     def setUp(self):
@@ -619,8 +728,14 @@ class TmuxLoadMainTests(unittest.TestCase):
         tmp.close()
         return tmp.name
 
+    def valid_dump(self, name="dump"):
+        data = {"windows": [{"index": 0, "panes": [{"index": 0, "path": "/"}]}]}
+        if name is not None:
+            data["name"] = name
+        return data
+
     def test_main_uses_dump_session_outside_tmux(self):
-        data = {"name": "dump", "windows": []}
+        data = self.valid_dump()
         dump_path = self.write_dump(data)
         restore_calls = []
         tmux_calls = []
@@ -636,6 +751,8 @@ class TmuxLoadMainTests(unittest.TestCase):
         with mock.patch.object(self.tmux_load, "restore_from_dump", side_effect=restore_from_dump), \
             mock.patch.object(self.tmux_load, "tmux_out", side_effect=tmux_out), \
             mock.patch.object(self.tmux_load, "session_exists", return_value=False), \
+            mock.patch.object(self.tmux_load.sys.stdin, "isatty", return_value=True), \
+            mock.patch.object(self.tmux_load.sys.stdout, "isatty", return_value=True), \
             mock.patch.dict(self.tmux_load.os.environ, {}, clear=True), \
             mock.patch.object(self.tmux_load.sys, "argv", argv):
             rc = self.tmux_load.main()
@@ -646,7 +763,7 @@ class TmuxLoadMainTests(unittest.TestCase):
         self.assertIn(["attach-session", "-t", "dump"], tmux_calls)
 
     def test_main_outside_tmux_uses_unique_session(self):
-        data = {"name": "dump", "windows": []}
+        data = self.valid_dump()
         dump_path = self.write_dump(data)
         restore_calls = []
         tmux_calls = []
@@ -663,6 +780,8 @@ class TmuxLoadMainTests(unittest.TestCase):
             mock.patch.object(self.tmux_load, "tmux_out", side_effect=tmux_out), \
             mock.patch.object(self.tmux_load, "session_exists", return_value=True), \
             mock.patch.object(self.tmux_load, "unique_session_name", return_value="dump(1)"), \
+            mock.patch.object(self.tmux_load.sys.stdin, "isatty", return_value=True), \
+            mock.patch.object(self.tmux_load.sys.stdout, "isatty", return_value=True), \
             mock.patch.dict(self.tmux_load.os.environ, {}, clear=True), \
             mock.patch.object(self.tmux_load.sys, "argv", argv):
             rc = self.tmux_load.main()
@@ -672,8 +791,35 @@ class TmuxLoadMainTests(unittest.TestCase):
         self.assertEqual(restore_calls[0][0][4], "dump(1)")
         self.assertIn(["attach-session", "-t", "dump(1)"], tmux_calls)
 
+    def test_main_force_outside_tmux_targets_existing_dump_session(self):
+        data = {"name": "dump", "windows": [{"index": 0, "panes": [{"index": 0, "path": "/"}]}]}
+        dump_path = self.write_dump(data)
+        restore_calls = []
+        argv = ["tmux-load", "-f", dump_path]
+
+        with mock.patch.object(self.tmux_load, "restore_from_dump", side_effect=lambda *args: restore_calls.append(args)), \
+            mock.patch.object(self.tmux_load, "tmux_out", return_value=""), \
+            mock.patch.object(self.tmux_load, "session_exists", return_value=True), \
+            mock.patch.object(self.tmux_load, "unique_session_name", return_value="dump(1)"), \
+            mock.patch.dict(self.tmux_load.os.environ, {}, clear=True), \
+            mock.patch.object(self.tmux_load.sys, "argv", argv):
+            rc = self.tmux_load.main()
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(restore_calls[0][4], "dump")
+
+    def test_main_rejects_non_object_dump_without_traceback(self):
+        dump_path = self.write_dump(None)
+        argv = ["tmux-load", "--session", "target", dump_path]
+
+        with mock.patch.object(self.tmux_load.sys, "argv", argv), \
+            mock.patch.object(self.tmux_load.sys, "stderr"):
+            rc = self.tmux_load.main()
+
+        self.assertEqual(rc, 2)
+
     def test_main_in_tmux_renames_to_dump_session(self):
-        data = {"name": "dump", "windows": []}
+        data = self.valid_dump()
         dump_path = self.write_dump(data)
         restore_calls = []
         tmux_calls = []
@@ -701,7 +847,7 @@ class TmuxLoadMainTests(unittest.TestCase):
         self.assertNotIn(["switch-client", "-t", "dump"], tmux_calls)
 
     def test_main_in_tmux_renames_with_unique_name(self):
-        data = {"name": "dump", "windows": []}
+        data = self.valid_dump()
         dump_path = self.write_dump(data)
         restore_calls = []
         tmux_calls = []
@@ -730,7 +876,7 @@ class TmuxLoadMainTests(unittest.TestCase):
         self.assertNotIn(["switch-client", "-t", "dump(1)"], tmux_calls)
 
     def test_main_in_tmux_without_dump_name_uses_current_session(self):
-        data = {"windows": []}
+        data = self.valid_dump(name=None)
         dump_path = self.write_dump(data)
         restore_calls = []
         tmux_calls = []
@@ -757,7 +903,7 @@ class TmuxLoadMainTests(unittest.TestCase):
         self.assertNotIn(["switch-client", "-t", "cur"], tmux_calls)
 
     def test_main_requires_session_when_no_name_outside_tmux(self):
-        data = {"windows": []}
+        data = self.valid_dump(name=None)
         dump_path = self.write_dump(data)
         argv = ["tmux-load", dump_path]
         with mock.patch.dict(self.tmux_load.os.environ, {}, clear=True), \
@@ -768,7 +914,7 @@ class TmuxLoadMainTests(unittest.TestCase):
         self.assertEqual(rc, 2)
 
     def test_main_in_tmux_switches_when_target_differs(self):
-        data = {"name": "dump", "windows": []}
+        data = self.valid_dump()
         dump_path = self.write_dump(data)
         restore_calls = []
         tmux_calls = []
@@ -829,8 +975,38 @@ class TmuxLoadHelpersTests(unittest.TestCase):
         ]
         self.assertEqual(self.tmux_load.run_plan_from_processes(processes), (["vim", "README.md"], ""))
 
+    def test_command_from_processes_uses_foreground_process(self):
+        processes = [
+            {"pid": 3, "ppid": 1, "command": ["nvim", "README.md"], "foreground": True, "pgid": 3},
+        ]
+        self.assertEqual(self.tmux_load.run_plan_from_processes(processes), (["nvim", "README.md"], ""))
+
+    def test_command_from_processes_runs_shell_child_inside_shell(self):
+        processes = [
+            {"pid": 10, "ppid": 1, "command": ["fish"], "foreground": False, "pgid": 10},
+            {"pid": 20, "ppid": 10, "command": ["vim", "README.md"], "foreground": True, "pgid": 20},
+        ]
+        self.assertEqual(self.tmux_load.run_plan_from_processes(processes), ([], "vim README.md"))
+
+    def test_command_from_processes_skips_foreground_pipeline(self):
+        processes = [
+            {"command": ["producer"], "foreground": True, "pgid": 3},
+            {"command": ["consumer"], "foreground": True, "pgid": 3},
+        ]
+        self.assertEqual(self.tmux_load.run_plan_from_processes(processes), ([], ""))
+
     def test_normalize_path_strips_file_scheme(self):
         self.assertEqual(self.tmux_load.normalize_path("file:///tmp"), "/tmp")
+
+    def test_normalize_path_preserves_relative_path(self):
+        self.assertEqual(self.tmux_load.normalize_path("project/src"), "project/src")
+
+    def test_restore_directory_falls_back_when_dump_path_is_missing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self.assertEqual(
+                self.tmux_load.restore_directory("/definitely/missing/tmux-load-test", tmpdir),
+                tmpdir,
+            )
 
     def test_list_pane_ids_by_index_parses(self):
         out = "0\t%1\n1\t%2\n"

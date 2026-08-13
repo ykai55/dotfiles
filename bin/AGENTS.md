@@ -73,7 +73,8 @@ Behavior
 - If target session is not empty, use -f to clear or -a to append.
 - -f clears the target session before restore.
 - -a appends windows to the target session.
-- -c sets the base directory for new sessions, overriding dump paths for the first window only.
+- -c overrides the first restored window directory; later windows use their dump paths.
+- Missing dump directories fall back to the current directory.
 - By default, pane commands are restored based on processes.
 - --no-run-commands skips starting any pane commands.
 
@@ -88,9 +89,9 @@ Input expectations
 - Dump can be a single session object (current output) or legacy {"sessions": [...]}.
 
 Notes
-- Pane commands are derived from processes, preferring a direct tmux command when
-  the first process is not a shell; when the first process is a shell and there is
-  a second process, the second command is sent to the shell.
+- New dumps identify the pane foreground process group and only restore that
+  command. Legacy dumps without foreground metadata retain the older process-order
+  fallback.
 - -c cannot be used when restoring in the current session.
 - Runs pane commands by default; use `--no-run-commands` to skip.
 

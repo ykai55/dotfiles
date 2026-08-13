@@ -17,6 +17,7 @@ import os
 import shlex
 import subprocess
 import sys
+import tempfile
 from typing import Any, Dict, List, Optional, Tuple
 
 
@@ -51,7 +52,15 @@ def run_tmux(args: List[str]) -> List[str]:
     rc, out, err = run_cmd(["tmux"] + args)
     if rc != 0:
         raise RuntimeError(err.strip() or f"tmux command failed: {' '.join(args)}")
-    return [line for line in out.splitlines() if line.strip()]
+    return [line for line in out.split("\n") if line.strip()]
+
+
+def escaped_tmux_format(expression: str) -> str:
+    return "#{s|\n|%0A|:#{s|\t|%09|:#{s|%|%25|:" + expression + "}}}"
+
+
+def decode_tmux_field(value: str) -> str:
+    return value.replace("%0A", "\n").replace("%09", "\t").replace("%25", "%")
 
 
 def current_session_name() -> Optional[str]:
@@ -80,7 +89,7 @@ def ps_processes_for_tty(pane_tty: str, exclude_pids: Optional[set] = None) -> L
     tty_short = normalize_tty_for_ps(pane_tty)
     tty_full = pane_tty
 
-    ps_fields = ["pid=", "ppid=", "user=", "state=", "etime=", "command="]
+    ps_fields = ["pid=", "ppid=", "pgid=", "tpgid=", "user=", "state=", "etime=", "command="]
 
     def try_ps(tty_val: str) -> Optional[List[Dict[str, Any]]]:
         rc, out, _ = run_cmd(["ps", "-t", tty_val] + sum([["-o", f] for f in ps_fields], []))
@@ -92,10 +101,10 @@ def ps_processes_for_tty(pane_tty: str, exclude_pids: Optional[set] = None) -> L
             line = line.rstrip("\n")
             if not line.strip():
                 continue
-            parts = line.strip().split(None, 5)
-            if len(parts) < 6:
+            parts = line.strip().split(None, 7)
+            if len(parts) < 8:
                 continue
-            pid_s, ppid_s, user, state, etime, cmd = parts
+            pid_s, ppid_s, pgid_s, tpgid_s, user, state, etime, cmd = parts
             try:
                 pid = int(pid_s)
             except ValueError:
@@ -104,6 +113,14 @@ def ps_processes_for_tty(pane_tty: str, exclude_pids: Optional[set] = None) -> L
                 ppid = int(ppid_s)
             except ValueError:
                 ppid = None
+            try:
+                pgid = int(pgid_s)
+            except ValueError:
+                pgid = None
+            try:
+                tpgid = int(tpgid_s)
+            except ValueError:
+                tpgid = None
             if state == "Z":
                 continue
             parents[pid] = ppid
@@ -111,6 +128,9 @@ def ps_processes_for_tty(pane_tty: str, exclude_pids: Optional[set] = None) -> L
                 {
                     "pid": pid,
                     "ppid": ppid,
+                    "pgid": pgid,
+                    "tpgid": tpgid,
+                    "foreground": pgid is not None and pgid == tpgid,
                     "user": user,
                     "state": state,
                     "etime": etime,
@@ -146,7 +166,7 @@ def parse_kv_tsv(line: str, keys: List[str]) -> Dict[str, str]:
     parts = line.split("\t")
     if len(parts) < len(keys):
         parts = parts + [""] * (len(keys) - len(parts))
-    return {k: v for k, v in zip(keys, parts[: len(keys)])}
+    return {k: decode_tmux_field(v) for k, v in zip(keys, parts[: len(keys)])}
 
 
 def normalize_path(path: str) -> str:
@@ -170,7 +190,8 @@ def tmux_dump(target_session: Optional[str] = None) -> Dict[str, Any]:
         "session_height",
     ]
     sess_fmt = "\t".join(
-        [
+        escaped_tmux_format(field)
+        for field in [
             "#{session_id}",
             "#{session_name}",
             "#{session_created}",
@@ -184,6 +205,8 @@ def tmux_dump(target_session: Optional[str] = None) -> Dict[str, Any]:
     session_target: Optional[str] = target_session
     if session_target is None and "TMUX" in os.environ:
         session_target = current_session_name()
+        if not session_target:
+            return {"error": "failed to determine current tmux session"}
 
     try:
         sess_lines = run_tmux(["list-sessions", "-F", sess_fmt])
@@ -202,7 +225,7 @@ def tmux_dump(target_session: Optional[str] = None) -> Dict[str, Any]:
                 "id": raw["session_id"],
                 "name": raw["session_name"],
                 "created": int(raw["session_created"]) if raw["session_created"].isdigit() else raw["session_created"],
-                "attached": raw["session_attached"] == "1",
+                "attached": raw["session_attached"].isdigit() and int(raw["session_attached"]) > 0,
                 "windows_count": int(raw["session_windows"]) if raw["session_windows"].isdigit() else raw["session_windows"],
                 "size": {
                     "width": int(raw["session_width"]) if raw["session_width"].isdigit() else raw["session_width"],
@@ -223,8 +246,14 @@ def tmux_dump(target_session: Optional[str] = None) -> Dict[str, Any]:
         "window_width",
         "window_height",
     ]
+    if not sessions:
+        return {"error": "no sessions found"}
+    if not session_target:
+        sessions = [next((session for session in sessions if session.get("attached")), sessions[0])]
+
     win_fmt = "\t".join(
-        [
+        escaped_tmux_format(field)
+        for field in [
             "#{window_id}",
             "#{window_index}",
             "#{window_name}",
@@ -252,7 +281,8 @@ def tmux_dump(target_session: Optional[str] = None) -> Dict[str, Any]:
         "pane_path",
     ]
     pane_fmt = "\t".join(
-        [
+        escaped_tmux_format(field)
+        for field in [
             "#{pane_id}",
             "#{pane_index}",
             "#{pane_title}",
@@ -264,7 +294,7 @@ def tmux_dump(target_session: Optional[str] = None) -> Dict[str, Any]:
             "#{pane_top}",
             "#{pane_tty}",
             "#{pane_pid}",
-            "#{pane_path}",
+            "#{pane_current_path}",
         ]
     )
 
@@ -345,18 +375,6 @@ def tmux_dump(target_session: Optional[str] = None) -> Dict[str, Any]:
         session["windows"] = windows
 
 
-    if not sessions:
-        return {
-            "error": "no sessions found",
-        }
-
-    if session_target:
-        return sessions[0]
-
-    for session in sessions:
-        if session.get("attached"):
-            return session
-
     return sessions[0]
 
 
@@ -367,15 +385,24 @@ def main() -> int:
     parser.add_argument("-s", "--session", help="Target tmux session name")
     args = parser.parse_args()
 
-    data = tmux_dump(args.session)
     try:
-        with open(args.output_file, "w", encoding="utf-8") as f:
+        data = tmux_dump(args.session)
+        output_path = os.path.abspath(os.path.expanduser(args.output_file))
+        output_dir = os.path.dirname(output_path)
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=output_dir, delete=False) as f:
+            temp_path = f.name
             if args.no_format:
                 json.dump(data, f, separators=(",", ":"), ensure_ascii=False)
             else:
                 json.dump(data, f, indent=2, ensure_ascii=False)
             f.write("\n")
+        os.replace(temp_path, output_path)
     except Exception as exc:
+        if "temp_path" in locals():
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
         print(f"ERROR: failed to write output file: {exc}", file=sys.stderr)
         return 2
 

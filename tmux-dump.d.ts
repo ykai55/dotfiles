@@ -45,6 +45,9 @@ export interface TmuxPane {
 export interface TmuxProcess {
   pid: number;
   ppid: number | null;
+  pgid?: number | null;
+  tpgid?: number | null;
+  foreground?: boolean;
   user: string;
   state: string;
   etime: string;

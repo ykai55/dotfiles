@@ -150,6 +150,30 @@ class TmuxDumpTests(CapturingTestCase):
 
         self.assertEqual(data["name"], "host")
 
+    def test_dump_reads_pane_current_path(self):
+        seen_formats = []
+
+        def run_tmux(args):
+            if args[:2] == ["list-sessions", "-F"]:
+                return ["$1\tmain\t100\t0\t1\t80\t24"]
+            if args[:3] == ["list-windows", "-t", "main"]:
+                return ["@1\t0\tw1\t1\t1\tlayout\t0\t80\t24"]
+            if args[:3] == ["list-panes", "-t", "main:0"]:
+                seen_formats.append(args[-1])
+                return ["%1\t0\ttitle\t1\t0\t80\t24\t0\t0\t/dev/ttys001\t123\t/a"]
+            if args[:5] == ["show-options", "-w", "-t", "main:0", "-v"]:
+                return ["off"]
+            raise RuntimeError("unexpected args")
+
+        with mock.patch.object(self.tmux_dump, "run_tmux", side_effect=run_tmux), \
+            mock.patch.object(self.tmux_dump, "ps_processes_for_tty", return_value=[]), \
+            mock.patch.dict(self.tmux_dump.os.environ, {}, clear=True):
+            data = self.tmux_dump.tmux_dump("main")
+
+        self.assertEqual(data["windows"][0]["panes"][0]["path"], "/a")
+        self.assertEqual(len(seen_formats), 1)
+        self.assertIn("#{pane_current_path}", seen_formats[0])
+
     def test_normalize_path_strips_file_scheme(self):
         self.assertEqual(self.tmux_dump.normalize_path("file:///tmp"), "/tmp")
         self.assertEqual(self.tmux_dump.normalize_path("ykai_m4/Users/bytedance"), "/Users/bytedance")
@@ -165,6 +189,20 @@ class TmuxDumpTests(CapturingTestCase):
     def test_parse_kv_tsv_pads_missing(self):
         parsed = self.tmux_dump.parse_kv_tsv("a\tb", ["k1", "k2", "k3"])
         self.assertEqual(parsed, {"k1": "a", "k2": "b", "k3": ""})
+
+    def test_attached_count_greater_than_one_is_attached(self):
+        def run_tmux(args):
+            if args[:2] == ["list-sessions", "-F"]:
+                return ["$1\tmain\t100\t2\t0\t80\t24"]
+            if args[:3] == ["list-windows", "-t", "main"]:
+                return []
+            raise RuntimeError("unexpected args")
+
+        with mock.patch.object(self.tmux_dump, "run_tmux", side_effect=run_tmux), \
+            mock.patch.dict(self.tmux_dump.os.environ, {}, clear=True):
+            data = self.tmux_dump.tmux_dump()
+
+        self.assertTrue(data["attached"])
 
     def test_main_writes_output_file(self):
         data = {"name": "sess", "windows": []}
