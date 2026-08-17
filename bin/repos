@@ -284,7 +284,7 @@ def display_path_width(items: List[Candidate]) -> int:
     return max(len(item.display_path) for item in items)
 
 
-def run_fzf(items: List[Candidate]) -> Optional[tuple[str, Candidate]]:
+def run_fzf(items: List[Candidate], query: str = "") -> Optional[tuple[str, Candidate]]:
     path_width = display_path_width(items)
     proc = subprocess.run(
         [
@@ -308,7 +308,8 @@ def run_fzf(items: List[Candidate]) -> Optional[tuple[str, Candidate]]:
             "right:70%:hidden",
             "--preview",
             'git -C {2} status -sb 2>/dev/null || printf "(not a git repo)\\n"',
-        ],
+        ]
+        + (["--query", query] if query else []),
         input="\n".join(item.fzf_line(path_width) for item in items) + "\n",
         stdout=subprocess.PIPE,
         text=True,
@@ -336,6 +337,7 @@ def run_fzf(items: List[Candidate]) -> Optional[tuple[str, Candidate]]:
 
 
 def select_repo(patterns: List[str], recent_path: Optional[str] = None) -> Optional[str]:
+    query = " ".join(patterns)
     while True:
         items = candidates(patterns, recent_path)
         if not items:
@@ -345,7 +347,7 @@ def select_repo(patterns: List[str], recent_path: Optional[str] = None) -> Optio
                 print("No recent repositories found", file=sys.stderr)
             return None
 
-        selected = run_fzf(items)
+        selected = run_fzf(items, query)
         if selected is None:
             return ""
 
@@ -358,7 +360,11 @@ def select_repo(patterns: List[str], recent_path: Optional[str] = None) -> Optio
 
 def parse_args(argv: List[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Select a repo with fzf")
-    parser.add_argument("patterns", nargs="*", help="Optional directory glob patterns")
+    parser.add_argument(
+        "patterns",
+        nargs="*",
+        help="Optional directory glob patterns, also used as the initial fzf query",
+    )
     parser.add_argument("--recent-file", help=argparse.SUPPRESS)
     return parser.parse_args(argv)
 

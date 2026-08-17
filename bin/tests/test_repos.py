@@ -94,6 +94,22 @@ class ReposTests(unittest.TestCase):
         self.assertNotIn("ctrl-d", argv)
         self.assertEqual(selected, ("", candidate))
 
+    def test_select_repo_uses_patterns_as_initial_query(self) -> None:
+        candidate = repos.Candidate(
+            repo_path="/src/project",
+            repo_id="/src/project/.git",
+            display_path="~/src/project",
+            branch="main",
+        )
+
+        with mock.patch.object(repos, "candidates", return_value=[candidate]), mock.patch.object(
+            repos, "run_fzf", return_value=None
+        ) as run_fzf:
+            selected = repos.select_repo(["ABC", "feature"])
+
+        run_fzf.assert_called_once_with([candidate], "ABC feature")
+        self.assertEqual(selected, "")
+
     def test_recent_records_uses_newest_record_per_worktree(self) -> None:
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as f:
             f.write("1\trepo-a\t/project\n")
