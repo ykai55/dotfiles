@@ -1,18 +1,156 @@
 use futures_util::{SinkExt, StreamExt};
 use rproxy::client::{ClientConfig, ClientServiceConfig};
-use rproxy::protocol::{ClientHello, DataFrame, ServerMessage};
+use rproxy::protocol::{ClientHello, DataFrame, ServerErrorCode, ServerMessage, ServiceRequest};
+use rproxy::server::ServerConfig;
 use std::net::{SocketAddr, TcpListener as StdTcpListener};
 use std::sync::Arc;
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
 use tokio::sync::Notify;
-use tokio::time::{sleep, timeout, Duration};
-use tokio_tungstenite::accept_async;
+use tokio::time::{advance, sleep, timeout, Duration};
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::{accept_async, connect_async};
 
 fn free_addr() -> SocketAddr {
     let listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
     listener.local_addr().unwrap()
+}
+
+#[tokio::test]
+async fn retries_temporary_registration_conflicts() {
+    let listen = free_addr();
+    let listener = TcpListener::bind(listen).await.unwrap();
+    let second_registration = Arc::new(Notify::new());
+    let second_registration_for_server = second_registration.clone();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut control = accept_async(stream).await.unwrap();
+        let Some(Ok(Message::Text(_))) = control.next().await else {
+            panic!("expected first control hello");
+        };
+        control
+            .send(Message::Text(
+                serde_json::to_string(&ServerMessage::Error {
+                    code: ServerErrorCode::SubdomainUnavailable,
+                    message: "subdomain foo is unavailable".into(),
+                })
+                .unwrap(),
+            ))
+            .await
+            .unwrap();
+
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut control = accept_async(stream).await.unwrap();
+        let Some(Ok(Message::Text(_))) = control.next().await else {
+            panic!("expected retried control hello");
+        };
+        second_registration_for_server.notify_one();
+    });
+    let client = tokio::spawn(rproxy::client::run(ClientConfig {
+        server: format!("ws://{listen}"),
+        token: "secret".into(),
+        service: ClientServiceConfig::Http {
+            local: "127.0.0.1:1".into(),
+            subdomain: Some("foo".into()),
+        },
+    }));
+
+    timeout(Duration::from_secs(3), second_registration.notified())
+        .await
+        .expect("client should retry a temporarily unavailable subdomain");
+    client.abort();
+    server.abort();
+}
+
+#[tokio::test(start_paused = true)]
+async fn server_releases_subdomain_when_control_heartbeat_times_out() {
+    let control_listen = free_addr();
+    let server = tokio::spawn(rproxy::server::run(ServerConfig {
+        domain: "test".into(),
+        token: Some("secret".into()),
+        auth_db: None,
+        configured_credentials: Default::default(),
+        management_listen: free_addr(),
+        management_token_file: None,
+        management_requests_per_minute: 120,
+        management_body_limit_bytes: 16 * 1024,
+        control_listen,
+        http_listen: free_addr(),
+        tcp_port_range: "20000-20010".into(),
+        http_public_scheme: "http".into(),
+        http_public_port: None,
+    }));
+    let url = format!("ws://{control_listen}/_rproxy");
+    let (mut old_control, _) = loop {
+        if let Ok(socket) = connect_async(&url).await {
+            break socket;
+        }
+        tokio::task::yield_now().await;
+    };
+    old_control
+        .send(Message::Text(
+            serde_json::to_string(&ClientHello::Control {
+                token: "secret".into(),
+                service: ServiceRequest::Http {
+                    local: "127.0.0.1:1".into(),
+                    subdomain: Some("foo".into()),
+                },
+            })
+            .unwrap(),
+        ))
+        .await
+        .unwrap();
+    let Some(Ok(Message::Text(text))) = old_control.next().await else {
+        panic!("expected first registration");
+    };
+    let ServerMessage::Registered { session_id, .. } =
+        serde_json::from_str::<ServerMessage>(&text).unwrap()
+    else {
+        panic!("expected first registration");
+    };
+    let (mut old_data, _) = connect_async(&url).await.unwrap();
+    old_data
+        .send(Message::Text(
+            serde_json::to_string(&ClientHello::Data {
+                token: "secret".into(),
+                session_id,
+            })
+            .unwrap(),
+        ))
+        .await
+        .unwrap();
+    tokio::task::yield_now().await;
+
+    advance(Duration::from_secs(30)).await;
+    tokio::task::yield_now().await;
+    advance(Duration::from_secs(11)).await;
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+
+    let (mut replacement, _) = connect_async(&url).await.unwrap();
+    replacement
+        .send(Message::Text(
+            serde_json::to_string(&ClientHello::Control {
+                token: "secret".into(),
+                service: ServiceRequest::Http {
+                    local: "127.0.0.1:1".into(),
+                    subdomain: Some("foo".into()),
+                },
+            })
+            .unwrap(),
+        ))
+        .await
+        .unwrap();
+    let Some(Ok(Message::Text(text))) = replacement.next().await else {
+        panic!("expected replacement registration");
+    };
+    assert!(matches!(
+        serde_json::from_str::<ServerMessage>(&text).unwrap(),
+        ServerMessage::Registered { .. }
+    ));
+
+    server.abort();
 }
 
 #[tokio::test]

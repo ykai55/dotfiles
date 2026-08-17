@@ -13,7 +13,6 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::Router;
-use futures_util::stream::SplitStream;
 use futures_util::{SinkExt, StreamExt};
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
@@ -27,7 +26,7 @@ use tokio::sync::{
     mpsc, oneshot, Mutex, Notify, OwnedRwLockReadGuard, OwnedSemaphorePermit, RwLock, Semaphore,
 };
 use tokio::task::JoinSet;
-use tokio::time::{timeout, Duration};
+use tokio::time::{sleep, timeout, Duration, Instant};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -39,6 +38,9 @@ const MAX_PENDING_HELLOS: usize = 1024;
 const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
 const DATA_ATTACH_TIMEOUT: Duration = Duration::from_secs(5);
 const READY_TIMEOUT: Duration = Duration::from_secs(6);
+const CONTROL_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
+const CONTROL_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(10);
+const DATA_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone)]
 pub struct RegisteredTunnel {
@@ -729,10 +731,17 @@ async fn handle_registered_control(
             credential.identity_id,
             message_public(&message)
         ));
-        let (sender, mut receiver) = socket.split();
+        let mut control_monitor = Box::pin(monitor_control_connection(
+            socket,
+            CONTROL_HEARTBEAT_INTERVAL,
+            CONTROL_HEARTBEAT_TIMEOUT,
+        ));
         let data_socket = tokio::select! {
             result = timeout(DATA_ATTACH_TIMEOUT, data_rx) => result.ok().and_then(Result::ok),
-            _ = wait_for_control_close(&mut receiver) => None,
+            result = &mut control_monitor => {
+                if let Err(error) = result { log_server_warn(&format!("control websocket failed: {error}")); }
+                None
+            },
             _ = cancellation.cancelled() => None,
         };
         if let Some(data_socket) = data_socket {
@@ -741,7 +750,8 @@ async fn handle_registered_control(
                 result = &mut mux => {
                     if let Err(error) = result { log_server_warn(&format!("data websocket failed: {error}")); }
                 }
-                _ = wait_for_control_close(&mut receiver) => {
+                result = &mut control_monitor => {
+                    if let Err(error) = result { log_server_warn(&format!("control websocket failed: {error}")); }
                     cancellation.cancel();
                     let _ = mux.await;
                 }
@@ -750,7 +760,6 @@ async fn handle_registered_control(
                 }
             }
         }
-        drop(sender);
     }
     cancellation.cancel();
     if let Some(task) = listener_task {
@@ -760,10 +769,41 @@ async fn handle_registered_control(
     state.release_client(&client_id).await;
 }
 
-async fn wait_for_control_close(receiver: &mut SplitStream<WebSocket>) {
-    while let Some(message) = receiver.next().await {
-        if matches!(message, Ok(Message::Close(_)) | Err(_)) {
-            break;
+async fn monitor_control_connection(
+    mut socket: WebSocket,
+    heartbeat_interval: Duration,
+    heartbeat_timeout: Duration,
+) -> anyhow::Result<()> {
+    let mut sequence = 0_u64;
+    let heartbeat = sleep(heartbeat_interval);
+    tokio::pin!(heartbeat);
+    loop {
+        tokio::select! {
+            incoming = socket.recv() => match incoming {
+                Some(Err(error)) => return Err(error.into()),
+                Some(Ok(Message::Close(_))) | None => return Ok(()),
+                Some(Ok(_)) => {}
+            },
+            _ = &mut heartbeat => {
+                sequence = sequence.wrapping_add(1);
+                let payload = sequence.to_be_bytes().to_vec();
+                timeout(heartbeat_timeout, socket.send(Message::Ping(payload.clone())))
+                    .await
+                    .map_err(|_| anyhow::anyhow!("control heartbeat write timed out"))??;
+                timeout(heartbeat_timeout, async {
+                    loop {
+                        match socket.recv().await {
+                            Some(Ok(Message::Pong(received))) if received == payload => return anyhow::Ok(()),
+                            Some(Err(error)) => return Err(error.into()),
+                            Some(Ok(Message::Close(_))) | None => return anyhow::Ok(()),
+                            Some(Ok(_)) => {}
+                        }
+                    }
+                })
+                .await
+                .map_err(|_| anyhow::anyhow!("control heartbeat timed out"))??;
+                heartbeat.as_mut().reset(Instant::now() + heartbeat_interval);
+            }
         }
     }
 }
@@ -952,78 +992,96 @@ async fn run_server_mux(
     let (writer_tx, mut writer_rx) = mpsc::channel::<DataFrame>(WRITER_QUEUE_SIZE);
     let writer_cancellation = cancellation.clone();
     let mut writer = tokio::spawn(async move {
-        while let Some(frame) = writer_rx.recv().await {
-            ws_sender.send(Message::Binary(frame.encode()?)).await?;
+        loop {
+            tokio::select! {
+                _ = writer_cancellation.cancelled() => return Ok(()),
+                outgoing = writer_rx.recv() => {
+                    let Some(frame) = outgoing else { return Ok(()); };
+                    let encoded = frame.encode()?;
+                    tokio::select! {
+                        _ = writer_cancellation.cancelled() => return Ok(()),
+                        result = timeout(DATA_WRITE_TIMEOUT, ws_sender.send(Message::Binary(encoded))) => {
+                            result.map_err(|_| anyhow::anyhow!("data websocket write timed out"))??;
+                        }
+                    }
+                }
+            }
         }
-        anyhow::Ok(())
     });
     let mut streams = HashMap::<u32, StreamEntry>::new();
     let mut tasks = JoinSet::<u32>::new();
     let mut next_stream_id = 1_u32;
-    let result = loop {
-        tokio::select! {
-            _ = cancellation.cancelled() => break Ok(()),
-            result = &mut writer => {
-                break match result { Ok(result) => result, Err(error) => Err(error.into()) };
-            }
-            Some(stream_id) = tasks.join_next() => {
-                if let Ok(stream_id) = stream_id { streams.remove(&stream_id); }
-            }
-            command = open_rx.recv() => {
-                let Some(command) = command else { break Ok(()); };
-                let stream_id = next_stream_id;
-                next_stream_id = next_stream_id.wrapping_add(1).max(1);
-                let (events_tx, events_rx) = mpsc::channel(STREAM_QUEUE_SIZE);
-                let stream_cancellation = cancellation.child_token();
-                streams.insert(stream_id, StreamEntry { events: events_tx, cancellation: stream_cancellation.clone() });
-                if writer_tx.send(DataFrame::Open { stream_id }).await.is_err() {
-                    streams.remove(&stream_id);
-                    break Err(anyhow::anyhow!("data websocket writer closed"));
+    let mut writer_finished = false;
+    let result = async {
+        loop {
+            tokio::select! {
+                _ = cancellation.cancelled() => break Ok(()),
+                result = &mut writer => {
+                    writer_finished = true;
+                    break match result { Ok(result) => result, Err(error) => Err(error.into()) };
                 }
-                let stream_writer = writer_tx.clone();
-                tasks.spawn(async move {
-                    if run_stream(command.stream, command.initial, events_rx, stream_writer.clone(), stream_cancellation).await.is_err() {
-                        let _ = stream_writer.send(DataFrame::Reset { stream_id }).await;
+                Some(stream_id) = tasks.join_next() => {
+                    if let Ok(stream_id) = stream_id { streams.remove(&stream_id); }
+                }
+                command = open_rx.recv() => {
+                    let Some(command) = command else { break Ok(()); };
+                    let stream_id = next_stream_id;
+                    next_stream_id = next_stream_id.wrapping_add(1).max(1);
+                    let (events_tx, events_rx) = mpsc::channel(STREAM_QUEUE_SIZE);
+                    let stream_cancellation = cancellation.child_token();
+                    streams.insert(stream_id, StreamEntry { events: events_tx, cancellation: stream_cancellation.clone() });
+                    if writer_tx.try_send(DataFrame::Open { stream_id }).is_err() {
+                        streams.remove(&stream_id);
+                        break Err(anyhow::anyhow!("data websocket writer queue full"));
                     }
-                    drop(command._permit);
-                    stream_id
-                });
-            }
-            incoming = ws_receiver.next() => {
-                let frame = match incoming {
-                    Some(Ok(Message::Binary(data))) => match DataFrame::decode(&data) {
-                        Ok(frame) => frame,
-                        Err(error) => break Err(error.into()),
-                    },
-                    Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break Err(anyhow::anyhow!("data websocket closed")),
-                    Some(Ok(_)) => continue,
-                };
-                let stream_id = frame.stream_id();
-                if matches!(&frame, DataFrame::Open { .. }) {
-                    break Err(anyhow::anyhow!("client sent Open frame"));
+                    let stream_writer = writer_tx.clone();
+                    tasks.spawn(async move {
+                        if run_stream(command.stream, command.initial, events_rx, stream_writer.clone(), stream_cancellation).await.is_err() {
+                            let _ = stream_writer.send(DataFrame::Reset { stream_id }).await;
+                        }
+                        drop(command._permit);
+                        stream_id
+                    });
                 }
-                let Some(entry) = streams.get(&stream_id) else {
-                    if matches!(frame, DataFrame::Reset { .. }) {
+                incoming = ws_receiver.next() => {
+                    let frame = match incoming {
+                        Some(Ok(Message::Binary(data))) => DataFrame::decode(&data)?,
+                        Some(Err(error)) => break Err(error.into()),
+                        Some(Ok(Message::Close(_))) | None => break Err(anyhow::anyhow!("data websocket closed")),
+                        Some(Ok(_)) => continue,
+                    };
+                    let stream_id = frame.stream_id();
+                    if matches!(&frame, DataFrame::Open { .. }) {
+                        break Err(anyhow::anyhow!("client sent Open frame"));
+                    }
+                    let Some(entry) = streams.get(&stream_id) else {
+                        if matches!(frame, DataFrame::Reset { .. }) {
+                            continue;
+                        }
+                        writer_tx.try_send(DataFrame::Reset { stream_id })
+                            .map_err(|_| anyhow::anyhow!("data websocket writer queue full"))?;
                         continue;
+                    };
+                    if entry.events.try_send(frame).is_err() {
+                        if let Some(entry) = streams.remove(&stream_id) { entry.cancellation.cancel(); }
+                        writer_tx.try_send(DataFrame::Reset { stream_id })
+                            .map_err(|_| anyhow::anyhow!("data websocket writer queue full"))?;
                     }
-                    writer_tx.send(DataFrame::Reset { stream_id }).await?;
-                    continue;
-                };
-                if entry.events.try_send(frame).is_err() {
-                    if let Some(entry) = streams.remove(&stream_id) { entry.cancellation.cancel(); }
-                    writer_tx.send(DataFrame::Reset { stream_id }).await?;
                 }
             }
         }
-    };
-    writer_cancellation.cancel();
+    }
+    .await;
+    cancellation.cancel();
     for entry in streams.values() {
         entry.cancellation.cancel();
     }
     tasks.abort_all();
     while tasks.join_next().await.is_some() {}
-    writer.abort();
-    let _ = writer.await;
+    if !writer_finished {
+        writer.abort();
+        let _ = writer.await;
+    }
     result
 }
 

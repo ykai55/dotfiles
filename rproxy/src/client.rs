@@ -157,6 +157,18 @@ pub async fn run(config: ClientConfig) -> anyhow::Result<()> {
                     consecutive_failures = 0;
                 }
             }
+            Err(ControlConnectionError::Rejected(code, message))
+                if matches!(
+                    code,
+                    crate::protocol::ServerErrorCode::SubdomainUnavailable
+                        | crate::protocol::ServerErrorCode::PortUnavailable
+                        | crate::protocol::ServerErrorCode::PortRangeExhausted
+                ) =>
+            {
+                log_client_warn(&format!(
+                    "server temporarily rejected registration ({code:?}): {message}"
+                ));
+            }
             Err(ControlConnectionError::Rejected(code, message)) => {
                 anyhow::bail!("server error {code:?}: {message}");
             }
