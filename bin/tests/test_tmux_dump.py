@@ -1,3 +1,4 @@
+import base64
 import importlib.machinery
 import importlib.util
 import io
@@ -203,6 +204,104 @@ class TmuxDumpTests(CapturingTestCase):
             data = self.tmux_dump.tmux_dump()
 
         self.assertTrue(data["attached"])
+
+    def test_dump_includes_tracked_fish_command(self):
+        encoded = base64.b64encode(b"vim 'README file.md'").decode("ascii")
+
+        def run_tmux(args):
+            if args[:2] == ["list-sessions", "-F"]:
+                return ["$1\tmain\t100\t0\t1\t80\t24"]
+            if args[:3] == ["list-windows", "-t", "main"]:
+                return ["@1\t0\tw1\t1\t1\tlayout\t0\t80\t24"]
+            if args[:3] == ["list-panes", "-t", "main:0"]:
+                return ["%1\t0\ttitle\t1\t0\t80\t24\t0\t0\t/dev/ttys001\t123\t/a"]
+            if args[:5] == ["show-options", "-w", "-t", "main:0", "-v"]:
+                return ["off"]
+            if args == ["show-options", "-p", "-t", "%1", "-v", "@tmux_command_tracker_command"]:
+                return [encoded]
+            raise RuntimeError("unexpected args")
+
+        with mock.patch.object(self.tmux_dump, "run_tmux", side_effect=run_tmux), \
+            mock.patch.object(self.tmux_dump, "ps_processes_for_tty", return_value=[]), \
+            mock.patch.dict(self.tmux_dump.os.environ, {}, clear=True):
+            data = self.tmux_dump.tmux_dump("main")
+
+        self.assertEqual(
+            data["windows"][0]["panes"][0]["shell_command"],
+            {"command": "vim 'README file.md'", "running": True, "source": "fish"},
+        )
+
+    def test_dump_ignores_invalid_tracked_fish_command(self):
+        def run_tmux(args):
+            if args == ["show-options", "-p", "-t", "%1", "-v", "@tmux_command_tracker_command"]:
+                return ["not-base64!"]
+            raise RuntimeError("unexpected args")
+
+        with mock.patch.object(self.tmux_dump, "run_tmux", side_effect=run_tmux):
+            self.assertIsNone(self.tmux_dump.pane_shell_command("%1"))
+
+    def test_dump_keeps_tracked_command_but_skips_current_pane_processes(self):
+        encoded = base64.b64encode(b"nvim README.md").decode("ascii")
+
+        def run_tmux(args):
+            if args[:2] == ["list-sessions", "-F"]:
+                return ["$1\tmain\t100\t0\t1\t80\t24"]
+            if args[:3] == ["list-windows", "-t", "main"]:
+                return ["@1\t0\tw1\t1\t1\tlayout\t0\t80\t24"]
+            if args[:3] == ["list-panes", "-t", "main:0"]:
+                return ["%1\t0\ttitle\t1\t0\t80\t24\t0\t0\t/dev/ttys001\t123\t/a"]
+            if args[:5] == ["show-options", "-w", "-t", "main:0", "-v"]:
+                return ["off"]
+            if args == ["show-options", "-p", "-t", "%1", "-v", "@tmux_command_tracker_command"]:
+                return [encoded]
+            raise RuntimeError("unexpected args")
+
+        with mock.patch.object(self.tmux_dump, "run_tmux", side_effect=run_tmux), \
+            mock.patch.object(self.tmux_dump, "current_session_name", return_value="main"), \
+            mock.patch.object(self.tmux_dump, "ps_processes_for_tty") as ps_processes, \
+            mock.patch.dict(self.tmux_dump.os.environ, {"TMUX": "1", "TMUX_PANE": "%1"}, clear=True):
+            data = self.tmux_dump.tmux_dump("main")
+
+        self.assertEqual(
+            data["windows"][0]["panes"][0]["shell_command"],
+            {"command": "nvim README.md", "running": True, "source": "fish"},
+        )
+        self.assertEqual(data["windows"][0]["panes"][0]["processes"], [])
+        ps_processes.assert_not_called()
+
+    def test_dump_ignores_stale_save_command_option(self):
+        encoded = base64.b64encode(b"tbox save main").decode("ascii")
+
+        def run_tmux(args):
+            if args == ["show-options", "-p", "-t", "%1", "-v", "@tmux_command_tracker_command"]:
+                return [encoded]
+            raise RuntimeError("unexpected args")
+
+        with mock.patch.object(self.tmux_dump, "run_tmux", side_effect=run_tmux):
+            self.assertIsNone(self.tmux_dump.pane_shell_command("%1"))
+
+    def test_dump_ignores_tracked_command_in_dead_pane(self):
+        encoded = base64.b64encode(b"exec true").decode("ascii")
+
+        def run_tmux(args):
+            if args[:2] == ["list-sessions", "-F"]:
+                return ["$1\tmain\t100\t0\t1\t80\t24"]
+            if args[:3] == ["list-windows", "-t", "main"]:
+                return ["@1\t0\tw1\t1\t1\tlayout\t0\t80\t24"]
+            if args[:3] == ["list-panes", "-t", "main:0"]:
+                return ["%1\t0\ttitle\t1\t1\t80\t24\t0\t0\t/dev/ttys001\t123\t/a"]
+            if args[:5] == ["show-options", "-w", "-t", "main:0", "-v"]:
+                return ["off"]
+            if args == ["show-options", "-p", "-t", "%1", "-v", "@tmux_command_tracker_command"]:
+                return [encoded]
+            raise RuntimeError("unexpected args")
+
+        with mock.patch.object(self.tmux_dump, "run_tmux", side_effect=run_tmux), \
+            mock.patch.object(self.tmux_dump, "ps_processes_for_tty", return_value=[]), \
+            mock.patch.dict(self.tmux_dump.os.environ, {}, clear=True):
+            data = self.tmux_dump.tmux_dump("main")
+
+        self.assertNotIn("shell_command", data["windows"][0]["panes"][0])
 
     def test_main_writes_output_file(self):
         data = {"name": "sess", "windows": []}

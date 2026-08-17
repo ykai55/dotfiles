@@ -995,6 +995,27 @@ class TmuxLoadHelpersTests(unittest.TestCase):
         ]
         self.assertEqual(self.tmux_load.run_plan_from_processes(processes), ([], ""))
 
+    def test_run_plan_prefers_running_tracked_shell_command(self):
+        pane = {
+            "shell_command": {
+                "command": "FOO='a b' vim README.md | tee output.log",
+                "running": True,
+                "source": "fish",
+            },
+            "processes": [{"command": ["tee", "output.log"], "foreground": True, "pgid": 3}],
+        }
+        self.assertEqual(
+            self.tmux_load.run_plan_from_pane(pane),
+            ([], "FOO='a b' vim README.md | tee output.log"),
+        )
+
+    def test_run_plan_ignores_idle_tracked_shell_command(self):
+        pane = {
+            "shell_command": {"command": "vim README.md", "running": False, "source": "fish"},
+            "processes": [{"command": ["fish"]}],
+        }
+        self.assertEqual(self.tmux_load.run_plan_from_pane(pane), ([], ""))
+
     def test_normalize_path_strips_file_scheme(self):
         self.assertEqual(self.tmux_load.normalize_path("file:///tmp"), "/tmp")
 

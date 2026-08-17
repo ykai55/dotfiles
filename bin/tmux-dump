@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import shlex
@@ -61,6 +62,40 @@ def escaped_tmux_format(expression: str) -> str:
 
 def decode_tmux_field(value: str) -> str:
     return value.replace("%0A", "\n").replace("%09", "\t").replace("%25", "%")
+
+
+def is_save_command(command: str) -> bool:
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        return False
+    if argv and argv[0] == "command":
+        argv = argv[1:]
+    if not argv:
+        return False
+    executable = os.path.basename(argv[0])
+    if executable == "tmux-dump":
+        return True
+    return executable == "tbox" and len(argv) > 1 and argv[1] in {"save", "autosave"}
+
+
+def pane_shell_command(pane_id: str) -> Optional[Dict[str, Any]]:
+    try:
+        command_lines = run_tmux(
+            ["show-options", "-p", "-t", pane_id, "-v", "@tmux_command_tracker_command"]
+        )
+        if not command_lines:
+            return None
+        command = base64.b64decode(command_lines[0], validate=True).decode("utf-8")
+        if is_save_command(command):
+            return None
+    except Exception:
+        return None
+    return {
+        "command": command,
+        "running": True,
+        "source": "fish",
+    }
 
 
 def current_session_name() -> Optional[str]:
@@ -299,7 +334,6 @@ def tmux_dump(target_session: Optional[str] = None) -> Dict[str, Any]:
     )
 
     current_pane_id = os.environ.get("TMUX_PANE") if "TMUX" in os.environ else None
-    current_pid = os.getpid()
 
     for session in sessions:
         sname = session["name"]
@@ -339,10 +373,9 @@ def tmux_dump(target_session: Optional[str] = None) -> Dict[str, Any]:
                 pane_tty = praw["pane_tty"]
                 pane_pid = praw["pane_pid"]
                 pane_id = praw["pane_id"]
-                exclude = {current_pid} if current_pane_id and pane_id == current_pane_id else set()
-                procs = ps_processes_for_tty(pane_tty, exclude_pids=exclude) if pane_tty else []
-                panes.append(
-                    {
+                is_current_pane = bool(current_pane_id and pane_id == current_pane_id)
+                procs = [] if is_current_pane else ps_processes_for_tty(pane_tty) if pane_tty else []
+                pane: Dict[str, Any] = {
                         "id": pane_id,
                         "index": int(praw["pane_index"]) if praw["pane_index"].isdigit() else praw["pane_index"],
                         "title": praw["pane_title"],
@@ -359,7 +392,10 @@ def tmux_dump(target_session: Optional[str] = None) -> Dict[str, Any]:
                         "path": normalize_path(praw["pane_path"]),
                         "processes": procs,
                     }
-                )
+                shell_command = pane_shell_command(pane_id) if praw["pane_dead"] != "1" else None
+                if shell_command:
+                    pane["shell_command"] = shell_command
+                panes.append(pane)
 
 
             window["panes"] = panes

@@ -77,6 +77,8 @@ Behavior
 - Missing dump directories fall back to the current directory.
 - By default, pane commands are restored based on processes.
 - --no-run-commands skips starting any pane commands.
+- Interactive fish shells record the exact running command in pane-local tmux
+  options. This trusted command takes precedence over process inspection.
 
 Restore combinations
 - Inside tmux + restoring into current session (in-place): does not change directory, -c is rejected.
@@ -92,6 +94,10 @@ Notes
 - New dumps identify the pane foreground process group and only restore that
   command. Legacy dumps without foreground metadata retain the older process-order
   fallback.
+- `fish/conf.d/tmux_command_tracker.fish` records commands on `fish_preexec` and
+  deletes the pane option on `fish_postexec`. Commands beginning with whitespace,
+  disabled tracking (`TMUX_COMMAND_TRACKER_DISABLE`), and tmux save commands are
+  not recorded. Dumps also ignore the pane invoking `tmux-dump`.
 - -c cannot be used when restoring in the current session.
 - Runs pane commands by default; use `--no-run-commands` to skip.
 

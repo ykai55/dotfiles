@@ -316,6 +316,18 @@ def run_plan_from_processes(processes: Any) -> Tuple[List[str], str]:
     return (command_argv_from_value(first_cmd_list), "")
 
 
+def run_plan_from_pane(pane: Any) -> Tuple[List[str], str]:
+    if not isinstance(pane, dict):
+        return ([], "")
+    shell_command = pane.get("shell_command")
+    if isinstance(shell_command, dict):
+        command = shell_command.get("command")
+        if shell_command.get("running") and isinstance(command, str) and command.strip():
+            return ([], command)
+        return ([], "")
+    return run_plan_from_processes(pane.get("processes"))
+
+
 def session_name_from_dump(data: Any) -> Optional[str]:
     if not isinstance(data, dict):
         return None
@@ -388,7 +400,7 @@ def ensure_window_panes(
                 idx = int(pane.get("index", 0))
             except Exception:
                 continue
-            run_plan_by_index[idx] = run_plan_from_processes(pane.get("processes"))
+            run_plan_by_index[idx] = run_plan_from_pane(pane)
     prev_pane: Optional[Dict[str, Any]] = panes_sorted[0]
     for pane in panes_sorted[1:]:
         path = restore_directory(pane.get("path"), os.getcwd())
@@ -573,7 +585,7 @@ def restore_from_dump(
             cmd_argv: List[str] = []
             shell_cmd = ""
             if run_commands and panes:
-                cmd_argv, shell_cmd = run_plan_from_processes(panes[0].get("processes"))
+                cmd_argv, shell_cmd = run_plan_from_pane(panes[0])
             cmd = [
                 "new-window",
                 "-P",
@@ -621,7 +633,7 @@ def restore_from_dump(
             cmd_argv: List[str] = []
             shell_cmd = ""
             if run_commands and panes:
-                cmd_argv, shell_cmd = run_plan_from_processes(panes[0].get("processes"))
+                cmd_argv, shell_cmd = run_plan_from_pane(panes[0])
             cmd = [
                 "new-window",
                 "-P",

@@ -40,6 +40,13 @@ export interface TmuxPane {
   pid?: number | string;
   path?: string;
   processes?: TmuxProcess[];
+  shell_command?: TmuxShellCommand;
+}
+
+export interface TmuxShellCommand {
+  command: string;
+  running: boolean;
+  source: "fish";
 }
 
 export interface TmuxProcess {
