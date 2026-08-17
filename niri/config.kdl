@@ -375,7 +375,8 @@ window-rule {
 }
 
 environment {
-    QT_QPA_PLATFORMTHEME "KDE"
+    QT_QPA_PLATFORMTHEME "kde"
+    XDG_MENU_PREFIX "plasma-"
 }
 
 binds {

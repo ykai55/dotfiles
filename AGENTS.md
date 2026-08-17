@@ -42,8 +42,8 @@ are missing.
 - `nvim/`: Neovim/LazyVim configuration and related editor settings.
 - `tmux/`: tmux configuration files linked into the user environment.
 - `kitty.conf`, `git/`: app configs.
-- `niri/`, `ironbar/`, `mako/`, `keyd/`: Linux desktop, bar, notification, and
-  keyboard configuration.
+- `niri/`, `ironbar/`, `mako/`, `keyd/`, `fontconfig/`: Linux desktop, bar,
+  notification, keyboard, and font configuration.
 - `systemd/`: systemd unit files, currently reserved for user services.
 - `dotfiles-map.json`: manifest mapping repo files to install targets;
   consumed by `bin/dotfiles-apply`.

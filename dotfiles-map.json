@@ -87,6 +87,15 @@
       "mode": "symlink"
     },
     {
+      "name": "fontconfig",
+      "source": "fontconfig/fonts.conf",
+      "target": "~/.config/fontconfig/fonts.conf",
+      "mode": "symlink",
+      "platforms": [
+        "linux"
+      ]
+    },
+    {
       "name": "niri",
       "source": "niri/config.kdl",
       "target": "~/.config/niri/config.kdl",
