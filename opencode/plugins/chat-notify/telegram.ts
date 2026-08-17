@@ -65,13 +65,6 @@ const prop = (value: unknown, key: string) => {
   return value[key]
 }
 
-const shortID = (value: unknown) => (typeof value === "string" ? value.slice(0, 8) : "unknown")
-
-const patterns = (value: unknown) => {
-  if (!Array.isArray(value)) return ""
-  return value.filter((item): item is string => typeof item === "string").join(", ")
-}
-
 const html = (value: string) =>
   value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;")
 
@@ -108,12 +101,25 @@ const inlineMarkdown = (value: string) =>
 const markdownTables = (value: string) => {
   const lines = value.split("\n")
   const result: string[] = []
+  let paragraph: string[] = []
+
+  function flushParagraph() {
+    if (!paragraph.length) return
+    result.push(`<p>${paragraph.map(inlineMarkdown).join("<br/>")}</p>`)
+    paragraph = []
+  }
+
   for (let index = 0; index < lines.length; index++) {
+    if (!lines[index].trim()) {
+      flushParagraph()
+      continue
+    }
     if (!lines[index].includes("|") || !tableDivider(lines[index + 1] ?? "")) {
-      result.push(inlineMarkdown(lines[index]))
+      paragraph.push(lines[index])
       continue
     }
 
+    flushParagraph()
     const rows = [tableCells(lines[index])]
     index += 2
     while (index < lines.length && lines[index].includes("|")) {
@@ -123,7 +129,8 @@ const markdownTables = (value: string) => {
     index--
     result.push(`<pre><code>${html(renderTable(rows))}</code></pre>`)
   }
-  return result.join("\n")
+  flushParagraph()
+  return result.join("")
 }
 
 const renderMarkdownChunk = (value: string) => (value ? markdownTables(value) : "")
@@ -165,7 +172,7 @@ const markdown = (value: string) => {
 
   flushText()
   flushCode()
-  return result.join("\n")
+  return result.join("")
 }
 
 const truncate = (value: string, limit: number) => {
@@ -184,7 +191,40 @@ const compactNumber = (value: number) => {
   return String(Math.round(value))
 }
 
+const gitBranch = async (directory: string) => {
+  try {
+    const branchProcess = Bun.spawn(["git", "-C", directory, "rev-parse", "--abbrev-ref", "HEAD"], {
+      stdout: "pipe",
+      stderr: "ignore",
+    })
+    const [branch, branchExitCode] = await Promise.all([
+      new Response(branchProcess.stdout).text(),
+      branchProcess.exited,
+    ])
+    if (branchExitCode !== 0) return "非 Git 仓库"
+    const name = branch.trim()
+    if (name !== "HEAD") return name
+
+    const commitProcess = Bun.spawn(["git", "-C", directory, "rev-parse", "--short", "HEAD"], {
+      stdout: "pipe",
+      stderr: "ignore",
+    })
+    const [commit, commitExitCode] = await Promise.all([
+      new Response(commitProcess.stdout).text(),
+      commitProcess.exited,
+    ])
+    return commitExitCode === 0 ? `detached@${commit.trim()}` : "detached HEAD"
+  } catch {
+    return "无法获取"
+  }
+}
+
+type TelegramRichMessage = {
+  html: string
+}
+
 type SessionStats = {
+  directory: string
   muted: boolean
   introSent: boolean
   rootMessageID: number | undefined
@@ -199,12 +239,14 @@ type SessionStats = {
 }
 
 type SessionRow = {
+  directory: string | null
   muted: number | null
   intro_sent: number | null
   root_message_id: number | null
   thread_id: number | null
   thread_name: string | null
   session_title: string | null
+  user_input: string | null
 }
 
 type SessionLookupRow = {
@@ -220,6 +262,8 @@ type PermissionLookupRow = {
   thread_id: number | null
   message_id: number | null
 }
+
+type QuestionLookupRow = PermissionLookupRow
 
 const contextLimitFrom = (value: unknown) =>
   numberOption(prop(prop(value, "limit"), "context")) ??
@@ -278,6 +322,7 @@ export default (async (input, options) => {
       thread_id INTEGER,
       thread_name TEXT,
       session_title TEXT,
+      user_input TEXT,
       updated_at INTEGER NOT NULL,
       PRIMARY KEY (project_id, session_id)
     )
@@ -299,6 +344,16 @@ export default (async (input, options) => {
       updated_at INTEGER NOT NULL
     )
   `)
+  db.run(`
+    CREATE TABLE IF NOT EXISTS question_request (
+      request_id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      directory TEXT,
+      thread_id INTEGER,
+      message_id INTEGER,
+      updated_at INTEGER NOT NULL
+    )
+  `)
   const columns = new Set(
     db
       .query("PRAGMA table_info(session_state)")
@@ -307,10 +362,18 @@ export default (async (input, options) => {
   )
   if (!columns.has("intro_sent")) db.run("ALTER TABLE session_state ADD COLUMN intro_sent INTEGER NOT NULL DEFAULT 0")
   if (!columns.has("directory")) db.run("ALTER TABLE session_state ADD COLUMN directory TEXT")
+  if (!columns.has("user_input")) db.run("ALTER TABLE session_state ADD COLUMN user_input TEXT")
   const selectSession = db.query(`
-    SELECT muted, intro_sent, root_message_id, thread_id, thread_name, session_title
+    SELECT directory, muted, intro_sent, root_message_id, thread_id, thread_name, session_title, user_input
     FROM session_state
     WHERE project_id = ? AND session_id = ?
+  `)
+  const selectSessionByID = db.query(`
+    SELECT directory, muted, intro_sent, root_message_id, thread_id, thread_name, session_title, user_input
+    FROM session_state
+    WHERE session_id = ?
+    ORDER BY updated_at DESC
+    LIMIT 1
   `)
   const selectSessionByThread = db.query(`
     SELECT session_id, directory, muted
@@ -328,8 +391,9 @@ export default (async (input, options) => {
   `)
   const upsertSession = db.query(`
     INSERT INTO session_state (
-      project_id, session_id, directory, muted, intro_sent, root_message_id, thread_id, thread_name, session_title, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      project_id, session_id, directory, muted, intro_sent, root_message_id, thread_id, thread_name, session_title, user_input,
+      updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(project_id, session_id) DO UPDATE SET
       directory = excluded.directory,
       muted = excluded.muted,
@@ -338,6 +402,7 @@ export default (async (input, options) => {
       thread_id = excluded.thread_id,
       thread_name = excluded.thread_name,
       session_title = excluded.session_title,
+      user_input = excluded.user_input,
       updated_at = excluded.updated_at
   `)
   const upsertPollLock = db.query(`
@@ -371,6 +436,34 @@ export default (async (input, options) => {
     DELETE FROM permission_request
     WHERE request_id = ?
   `)
+  const upsertQuestion = db.query(`
+    INSERT INTO question_request (request_id, session_id, directory, thread_id, message_id, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(request_id) DO UPDATE SET
+      session_id = excluded.session_id,
+      directory = excluded.directory,
+      thread_id = excluded.thread_id,
+      message_id = excluded.message_id,
+      updated_at = excluded.updated_at
+  `)
+  const selectQuestion = db.query(`
+    SELECT request_id, session_id, directory, thread_id, message_id
+    FROM question_request
+    WHERE request_id = ?
+  `)
+  const selectQuestionBySession = db.query(`
+    SELECT request_id, session_id, directory, thread_id, message_id
+    FROM question_request
+    WHERE session_id = ?
+    ORDER BY updated_at DESC
+    LIMIT 1
+  `)
+  const deleteQuestion = db.query(`
+    DELETE FROM question_request
+    WHERE request_id = ?
+  `)
+  const deletePermissionsBySession = db.query("DELETE FROM permission_request WHERE session_id = ?")
+  const deleteQuestionsBySession = db.query("DELETE FROM question_request WHERE session_id = ?")
   const statsBySession = new Map<string, SessionStats>()
   const telegramUpdateIDs = new Set<number>()
   const pollOwner = `${input.project.id}:${input.directory}:${Math.random().toString(36).slice(2)}`
@@ -449,8 +542,9 @@ export default (async (input, options) => {
   function stats(sessionID: string) {
     const existing = statsBySession.get(sessionID)
     if (existing) return existing
-    const row = selectSession.get(input.project.id, sessionID) as SessionRow | null
+    const row = (selectSession.get(input.project.id, sessionID) ?? selectSessionByID.get(sessionID)) as SessionRow | null
     const next = {
+      directory: row?.directory ?? input.directory,
       muted: row?.muted === 1,
       introSent: row?.intro_sent === 1,
       rootMessageID: row?.root_message_id ?? undefined,
@@ -459,7 +553,7 @@ export default (async (input, options) => {
       threadPromise: undefined,
       threadName: row?.thread_name ?? undefined,
       sessionTitle: row?.session_title ?? undefined,
-      userInput: "",
+      userInput: row?.user_input ?? "",
       contextTokens: undefined,
       contextLimit: undefined,
     }
@@ -473,70 +567,78 @@ export default (async (input, options) => {
     upsertSession.run(
       input.project.id,
       sessionID,
-      input.directory,
+      current.directory,
       current.muted ? 1 : 0,
       current.introSent ? 1 : 0,
       current.rootMessageID ?? null,
       current.threadID ?? null,
       current.threadName ?? null,
       current.sessionTitle ?? null,
+      current.userInput || null,
       Date.now(),
     )
   }
 
   function applySessionNotice(notice: SessionNotice) {
     const current = stats(notice.sessionID)
+    current.directory = input.directory
     current.userInput = notice.userInput
     current.sessionTitle = notice.sessionTitle
     current.contextTokens = notice.contextTokens
     current.contextLimit = notice.contextLimit
   }
 
-  function doneNoticeMessage(notice: DoneNotice) {
-    const user = notice.userInput
-      ? `<blockquote expandable>${html(`user: ${truncateEnd(notice.userInput, 200)}`)}</blockquote>`
-      : ""
-    const context = notice.contextTokens
-      ? ` · ${
-          notice.contextLimit
-            ? `${Math.round((notice.contextTokens / notice.contextLimit) * 100)}%`
-            : compactNumber(notice.contextTokens)
-        }`
-      : ""
-    return [
-      user,
-      markdown(notice.output),
-      "",
-      `<blockquote expandable>${html(
-        `tools ${notice.tools} · r/w/c ${notice.read}/${notice.written}/${notice.changed}${context}`,
-      )}</blockquote>`,
-    ]
-      .filter(Boolean)
-      .join("\n")
+  async function statusMessage(
+    sessionID: string,
+    title: "已开始" | "处理中" | "需要授权" | "等待回答" | "已完成",
+    content = "",
+    footer = "",
+  ): Promise<TelegramRichMessage> {
+    const current = stats(sessionID)
+    const branch = await gitBranch(current.directory)
+    const task = markdown(truncateEnd(current.userInput || "等待任务内容", 200))
+    const details = [
+      `<details><summary>详情</summary>`,
+      `<p><b>会话 ID</b><br/><code>${html(sessionID)}</code></p>`,
+      `<p><b>工作路径</b><br/><code>${html(current.directory)}</code></p>`,
+      `<p><b>所属分支</b><br/><code>${html(branch)}</code></p>`,
+      `</details>`,
+    ].join("")
+    return {
+      html: [
+        `<h3>OpenCode · ${title}</h3>`,
+        task,
+        `<hr/>`,
+        content,
+        footer ? `<footer>${html(footer)}</footer>` : "",
+        details,
+      ].join(""),
+    }
   }
 
-  const compactionMessage = (notice: CompactionNotice) =>
-    html(
-      `compacted · ${contextLabel(notice.beforeTokens, notice.beforeLimit)} -> ${contextLabel(
+  async function doneNoticeMessage(notice: DoneNotice) {
+    const context =
+      notice.contextTokens && notice.contextLimit
+        ? `上下文 ${Math.round((notice.contextTokens / notice.contextLimit) * 100)}%`
+        : undefined
+    const files = notice.changed > 0 ? `修改 ${notice.changed} 个文件` : "未修改文件"
+    return statusMessage(
+      notice.sessionID,
+      "已完成",
+      markdown(notice.output),
+      [files, context].filter(Boolean).join(" · "),
+    )
+  }
+
+  const compactionMessage = (notice: CompactionNotice): TelegramRichMessage => ({
+    html: `<p>${html(
+      `上下文已压缩 · ${contextLabel(notice.beforeTokens, notice.beforeLimit)} → ${contextLabel(
         notice.afterTokens,
         notice.afterLimit,
         notice.afterTokens !== undefined,
       )}`,
-    )
-
-  async function sendIntro(sessionID: string, target: { replyTo?: number; threadID?: number }) {
-    const current = stats(sessionID)
-    if (current.introSent) return
-    await send(
-      [
-        `<b>${html(sessionID)}</b> · <code>${html(input.directory)}</code>`,
-        `<blockquote expandable>${html(`user: ${current.userInput || "(unknown input)"}`)}</blockquote>`,
-      ].join("\n"),
-      target,
-    )
-    current.introSent = true
-    saveSession(sessionID)
-  }
+    )}</p>`,
+  })
 
   async function send(text: string, options?: { replyTo?: number; threadID?: number; replyMarkup?: unknown }) {
     if (!token || !chatID) return
@@ -565,6 +667,32 @@ export default (async (input, options) => {
     )
   }
 
+  async function sendRich(
+    richMessage: TelegramRichMessage,
+    options?: { replyTo?: number; threadID?: number; replyMarkup?: unknown },
+  ) {
+    if (!token || !chatID) return
+    const threadID = options?.threadID ?? messageThreadID
+    const response = await fetch(`https://api.telegram.org/bot${token}/sendRichMessage`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        chat_id: chatID,
+        rich_message: richMessage,
+        ...(options?.replyTo === undefined
+          ? {}
+          : { reply_parameters: { message_id: options.replyTo, allow_sending_without_reply: true } }),
+        ...(threadID === undefined ? {} : { message_thread_id: threadID }),
+        ...(options?.replyMarkup === undefined ? {} : { reply_markup: options.replyMarkup }),
+      }),
+    })
+    const data = (await response.json()) as { ok?: boolean; result?: { message_id?: number }; description?: string }
+    if (response.ok && data.ok !== false) return data.result?.message_id
+    console.warn(
+      `telegram-notify plugin: sendRichMessage failed (${response.status}) ${data.description ?? JSON.stringify(data)}`,
+    )
+  }
+
   async function telegramPost(method: string, body: Record<string, unknown>) {
     if (!token) return
     const response = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
@@ -580,20 +708,20 @@ export default (async (input, options) => {
     return false
   }
 
+  async function editRichMessage(messageID: number, richMessage: TelegramRichMessage, replyMarkup?: unknown) {
+    if (!chatID || messageID <= 0) return false
+    return telegramPost("editMessageText", {
+      chat_id: chatID,
+      message_id: messageID,
+      rich_message: richMessage,
+      ...(replyMarkup === undefined ? {} : { reply_markup: replyMarkup }),
+    })
+  }
+
   async function answerCallback(callbackID: string, text?: string) {
     await telegramPost("answerCallbackQuery", {
       callback_query_id: callbackID,
       ...(text ? { text } : {}),
-    })
-  }
-
-  async function editReplyMarkup(messageID: number, threadID?: number) {
-    if (!chatID || messageID <= 0) return
-    await telegramPost("editMessageReplyMarkup", {
-      chat_id: chatID,
-      message_id: messageID,
-      reply_markup: { inline_keyboard: [] },
-      ...(threadID === undefined ? {} : { message_thread_id: threadID }),
     })
   }
 
@@ -615,6 +743,37 @@ export default (async (input, options) => {
       body: { response: reply },
     })
     return !prop(result, "error")
+  }
+
+  async function replyQuestion(row: QuestionLookupRow, answer: string) {
+    const question = prop(input.client, "question")
+    const replyFn = prop(question, "reply")
+    if (typeof replyFn !== "function") return false
+    const result = await replyFn.call(question, {
+      requestID: row.request_id,
+      answers: [[answer]],
+      directory: row.directory ?? input.directory,
+    })
+    return !prop(result, "error")
+  }
+
+  async function rejectQuestion(row: QuestionLookupRow) {
+    const question = prop(input.client, "question")
+    const rejectFn = prop(question, "reject")
+    if (typeof rejectFn !== "function") return false
+    const result = await rejectFn.call(question, {
+      requestID: row.request_id,
+      directory: row.directory ?? input.directory,
+    })
+    return !prop(result, "error")
+  }
+
+  async function restoreProcessing(row: PermissionLookupRow) {
+    const current = stats(row.session_id)
+    current.directory = row.directory ?? current.directory
+    const messageID = row.message_id ?? current.rootMessageID
+    if (messageID === undefined) return
+    await editRichMessage(messageID, await statusMessage(row.session_id, "处理中"), { inline_keyboard: [] })
   }
 
   async function handlePermissionCallback(callback: unknown) {
@@ -646,7 +805,41 @@ export default (async (input, options) => {
       callbackID,
       match[1] === "reject" ? "Denied" : match[1] === "always" ? "Always allowed" : "Allowed",
     )
-    await editReplyMarkup(numberOption(prop(message, "message_id")) ?? row.message_id ?? 0, row.thread_id ?? undefined)
+    await restoreProcessing({
+      ...row,
+      message_id: numberOption(prop(message, "message_id")) ?? row.message_id,
+    })
+  }
+
+  async function handleQuestionCallback(callback: unknown) {
+    const callbackID = textOption(prop(callback, "id"))
+    const data = textOption(prop(callback, "data"))
+    if (!callbackID || !data) return
+    const match = /^op:question:reject:(.+)$/.exec(data)
+    if (!match) return
+
+    const message = prop(callback, "message")
+    if (record(message) && `${prop(prop(message, "chat"), "id")}` !== chatID) {
+      await answerCallback(callbackID, "Wrong chat")
+      return
+    }
+
+    const row = selectQuestion.get(match[1]) as QuestionLookupRow | null
+    if (!row) {
+      await answerCallback(callbackID, "Question is no longer pending")
+      return
+    }
+    if (!(await rejectQuestion(row))) {
+      await answerCallback(callbackID, "Failed")
+      return
+    }
+
+    deleteQuestion.run(row.request_id)
+    await answerCallback(callbackID, "Question rejected")
+    await restoreProcessing({
+      ...row,
+      message_id: numberOption(prop(message, "message_id")) ?? row.message_id,
+    })
   }
 
   async function react(message: unknown, emoji = "👌") {
@@ -725,7 +918,9 @@ export default (async (input, options) => {
 
     const callback = prop(update, "callback_query")
     if (record(callback)) {
-      await handlePermissionCallback(callback)
+      const data = textOption(prop(callback, "data"))
+      if (data?.startsWith("op:perm:")) await handlePermissionCallback(callback)
+      if (data?.startsWith("op:question:")) await handleQuestionCallback(callback)
       return
     }
 
@@ -739,6 +934,21 @@ export default (async (input, options) => {
 
     const target = telegramMessageSession(message)
     if (!target) return
+
+    const question = selectQuestionBySession.get(target.sessionID) as QuestionLookupRow | null
+    if (question) {
+      if (!(await replyQuestion(question, text))) {
+        console.warn("telegram-notify plugin: failed to answer OpenCode question")
+        await send(html("failed to submit this answer to opencode"), {
+          threadID: numberOption(prop(message, "message_thread_id")),
+        })
+        return
+      }
+      deleteQuestion.run(question.request_id)
+      await restoreProcessing(question)
+      await react(message)
+      return
+    }
 
     const result = await input.client.session.promptAsync({
       path: { id: target.sessionID },
@@ -787,10 +997,6 @@ export default (async (input, options) => {
     }
   }
 
-  function title(prefix: string, sessionID: unknown) {
-    return `${prefix}\nproject: ${input.project.id}\nsession: ${shortID(sessionID)}\ndir: ${input.directory}`
-  }
-
   function topicName(sessionID: string) {
     const current = stats(sessionID)
     return (current.sessionTitle || "opencode session").replace(/\s+/g, " ").trim().slice(0, 128) || "opencode session"
@@ -826,19 +1032,32 @@ export default (async (input, options) => {
     if (current.muted) return
     if (current.rootMessageID !== undefined) return current.rootMessageID
     if (current.rootMessagePromise) return current.rootMessagePromise
-    current.rootMessagePromise = send(
-      [
-        `<b>${html(sessionID)}</b> · <code>${html(input.directory)}</code>`,
-        `<blockquote expandable>${html(`user: ${current.userInput || "(unknown input)"}`)}</blockquote>`,
-      ].join("\n"),
-    ).then((messageID) => {
-      current.rootMessageID = messageID
-      current.rootMessagePromise = undefined
-      current.introSent = true
-      saveSession(sessionID)
-      return messageID
-    })
+    current.rootMessagePromise = Promise.all([
+      statusMessage(sessionID, "已开始"),
+      forumTopics ? sessionThread(sessionID) : Promise.resolve(undefined),
+    ])
+      .then(([message, threadID]) => sendRich(message, { threadID }))
+      .then((messageID) => {
+        current.rootMessageID = messageID
+        current.rootMessagePromise = undefined
+        current.introSent = true
+        saveSession(sessionID)
+        return messageID
+      })
     return current.rootMessagePromise
+  }
+
+  async function updateStatus(
+    sessionID: string,
+    title: "处理中" | "需要授权" | "等待回答" | "已完成",
+    content = "",
+    footer = "",
+    replyMarkup?: unknown,
+  ) {
+    const messageID = await rootMessage(sessionID)
+    if (messageID === undefined) return
+    await editRichMessage(messageID, await statusMessage(sessionID, title, content, footer), replyMarkup)
+    return messageID
   }
 
   async function sessionThread(sessionID: string) {
@@ -893,8 +1112,8 @@ export default (async (input, options) => {
       errorLabel: "telegram-notify plugin",
       async ensureSession(notice) {
         applySessionNotice(notice)
-        const target = await sessionTarget(notice.sessionID)
-        if (forumTopics && target.threadID !== undefined) await sendIntro(notice.sessionID, target)
+        saveSession(notice.sessionID)
+        await rootMessage(notice.sessionID)
       },
       async syncSessionTitle(notice) {
         applySessionNotice(notice)
@@ -903,50 +1122,78 @@ export default (async (input, options) => {
       },
       async sendDone(notice) {
         applySessionNotice(notice)
-        await send(doneNoticeMessage(notice), await sessionTarget(notice.sessionID))
+        saveSession(notice.sessionID)
+        deletePermissionsBySession.run(notice.sessionID)
+        deleteQuestionsBySession.run(notice.sessionID)
+        const messageID = await rootMessage(notice.sessionID)
+        if (messageID !== undefined) {
+          await editRichMessage(messageID, await doneNoticeMessage(notice), { inline_keyboard: [] })
+        }
       },
       async sendCompaction(notice) {
-        await send(compactionMessage(notice), await sessionTarget(notice.sessionID))
+        await sendRich(compactionMessage(notice), await sessionTarget(notice.sessionID))
       },
       async sendPermission(notice) {
-        const target = await sessionTarget(notice.sessionID)
-        const messageID = await send(
-          html(
+        const replyMarkup = {
+          inline_keyboard: [
             [
-              `permission needed · ${shortID(notice.sessionID)}`,
-              `permission: ${notice.permission}`,
-              `patterns: ${notice.patterns}`,
-            ].join("\n"),
-          ),
-          {
-            ...target,
-            replyMarkup: {
-              inline_keyboard: [
-                [
-                  { text: "Allow once", callback_data: `op:perm:once:${notice.requestID}` },
-                  { text: "Always", callback_data: `op:perm:always:${notice.requestID}` },
-                  { text: "Deny", callback_data: `op:perm:reject:${notice.requestID}` },
-                ],
-              ],
-            },
-          },
+              { text: "允许一次", callback_data: `op:perm:once:${notice.requestID}` },
+              { text: "始终允许", callback_data: `op:perm:always:${notice.requestID}` },
+              { text: "拒绝", callback_data: `op:perm:reject:${notice.requestID}` },
+            ],
+          ],
+        }
+        const messageID = await updateStatus(
+          notice.sessionID,
+          "需要授权",
+          [
+            `<p><b>权限</b><br/>${html(notice.permission)}</p>`,
+            `<p><b>范围</b><br/>${html(truncateEnd(notice.patterns, 400))}</p>`,
+          ].join(""),
+          "",
+          replyMarkup,
         )
+        const current = stats(notice.sessionID)
         upsertPermission.run(
           notice.requestID,
           notice.sessionID,
-          input.directory,
-          target.threadID ?? null,
+          current.directory,
+          current.threadID ?? null,
           messageID ?? null,
           Date.now(),
         )
       },
       async clearPermission(requestID) {
         const row = selectPermission.get(requestID) as PermissionLookupRow | null
-        if (row?.message_id) await editReplyMarkup(row.message_id, row.thread_id ?? undefined)
         deletePermission.run(requestID)
+        if (row) await restoreProcessing(row)
       },
       async sendQuestion(notice) {
-        await send(html(title("opencode is waiting for your answer", notice.sessionID)), await sessionTarget(notice.sessionID))
+        const content = [
+          notice.header ? `<p><b>${html(notice.header)}</b></p>` : "",
+          `<p>${html(notice.question ?? "请回复这条消息，OpenCode 会继续处理。")}</p>`,
+          `<footer>${forumTopics ? "在当前话题中输入回答" : "请回复这条消息输入回答"}</footer>`,
+        ].join("")
+        const replyMarkup = {
+          inline_keyboard: [
+            [{ text: "拒绝回答", callback_data: `op:question:reject:${notice.requestID}` }],
+          ],
+        }
+        const messageID = await updateStatus(notice.sessionID, "等待回答", content, "", replyMarkup)
+        const current = stats(notice.sessionID)
+        upsertQuestion.run(
+          notice.requestID,
+          notice.sessionID,
+          current.directory,
+          current.threadID ?? null,
+          messageID ?? null,
+          Date.now(),
+        )
+      },
+      async clearQuestion(requestID) {
+        const row = selectQuestion.get(requestID) as QuestionLookupRow | null
+        deleteQuestion.run(requestID)
+        if (row) await restoreProcessing(row)
       },
     },
   })

@@ -7,6 +7,7 @@ import {
   type CompactionNotice,
   type DoneNotice,
   type PermissionNotice,
+  type ProgressNotice,
   type QuestionNotice,
   type SessionNotice,
 } from "./composer"
@@ -15,10 +16,12 @@ export type NotifySender = {
   ensureSession(session: SessionNotice): Promise<void>
   syncSessionTitle?(session: SessionNotice): Promise<void>
   sendDone(done: DoneNotice): Promise<void>
+  updateProgress?(notice: ProgressNotice): Promise<void>
   sendCompaction?(notice: CompactionNotice): Promise<void>
   sendPermission?(notice: PermissionNotice): Promise<void>
-  clearPermission?(requestID: string): Promise<void>
+  clearPermission?(requestID: string, sessionID?: string): Promise<void>
   sendQuestion?(notice: QuestionNotice): Promise<void>
+  clearQuestion?(requestID: string, sessionID?: string): Promise<void>
   errorLabel: string
 }
 
@@ -112,13 +115,19 @@ export function createDispatcher(input: {
             typeof delta !== "string"
           )
             return
-          input.composer.partDelta(sessionID, partID, delta)
+          const notice = input.composer.partDelta(sessionID, partID, delta)
+          if (notice && input.notifyDone && !input.composer.isMuted(sessionID)) {
+            await input.sender.updateProgress?.(notice)
+          }
           return
         }
 
         if (eventType === "message.part.updated") {
           if (typeof sessionID !== "string") return
-          input.composer.partUpdated(sessionID, prop(properties, "part"))
+          const notice = input.composer.partUpdated(sessionID, prop(properties, "part"))
+          if (notice && input.notifyDone && !input.composer.isMuted(sessionID)) {
+            await input.sender.updateProgress?.(notice)
+          }
           return
         }
 
@@ -135,7 +144,14 @@ export function createDispatcher(input: {
           const requestID = prop(properties, "requestID")
           if (typeof requestID !== "string") return
           clearPermissionTimer(requestID)
-          await input.sender.clearPermission?.(requestID)
+          await input.sender.clearPermission?.(requestID, typeof sessionID === "string" ? sessionID : undefined)
+          return
+        }
+
+        if (eventType === "question.replied" || eventType === "question.rejected") {
+          const requestID = prop(properties, "requestID")
+          if (typeof requestID !== "string") return
+          await input.sender.clearQuestion?.(requestID, typeof sessionID === "string" ? sessionID : undefined)
           return
         }
 
@@ -166,7 +182,14 @@ export function createDispatcher(input: {
           const key = `question:${requestID}`
           if (notifiedRequests.has(key)) return
           notifiedRequests.add(key)
-          await input.sender.sendQuestion({ sessionID, requestID })
+          const questions = prop(properties, "questions")
+          const firstQuestion = Array.isArray(questions) ? questions[0] : undefined
+          await input.sender.sendQuestion({
+            sessionID,
+            requestID,
+            header: textOption(prop(firstQuestion, "header")),
+            question: textOption(prop(firstQuestion, "question")),
+          })
         }
       } catch (error) {
         console.warn(`${input.sender.errorLabel}:`, error instanceof Error ? error.message : error)

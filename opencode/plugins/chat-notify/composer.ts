@@ -25,6 +25,8 @@ export type PermissionNotice = {
 export type QuestionNotice = {
   sessionID: string
   requestID: string
+  header?: string
+  question?: string
 }
 
 export type CompactionNotice = {
@@ -35,12 +37,19 @@ export type CompactionNotice = {
   afterLimit?: number
 }
 
+export type ProgressNotice = {
+  sessionID: string
+  kind: "text" | "tool"
+  content: string
+}
+
 type SessionStats = {
   muted: boolean
   sessionTitle?: string
   userInput: string
   userPartIDs: Set<string>
   ignoredPartIDs: Set<string>
+  textPartIDs: string[]
   pendingTextByPart: Map<string, string>
   textByPart: Map<string, string>
   toolCalls: Set<string>
@@ -217,11 +226,13 @@ export class NotificationComposer {
       this.ignorePart(current, partID)
       return
     }
+    this.rememberTextPart(current, partID)
     current.pendingTextByPart.set(partID, next)
+    return { sessionID, kind: "text", content: this.visibleText(current) } satisfies ProgressNotice
   }
 
   partUpdated(sessionID: string, part: unknown) {
-    this.trackPart(sessionID, part)
+    return this.trackPart(sessionID, part)
   }
 
   status(sessionID: string, statusType: unknown) {
@@ -244,10 +255,7 @@ export class NotificationComposer {
     return {
       ...this.session(sessionID),
       output: truncate(
-        Array.from(current.textByPart.values())
-          .filter((text) => !syntheticText(text))
-          .join("\n\n")
-          .trim() || "(no text output)",
+        this.visibleText(current).trim() || "(no text output)",
         this.options.maxOutputChars,
       ),
       tools: current.toolCalls.size,
@@ -265,6 +273,7 @@ export class NotificationComposer {
       userInput: "",
       userPartIDs: new Set<string>(),
       ignoredPartIDs: new Set<string>(),
+      textPartIDs: [],
       pendingTextByPart: new Map<string, string>(),
       textByPart: new Map<string, string>(),
       toolCalls: new Set<string>(),
@@ -282,6 +291,7 @@ export class NotificationComposer {
     current.userInput = ""
     current.userPartIDs.clear()
     current.ignoredPartIDs.clear()
+    current.textPartIDs.length = 0
     current.pendingTextByPart.clear()
     current.textByPart.clear()
     current.toolCalls.clear()
@@ -331,13 +341,13 @@ export class NotificationComposer {
         this.ignorePart(current, partID)
         return
       }
+      this.rememberTextPart(current, partID)
       current.pendingTextByPart.delete(partID)
       current.textByPart.set(partID, text)
-      return
+      return { sessionID, kind: "text", content: this.visibleText(current) } satisfies ProgressNotice
     }
     if (partType === "tool") {
-      this.trackTool(sessionID, part)
-      return
+      return this.trackTool(sessionID, part)
     }
     if (partType === "step-finish") {
       this.trackContext(sessionID, part)
@@ -358,13 +368,17 @@ export class NotificationComposer {
     const current = this.stats(sessionID)
     if (current.toolCalls.has(callID)) return
     current.toolCalls.add(callID)
+    current.textPartIDs.length = 0
     current.pendingTextByPart.clear()
     current.textByPart.clear()
+
+    const title =
+      textOption(prop(prop(part, "state"), "title")) ?? textOption(prop(part, "title")) ?? tool
 
     const paths = [...inputPaths(toolInput(part)), ...patchPaths(toolInput(part))]
     if (["read", "grep", "glob", "lsp"].includes(tool)) {
       for (const file of paths) current.readFiles.add(file)
-      return
+      return { sessionID, kind: "tool", content: title } satisfies ProgressNotice
     }
     if (["write", "edit", "apply_patch"].includes(tool)) {
       for (const file of paths) {
@@ -372,11 +386,24 @@ export class NotificationComposer {
         current.changedFiles.add(file)
       }
     }
+    return { sessionID, kind: "tool", content: title } satisfies ProgressNotice
   }
 
   private ignorePart(current: SessionStats, partID: string) {
     current.ignoredPartIDs.add(partID)
+    current.textPartIDs = current.textPartIDs.filter((id) => id !== partID)
     current.pendingTextByPart.delete(partID)
     current.textByPart.delete(partID)
+  }
+
+  private rememberTextPart(current: SessionStats, partID: string) {
+    if (!current.textPartIDs.includes(partID)) current.textPartIDs.push(partID)
+  }
+
+  private visibleText(current: SessionStats) {
+    return current.textPartIDs
+      .map((partID) => current.pendingTextByPart.get(partID) ?? current.textByPart.get(partID))
+      .filter((text): text is string => typeof text === "string" && !syntheticText(text))
+      .join("\n\n")
   }
 }
