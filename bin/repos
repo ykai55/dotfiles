@@ -32,17 +32,14 @@ class Candidate:
     display_path: str
     branch: str
 
-    def display_label(self, path_width: Optional[int] = None) -> str:
-        display_path = self.display_path
-        if path_width is not None:
-            display_path = display_path.ljust(path_width)
-        label = f"{display_path} [{self.branch}]"
+    def display_label(self) -> str:
+        label = f"{self.display_path} [{self.branch}]"
         if label.startswith(" "):
             return ANSI_RESET + label
         return label
 
-    def fzf_line(self, path_width: Optional[int] = None) -> str:
-        return f"{self.display_label(path_width)}{TAB}{self.repo_path}{TAB}{self.repo_id}"
+    def fzf_line(self) -> str:
+        return f"{self.display_label()}{TAB}{self.repo_path}{TAB}{self.repo_id}"
 
 
 def run_git(repo_path: str, args: List[str]) -> Optional[str]:
@@ -278,14 +275,7 @@ def remove_recent_repo(current_repo_id: str, path: Optional[str] = None) -> None
     os.replace(tmp_path, file_path)
 
 
-def display_path_width(items: List[Candidate]) -> int:
-    if not items:
-        return 0
-    return max(len(item.display_path) for item in items)
-
-
 def run_fzf(items: List[Candidate], query: str = "") -> Optional[tuple[str, Candidate]]:
-    path_width = display_path_width(items)
     proc = subprocess.run(
         [
             "fzf",
@@ -302,7 +292,7 @@ def run_fzf(items: List[Candidate], query: str = "") -> Optional[tuple[str, Cand
             "ctrl-x",
             "--no-sort",
             "--reverse",
-            "--keep-right",
+            "--wrap=word",
             "--bind",
             "tab:toggle-preview",
             "--preview-window",
@@ -311,7 +301,7 @@ def run_fzf(items: List[Candidate], query: str = "") -> Optional[tuple[str, Cand
             'git -C {2} status -sb 2>/dev/null || printf "(not a git repo)\\n"',
         ]
         + (["--query", query] if query else []),
-        input="\n".join(item.fzf_line(path_width) for item in items) + "\n",
+        input="\n".join(item.fzf_line() for item in items) + "\n",
         stdout=subprocess.PIPE,
         text=True,
     )

@@ -51,7 +51,7 @@ class ReposTests(unittest.TestCase):
             ["/src/project", "/src/project-feature", "/src/project-fix"],
         )
 
-    def test_fzf_line_aligns_branch_after_padded_path(self) -> None:
+    def test_fzf_line_displays_path_and_branch_without_padding(self) -> None:
         candidate = repos.Candidate(
             repo_path="/src/project-feature",
             repo_id="/src/project/.git",
@@ -60,17 +60,9 @@ class ReposTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            candidate.fzf_line(24),
-            "\033[0m  ~/src/project-feature  [feature]\t/src/project-feature\t/src/project/.git",
+            candidate.fzf_line(),
+            "\033[0m  ~/src/project-feature [feature]\t/src/project-feature\t/src/project/.git",
         )
-
-    def test_display_path_width_uses_longest_display_path(self) -> None:
-        items = [
-            repos.Candidate("/src/a", "/src/a/.git", "~/src/a", "main"),
-            repos.Candidate("/src/long-name", "/src/a/.git", "  ~/src/long-name", "feature"),
-        ]
-
-        self.assertEqual(repos.display_path_width(items), len("  ~/src/long-name"))
 
     def test_run_fzf_uses_reverse_layout(self) -> None:
         candidate = repos.Candidate(
@@ -90,9 +82,14 @@ class ReposTests(unittest.TestCase):
 
         argv = run.call_args.args[0]
         self.assertIn("--reverse", argv)
-        self.assertIn("--keep-right", argv)
+        self.assertIn("--wrap=word", argv)
+        self.assertNotIn("--keep-right", argv)
         self.assertIn("ctrl-x", argv)
         self.assertNotIn("ctrl-d", argv)
+        self.assertEqual(
+            run.call_args.kwargs["input"],
+            "~/src/project [main]\t/src/project\t/src/project/.git\n",
+        )
         self.assertEqual(selected, ("", candidate))
 
     def test_select_repo_uses_patterns_as_initial_query(self) -> None:
