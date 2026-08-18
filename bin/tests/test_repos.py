@@ -90,6 +90,7 @@ class ReposTests(unittest.TestCase):
 
         argv = run.call_args.args[0]
         self.assertIn("--reverse", argv)
+        self.assertIn("--keep-right", argv)
         self.assertIn("ctrl-x", argv)
         self.assertNotIn("ctrl-d", argv)
         self.assertEqual(selected, ("", candidate))

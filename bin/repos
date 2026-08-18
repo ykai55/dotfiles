@@ -302,6 +302,7 @@ def run_fzf(items: List[Candidate], query: str = "") -> Optional[tuple[str, Cand
             "ctrl-x",
             "--no-sort",
             "--reverse",
+            "--keep-right",
             "--bind",
             "tab:toggle-preview",
             "--preview-window",
