@@ -1,0 +1,7 @@
+{
+  "private": true,
+  "dependencies": {
+    "@opencode-ai/plugin": "1.2.27",
+    "@larksuiteoapi/node-sdk": "^1.71.1"
+  }
+}

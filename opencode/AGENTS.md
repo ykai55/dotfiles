@@ -80,6 +80,8 @@ Favor removing abstractions that do not improve reuse, readability, or domain cl
 
 - Use the project's configured toolchain whenever possible rather than the system-wide installation.
 
+- When selecting or switching a Java/JDK version, use the version and toolchain declared by the project when available. If the project does not declare one, use the system-installed SDKMAN to select the JDK. Do not search system directories for installed Java versions or choose a JDK by filesystem path. In non-interactive shells, initialize SDKMAN explicitly before using it. Use a session-scoped switch by default; only change the persistent default when the user explicitly asks.
+
 - Prefer project-provided wrapper commands (e.g. make, just, task, mise, pnpm, uv, project scripts) over invoking language tools directly.
 
 # Communication
