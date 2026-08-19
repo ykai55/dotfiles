@@ -56,11 +56,9 @@ export function createDispatcher(input: {
 
   return {
     async "chat.message"(messageInput, output) {
-      const session = input.composer.chatMessage(
-        messageInput.sessionID,
-        output.parts,
-        await input.contextLimit(messageInput.model),
-      )
+      const sessionID = prop(messageInput, "sessionID") ?? output.message.sessionID
+      if (typeof sessionID !== "string") return
+      const session = input.composer.chatMessage(sessionID, output.parts)
       if (session) await input.sender.ensureSession(session)
     },
 

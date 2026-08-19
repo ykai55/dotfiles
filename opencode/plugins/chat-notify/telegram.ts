@@ -229,6 +229,8 @@ type SessionStats = {
   introSent: boolean
   rootMessageID: number | undefined
   rootMessagePromise: Promise<number | undefined> | undefined
+  statusMessageID: number | undefined
+  statusMessagePromise: Promise<number | undefined> | undefined
   threadID: number | undefined
   threadPromise: Promise<number | undefined> | undefined
   threadName: string | undefined
@@ -243,6 +245,7 @@ type SessionRow = {
   muted: number | null
   intro_sent: number | null
   root_message_id: number | null
+  status_message_id: number | null
   thread_id: number | null
   thread_name: string | null
   session_title: string | null
@@ -319,6 +322,7 @@ export default (async (input, options) => {
       muted INTEGER NOT NULL DEFAULT 0,
       intro_sent INTEGER NOT NULL DEFAULT 0,
       root_message_id INTEGER,
+      status_message_id INTEGER,
       thread_id INTEGER,
       thread_name TEXT,
       session_title TEXT,
@@ -363,13 +367,14 @@ export default (async (input, options) => {
   if (!columns.has("intro_sent")) db.run("ALTER TABLE session_state ADD COLUMN intro_sent INTEGER NOT NULL DEFAULT 0")
   if (!columns.has("directory")) db.run("ALTER TABLE session_state ADD COLUMN directory TEXT")
   if (!columns.has("user_input")) db.run("ALTER TABLE session_state ADD COLUMN user_input TEXT")
+  if (!columns.has("status_message_id")) db.run("ALTER TABLE session_state ADD COLUMN status_message_id INTEGER")
   const selectSession = db.query(`
-    SELECT directory, muted, intro_sent, root_message_id, thread_id, thread_name, session_title, user_input
+    SELECT directory, muted, intro_sent, root_message_id, status_message_id, thread_id, thread_name, session_title, user_input
     FROM session_state
     WHERE project_id = ? AND session_id = ?
   `)
   const selectSessionByID = db.query(`
-    SELECT directory, muted, intro_sent, root_message_id, thread_id, thread_name, session_title, user_input
+    SELECT directory, muted, intro_sent, root_message_id, status_message_id, thread_id, thread_name, session_title, user_input
     FROM session_state
     WHERE session_id = ?
     ORDER BY updated_at DESC
@@ -382,23 +387,24 @@ export default (async (input, options) => {
     ORDER BY updated_at DESC
     LIMIT 1
   `)
-  const selectSessionByRootMessage = db.query(`
+  const selectSessionByMessage = db.query(`
     SELECT session_id, directory, muted
     FROM session_state
-    WHERE root_message_id = ?
+    WHERE root_message_id = ? OR status_message_id = ?
     ORDER BY updated_at DESC
     LIMIT 1
   `)
   const upsertSession = db.query(`
     INSERT INTO session_state (
-      project_id, session_id, directory, muted, intro_sent, root_message_id, thread_id, thread_name, session_title, user_input,
-      updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      project_id, session_id, directory, muted, intro_sent, root_message_id, status_message_id, thread_id, thread_name,
+      session_title, user_input, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(project_id, session_id) DO UPDATE SET
       directory = excluded.directory,
       muted = excluded.muted,
       intro_sent = excluded.intro_sent,
       root_message_id = excluded.root_message_id,
+      status_message_id = excluded.status_message_id,
       thread_id = excluded.thread_id,
       thread_name = excluded.thread_name,
       session_title = excluded.session_title,
@@ -549,6 +555,8 @@ export default (async (input, options) => {
       introSent: row?.intro_sent === 1,
       rootMessageID: row?.root_message_id ?? undefined,
       rootMessagePromise: undefined,
+      statusMessageID: row?.status_message_id ?? undefined,
+      statusMessagePromise: undefined,
       threadID: row?.thread_id ?? undefined,
       threadPromise: undefined,
       threadName: row?.thread_name ?? undefined,
@@ -571,6 +579,7 @@ export default (async (input, options) => {
       current.muted ? 1 : 0,
       current.introSent ? 1 : 0,
       current.rootMessageID ?? null,
+      current.statusMessageID ?? null,
       current.threadID ?? null,
       current.threadName ?? null,
       current.sessionTitle ?? null,
@@ -595,20 +604,20 @@ export default (async (input, options) => {
     footer = "",
   ): Promise<TelegramRichMessage> {
     const current = stats(sessionID)
-    const branch = await gitBranch(current.directory)
-    const task = markdown(truncateEnd(current.userInput || "等待任务内容", 200))
-    const details = [
-      `<details><summary>详情</summary>`,
-      `<p><b>会话 ID</b><br/><code>${html(sessionID)}</code></p>`,
-      `<p><b>工作路径</b><br/><code>${html(current.directory)}</code></p>`,
-      `<p><b>所属分支</b><br/><code>${html(branch)}</code></p>`,
-      `</details>`,
-    ].join("")
+    const task = current.userInput ? `<blockquote>${markdown(truncateEnd(current.userInput, 200))}</blockquote>` : ""
+    const details = title === "已开始"
+      ? [
+          `<details><summary><i>详情</i></summary>`,
+          `<p><b>会话 ID</b><br/><code>${html(sessionID)}</code></p>`,
+          `<p><b>工作路径</b><br/><code>${html(current.directory)}</code></p>`,
+          `<p><b>所属分支</b><br/><code>${html(await gitBranch(current.directory))}</code></p>`,
+          `</details>`,
+        ].join("")
+      : ""
     return {
       html: [
-        `<h3>OpenCode · ${title}</h3>`,
+        title === "已完成" ? "" : `<h3>OpenCode · ${title}</h3>`,
         task,
-        `<hr/>`,
         content,
         footer ? `<footer>${html(footer)}</footer>` : "",
         details,
@@ -771,8 +780,10 @@ export default (async (input, options) => {
   async function restoreProcessing(row: PermissionLookupRow) {
     const current = stats(row.session_id)
     current.directory = row.directory ?? current.directory
-    const messageID = row.message_id ?? current.rootMessageID
+    const messageID = row.message_id ?? current.statusMessageID
     if (messageID === undefined) return
+    current.statusMessageID = messageID
+    saveSession(row.session_id)
     await editRichMessage(messageID, await statusMessage(row.session_id, "处理中"), { inline_keyboard: [] })
   }
 
@@ -904,7 +915,7 @@ export default (async (input, options) => {
 
     const replyID = numberOption(prop(prop(message, "reply_to_message"), "message_id"))
     if (replyID === undefined) return
-    const row = selectSessionByRootMessage.get(replyID) as SessionLookupRow | null
+    const row = selectSessionByMessage.get(replyID, replyID) as SessionLookupRow | null
     if (row && row.muted !== 1) return { sessionID: row.session_id, directory: row.directory ?? input.directory }
   }
 
@@ -1049,15 +1060,31 @@ export default (async (input, options) => {
 
   async function updateStatus(
     sessionID: string,
-    title: "处理中" | "需要授权" | "等待回答" | "已完成",
-    content = "",
-    footer = "",
+    message: TelegramRichMessage,
     replyMarkup?: unknown,
   ) {
-    const messageID = await rootMessage(sessionID)
-    if (messageID === undefined) return
-    await editRichMessage(messageID, await statusMessage(sessionID, title, content, footer), replyMarkup)
-    return messageID
+    const current = stats(sessionID)
+    if (current.statusMessageID !== undefined) {
+      await editRichMessage(current.statusMessageID, message, replyMarkup)
+      return current.statusMessageID
+    }
+    if (current.statusMessagePromise) {
+      const messageID = await current.statusMessagePromise
+      if (messageID !== undefined) await editRichMessage(messageID, message, replyMarkup)
+      return messageID
+    }
+
+    const target = await sessionTarget(sessionID)
+    current.statusMessagePromise = sendRich(message, { ...target, replyMarkup })
+      .then((messageID) => {
+        current.statusMessageID = messageID
+        saveSession(sessionID)
+        return messageID
+      })
+      .finally(() => {
+        current.statusMessagePromise = undefined
+      })
+    return current.statusMessagePromise
   }
 
   async function sessionThread(sessionID: string) {
@@ -1125,10 +1152,10 @@ export default (async (input, options) => {
         saveSession(notice.sessionID)
         deletePermissionsBySession.run(notice.sessionID)
         deleteQuestionsBySession.run(notice.sessionID)
-        const messageID = await rootMessage(notice.sessionID)
-        if (messageID !== undefined) {
-          await editRichMessage(messageID, await doneNoticeMessage(notice), { inline_keyboard: [] })
-        }
+        await updateStatus(notice.sessionID, await doneNoticeMessage(notice), { inline_keyboard: [] })
+        const current = stats(notice.sessionID)
+        current.statusMessageID = undefined
+        saveSession(notice.sessionID)
       },
       async sendCompaction(notice) {
         await sendRich(compactionMessage(notice), await sessionTarget(notice.sessionID))
@@ -1145,12 +1172,14 @@ export default (async (input, options) => {
         }
         const messageID = await updateStatus(
           notice.sessionID,
-          "需要授权",
-          [
-            `<p><b>权限</b><br/>${html(notice.permission)}</p>`,
-            `<p><b>范围</b><br/>${html(truncateEnd(notice.patterns, 400))}</p>`,
-          ].join(""),
-          "",
+          await statusMessage(
+            notice.sessionID,
+            "需要授权",
+            [
+              `<p><b>权限</b><br/>${html(notice.permission)}</p>`,
+              `<p><b>范围</b><br/>${html(truncateEnd(notice.patterns, 400))}</p>`,
+            ].join(""),
+          ),
           replyMarkup,
         )
         const current = stats(notice.sessionID)
@@ -1179,7 +1208,11 @@ export default (async (input, options) => {
             [{ text: "拒绝回答", callback_data: `op:question:reject:${notice.requestID}` }],
           ],
         }
-        const messageID = await updateStatus(notice.sessionID, "等待回答", content, "", replyMarkup)
+        const messageID = await updateStatus(
+          notice.sessionID,
+          await statusMessage(notice.sessionID, "等待回答", content),
+          replyMarkup,
+        )
         const current = stats(notice.sessionID)
         upsertQuestion.run(
           notice.requestID,

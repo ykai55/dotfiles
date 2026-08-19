@@ -175,7 +175,8 @@ export class NotificationComposer {
   chatMessage(sessionID: string, parts: unknown, contextLimit?: number) {
     const current = this.stats(sessionID)
     if (contextLimit !== undefined) current.contextLimit = contextLimit
-    current.userInput = this.trackUserParts(current, parts)
+    const userInput = this.trackUserParts(current, parts)
+    if (userInput) current.userInput = userInput
     return this.isMuted(sessionID) ? undefined : this.session(sessionID)
   }
 
