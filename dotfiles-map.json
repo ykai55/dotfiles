@@ -105,6 +105,15 @@
       ]
     },
     {
+      "name": "uwsm-niri-env",
+      "source": "niri/uwsm-env",
+      "target": "~/.config/uwsm/env-niri",
+      "mode": "symlink",
+      "platforms": [
+        "linux"
+      ]
+    },
+    {
       "name": "ironbar",
       "source": "ironbar",
       "target": "~/.config/ironbar",

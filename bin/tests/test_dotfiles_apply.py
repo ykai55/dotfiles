@@ -1102,7 +1102,11 @@ class DotfilesApplyTests(CapturingTestCase):
         self.assertEqual(codex_agents.source, "opencode/AGENTS.md")
         self.assertEqual(codex_agents.target, "~/.codex/AGENTS.md")
 
-        for name in ("niri", "ironbar", "keyd"):
+        uwsm_niri_env = mappings_by_name["uwsm-niri-env"]
+        self.assertEqual(uwsm_niri_env.source, "niri/uwsm-env")
+        self.assertEqual(uwsm_niri_env.target, "~/.config/uwsm/env-niri")
+
+        for name in ("niri", "uwsm-niri-env", "ironbar", "keyd"):
             if name in mappings_by_name:
                 self.assertEqual(mappings_by_name[name].platforms, ["linux"])
 

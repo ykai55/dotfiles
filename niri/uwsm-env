@@ -1,0 +1,2 @@
+export QT_QPA_PLATFORMTHEME=kde
+export XDG_MENU_PREFIX=plasma-
