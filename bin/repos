@@ -15,6 +15,8 @@ from typing import Iterable, List, Optional
 TAB = "\t"
 WORKTREE_INDENT = "  "
 ANSI_RESET = "\033[0m"
+FZF_GUTTER_WIDTH = 2
+FZF_SCROLLBAR_WIDTH = 1
 
 
 @dataclass(frozen=True)
@@ -32,14 +34,34 @@ class Candidate:
     display_path: str
     branch: str
 
-    def display_label(self) -> str:
-        label = f"{self.display_path} [{self.branch}]"
+    def display_label(self, path_width: Optional[int] = None) -> str:
+        display_path = self.display_path
+        if path_width is not None:
+            display_path = truncate_middle(display_path, path_width).ljust(path_width)
+        label = f"{display_path} [{self.branch}]"
         if label.startswith(" "):
             return ANSI_RESET + label
         return label
 
-    def fzf_line(self) -> str:
-        return f"{self.display_label()}{TAB}{self.repo_path}{TAB}{self.repo_id}"
+    def fzf_line(self, path_width: Optional[int] = None) -> str:
+        return f"{self.display_label(path_width)}{TAB}{self.repo_path}{TAB}{self.repo_id}"
+
+
+def truncate_middle(value: str, width: int) -> str:
+    if len(value) <= width:
+        return value
+    if width <= 0:
+        return ""
+    if width == 1:
+        return value[:1]
+    if width == 2:
+        return value[:1] + value[-1:]
+
+    ellipsis = "." * min(3, width - 2)
+    remaining_width = width - len(ellipsis)
+    prefix_width = (remaining_width + 1) // 2
+    suffix_width = remaining_width - prefix_width
+    return value[:prefix_width] + ellipsis + value[-suffix_width:]
 
 
 def run_git(repo_path: str, args: List[str]) -> Optional[str]:
@@ -251,6 +273,29 @@ def candidates(patterns: Iterable[str], recent_path: Optional[str] = None) -> Li
     return result
 
 
+def directory_candidates(patterns: Iterable[str]) -> List[Candidate]:
+    result: List[Candidate] = []
+    seen_paths: set[str] = set()
+
+    for anchor_path in pattern_paths(patterns):
+        current_repo_id = repo_id(anchor_path)
+        if not current_repo_id:
+            continue
+
+        worktree_paths = order_worktree_paths(worktrees(anchor_path), current_repo_id)
+        for worktree_path in worktree_paths:
+            if not os.path.isdir(worktree_path) or worktree_path in seen_paths:
+                continue
+            indent = not is_main_worktree_path(worktree_path, current_repo_id)
+            candidate = append_candidate(worktree_path, current_repo_id, indent=indent)
+            if candidate is None:
+                continue
+            seen_paths.add(worktree_path)
+            result.append(candidate)
+
+    return result
+
+
 def remove_recent_repo(current_repo_id: str, path: Optional[str] = None) -> None:
     if not current_repo_id:
         return
@@ -275,7 +320,22 @@ def remove_recent_repo(current_repo_id: str, path: Optional[str] = None) -> None
     os.replace(tmp_path, file_path)
 
 
+def display_path_width(items: List[Candidate], terminal_width: Optional[int] = None) -> int:
+    if not items:
+        return 0
+    if terminal_width is None:
+        terminal_width = shutil.get_terminal_size().columns
+
+    longest_path = max(len(item.display_path) for item in items)
+    longest_branch = max(len(item.branch) + 2 for item in items)
+    available_width = (
+        terminal_width - FZF_GUTTER_WIDTH - FZF_SCROLLBAR_WIDTH - 1 - longest_branch
+    )
+    return min(longest_path, max(1, available_width))
+
+
 def run_fzf(items: List[Candidate], query: str = "") -> Optional[tuple[str, Candidate]]:
+    path_width = display_path_width(items)
     proc = subprocess.run(
         [
             "fzf",
@@ -292,7 +352,6 @@ def run_fzf(items: List[Candidate], query: str = "") -> Optional[tuple[str, Cand
             "ctrl-x",
             "--no-sort",
             "--reverse",
-            "--wrap=word",
             "--bind",
             "tab:toggle-preview",
             "--preview-window",
@@ -301,7 +360,7 @@ def run_fzf(items: List[Candidate], query: str = "") -> Optional[tuple[str, Cand
             'git -C {2} status -sb 2>/dev/null || printf "(not a git repo)\\n"',
         ]
         + (["--query", query] if query else []),
-        input="\n".join(item.fzf_line() for item in items) + "\n",
+        input="\n".join(item.fzf_line(path_width) for item in items) + "\n",
         stdout=subprocess.PIPE,
         text=True,
     )
@@ -328,9 +387,14 @@ def run_fzf(items: List[Candidate], query: str = "") -> Optional[tuple[str, Cand
 
 
 def select_repo(patterns: List[str], recent_path: Optional[str] = None) -> Optional[str]:
-    query = " ".join(patterns)
+    directory_patterns = [pattern for pattern in patterns if pattern.endswith(os.sep)]
+    query_patterns = [pattern for pattern in patterns if not pattern.endswith(os.sep)]
+    query = " ".join(query_patterns)
     while True:
-        items = candidates(patterns, recent_path)
+        if directory_patterns:
+            items = directory_candidates(directory_patterns)
+        else:
+            items = candidates(patterns, recent_path)
         if not items:
             if patterns:
                 print(f"No directories matched: {', '.join(patterns)}", file=sys.stderr)
@@ -354,7 +418,7 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
     parser.add_argument(
         "patterns",
         nargs="*",
-        help="Optional directory glob patterns, also used as the initial fzf query",
+        help="Optional glob/query patterns; a trailing slash limits results to that repo's worktrees",
     )
     parser.add_argument("--recent-file", help=argparse.SUPPRESS)
     return parser.parse_args(argv)

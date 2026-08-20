@@ -51,7 +51,7 @@ class ReposTests(unittest.TestCase):
             ["/src/project", "/src/project-feature", "/src/project-fix"],
         )
 
-    def test_fzf_line_displays_path_and_branch_without_padding(self) -> None:
+    def test_fzf_line_truncates_path_middle_and_aligns_branch(self) -> None:
         candidate = repos.Candidate(
             repo_path="/src/project-feature",
             repo_id="/src/project/.git",
@@ -60,8 +60,36 @@ class ReposTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            candidate.fzf_line(),
-            "\033[0m  ~/src/project-feature [feature]\t/src/project-feature\t/src/project/.git",
+            candidate.fzf_line(18),
+            "\033[0m  ~/src/...feature [feature]\t/src/project-feature\t/src/project/.git",
+        )
+
+    def test_truncate_middle_preserves_both_ends(self) -> None:
+        self.assertEqual(repos.truncate_middle("abcdefghij", 7), "ab...ij")
+
+    def test_display_labels_align_branches_after_path_column(self) -> None:
+        short = repos.Candidate("/src/a", "/src/a/.git", "~/a", "main")
+        long = repos.Candidate("/src/long", "/src/a/.git", "~/src/long", "feature")
+
+        self.assertEqual(short.display_label(10), "~/a        [main]")
+        self.assertEqual(long.display_label(10), "~/src/long [feature]")
+
+    def test_display_path_width_reserves_longest_branch(self) -> None:
+        items = [
+            repos.Candidate("/src/a", "/src/a/.git", "~/src/a", "main"),
+            repos.Candidate(
+                "/src/long-project", "/src/a/.git", "  ~/src/long-project", "long-branch"
+            ),
+        ]
+        branch_width = len("[long-branch]")
+
+        self.assertEqual(
+            repos.display_path_width(items, terminal_width=30),
+            30 - repos.FZF_GUTTER_WIDTH - repos.FZF_SCROLLBAR_WIDTH - 1 - branch_width,
+        )
+        self.assertEqual(
+            repos.display_path_width(items, terminal_width=80),
+            len("  ~/src/long-project"),
         )
 
     def test_run_fzf_uses_reverse_layout(self) -> None:
@@ -82,7 +110,7 @@ class ReposTests(unittest.TestCase):
 
         argv = run.call_args.args[0]
         self.assertIn("--reverse", argv)
-        self.assertIn("--wrap=word", argv)
+        self.assertNotIn("--wrap=word", argv)
         self.assertNotIn("--keep-right", argv)
         self.assertIn("ctrl-x", argv)
         self.assertNotIn("ctrl-d", argv)
@@ -106,6 +134,26 @@ class ReposTests(unittest.TestCase):
             selected = repos.select_repo(["ABC", "feature"])
 
         run_fzf.assert_called_once_with([candidate], "ABC feature")
+        self.assertEqual(selected, "")
+
+    def test_select_repo_uses_trailing_slash_as_directory_scope(self) -> None:
+        candidate = repos.Candidate(
+            repo_path="/src/project-feature",
+            repo_id="/src/project/.git",
+            display_path="  ~/src/project-feature",
+            branch="feature",
+        )
+
+        with mock.patch.object(
+            repos, "directory_candidates", return_value=[candidate]
+        ) as directory_candidates, mock.patch.object(repos, "candidates") as candidates, mock.patch.object(
+            repos, "run_fzf", return_value=None
+        ) as run_fzf:
+            selected = repos.select_repo(["./", "feature"])
+
+        directory_candidates.assert_called_once_with(["./"])
+        candidates.assert_not_called()
+        run_fzf.assert_called_once_with([candidate], "feature")
         self.assertEqual(selected, "")
 
     def test_recent_records_uses_newest_record_per_worktree(self) -> None:
@@ -145,6 +193,28 @@ class ReposTests(unittest.TestCase):
             ), mock.patch.object(repos, "branch_name", side_effect=["main", "feature"]):
                 candidates = repos.candidates([], recent_file)
 
+        self.assertEqual([item.repo_path for item in candidates], [main_path, child_path])
+        self.assertEqual([item.display_path for item in candidates], [main_path, f"  {child_path}"])
+        self.assertEqual([item.branch for item in candidates], ["main", "feature"])
+
+    def test_directory_candidates_only_returns_worktrees_for_matching_repo(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            main_path = os.path.join(tmp, "project")
+            child_path = os.path.join(tmp, "project-feature")
+            nested_path = os.path.join(child_path, "src")
+            os.mkdir(main_path)
+            os.mkdir(child_path)
+            os.mkdir(nested_path)
+            repo_id = os.path.join(main_path, ".git")
+
+            with mock.patch.object(repos, "repo_id", return_value=repo_id), mock.patch.object(
+                repos, "worktrees", return_value=[child_path, main_path]
+            ) as worktrees, mock.patch.object(
+                repos, "is_git_worktree", return_value=True
+            ), mock.patch.object(repos, "branch_name", side_effect=["main", "feature"]):
+                candidates = repos.directory_candidates([nested_path + os.sep])
+
+        worktrees.assert_called_once_with(nested_path)
         self.assertEqual([item.repo_path for item in candidates], [main_path, child_path])
         self.assertEqual([item.display_path for item in candidates], [main_path, f"  {child_path}"])
         self.assertEqual([item.branch for item in candidates], ["main", "feature"])
