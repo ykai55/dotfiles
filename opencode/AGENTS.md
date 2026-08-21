@@ -15,6 +15,34 @@ Before formal implementation begins, you are explicitly encouraged to question a
 
 - Do not use git worktrees by default unless the user explicitly requests or mentions them.
 
+## Clean Final-State Revisions
+
+When revising code, documentation, or user-facing content after feedback, make the result read as though the corrected requirement had been known from the start. Do not preserve the rejected path merely to demonstrate that the correction was applied.
+
+- Rewrite the affected content coherently instead of appending negations, disclaimers, or phrases such as "but not A" to the original approach.
+- State the intended behavior directly and positively. Remove obsolete assumptions, branches, comments, names, tests, and examples that exist only because of the superseded direction.
+- Judge each affected section by its reader task: does the reader need to understand change over time? Do not classify the entire document.
+- Artifact types are signals, not verdicts. Implementations, API references, user guides, and current design descriptions often present current state; changelogs, migration guides, ADRs, deprecation sections, and compatibility contracts often require temporal context.
+- If time is irrelevant to the task, describe only the resulting system and omit superseded mechanisms.
+- If time matters, retain only the minimum history needed to complete a migration, understand a decision, or verify a compatibility boundary.
+- Do not preserve history merely because feedback mentions it, and do not erase necessary history merely to sound positive.
+- Still-supported deprecated behavior is part of the current contract and must be documented, including in API references or user guides.
+- After revising, reread the affected area as a standalone final artifact and remove any residue of the drafting or correction process.
+
+### Paired Example: One API Change
+
+**Current API reference**
+
+`contact.channels.email` contains the notification email address inside the `contact.channels` object.
+
+**Bad current-state revision**
+
+Do not use `email_address`; use `contact.channels.email` instead.
+
+**Migration guide**
+
+In v1, requests used top-level `email_address`. For v2, map `email_address` to `contact.channels.email`; v2 removes the top-level `email_address` field.
+
 ## Workspace Boundaries
 
 - Treat the active workspace or Git worktree root as the default filesystem boundary for every task. Start discovery there and keep it there whenever the workspace contains enough information to proceed.
