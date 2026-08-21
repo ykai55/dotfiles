@@ -108,7 +108,11 @@ Favor removing abstractions that do not improve reuse, readability, or domain cl
 
 - Use the project's configured toolchain whenever possible rather than the system-wide installation.
 
-- When selecting or switching a Java/JDK version, use the version and toolchain declared by the project when available. If the project does not declare one, use the system-installed SDKMAN to select the JDK. Do not search system directories for installed Java versions or choose a JDK by filesystem path. In non-interactive shells, initialize SDKMAN explicitly before using it. Use a session-scoped switch by default; only change the persistent default when the user explicitly asks.
+- For Java, use the version and toolchain declared by the project when available. If the project does not declare one, use SDKMAN to select the JDK. Respect an existing `SDKMAN_DIR`; only default it to `$HOME/.sdkman` when unset. Do not search system directories for installed Java versions or choose a JDK by filesystem path.
+
+- In non-interactive shells, source `$SDKMAN_DIR/bin/sdkman-init.sh` before using SDKMAN.
+
+- Use a session-scoped Java switch by default. Never install a missing runtime or change SDKMAN's persistent default unless the user explicitly requests it. If a project-declared runtime is unavailable, report it and ask before installation.
 
 - Prefer project-provided wrapper commands (e.g. make, just, task, mise, pnpm, uv, project scripts) over invoking language tools directly.
 
@@ -120,16 +124,18 @@ Favor removing abstractions that do not improve reuse, readability, or domain cl
 
 # Workflow
 
-- For clearly scoped, procedural, or token-heavy tasks (for example, running integration tests, executing large test suites, or lengthy build commands), prefer delegating the work to a subagent when doing so will not lose important context.
+- Delegate clearly scoped procedural work only when it is long-running, parallelizable, or token-heavy enough to justify the handoff overhead. Do not delegate when the handoff would lose important context.
 
-- Ask the subagent to report:
+- Keep a short single-command task in the primary agent.
+
+- For delegated command execution, require:
   - Working directory
-  - Commands executed
+  - Exact commands
   - Exit status
   - Short result summary
   - Paths to detailed logs, when applicable
 
-- Verify the reported results before continuing whenever appropriate.
+- Before relying on delegated results, independently verify at least one material log, artifact, or reported state when feasible.
 
 # Language
 
