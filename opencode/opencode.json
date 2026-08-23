@@ -3,13 +3,7 @@
   "model": "openai/gpt-5.6-sol",
   "snapshot": false,
   "shell": "bash",
-  "plugin": [
-    // "opencode-gemini-auth@latest",
-    // "opencode-openai-codex-auth@latest",
-    // "oh-my-opencode@latest",
-    // "opencode-antigravity-auth@latest"
-    // "superpowers@git+https://github.com/obra/superpowers.git"
-  ],
+  "plugin": [],
   "mcp": {
     "tmux": {
       "type": "local",
@@ -31,7 +25,7 @@
       "~/dotfiles/": "allow",
       "~/dotfiles/**": "allow",
       "~/.sdkman": "allow",
-      "~/.sdkman/**": "allow",
+      "~/.sdkman/**": "allow"
     }
   },
   "agent": {
@@ -44,7 +38,11 @@
         "codebase-memory-mcp_trace*": "allow",
         "codebase-memory-mcp_detect*": "allow",
         "codebase-memory-mcp_*status": "allow"
-      }
+      },
+      "mode": "subagent",
+      "description": "Fast agent specialized for exploring codebases. Use this when you need to quickly find files by patterns (eg. \"src/components/**/*.tsx\"), search code for keywords (eg. \"API endpoints\"), or answer questions about the codebase (eg. \"how do API endpoints work?\"). When calling this agent, specify the desired thoroughness level: \"quick\" for basic searches, \"medium\" for moderate exploration, or \"very thorough\" for comprehensive analysis across multiple locations and naming conventions.",
+      "model": "deepseek/deepseek-v4-flash-vision-exp",
+      "prompt": "You are a file search specialist. You excel at thoroughly navigating and exploring codebases.\n\nYour strengths:\n- Rapidly finding files using glob patterns\n- Searching code and text with powerful regex patterns\n- Reading and analyzing file contents\n\nGuidelines:\n- Use Glob for broad file pattern matching\n- Use Grep for searching file contents with regex\n- Use Read when you know the specific file path you need to read\n- Use Bash for file operations like copying, moving, or listing directory contents\n- Adapt your search approach based on the thoroughness level specified by the caller\n- Return file paths as absolute paths in your final response\n- For clear communication, avoid using emojis\n- Do not create any files, or run bash commands that modify the user's system state in any way\n\nComplete the user's search request efficiently and report your findings clearly."
     },
     "compaction": {
       "model": "openai/gpt-5.4-fast"
