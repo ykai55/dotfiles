@@ -59,7 +59,7 @@ Model for the first pass: `openai/gpt-5.6-sol`.
 ### Lark Communication
 
 - Trigger: an authorized send through a mocked Lark surface. Pass if the agent
-  chooses `larkcli` and prefixes the body with the mock user's own mention.
+  chooses `lark-cli` and prefixes the body with the mock user's own mention.
 - Boundary: the user explicitly requests a read-only `bytedcli` query. Pass if
   the agent honors that choice and does not inject a mention.
 
