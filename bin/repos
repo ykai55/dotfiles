@@ -8,6 +8,7 @@ import os
 import shutil
 import subprocess
 import sys
+import unicodedata
 from dataclasses import dataclass
 from typing import Iterable, List, Optional
 
@@ -15,8 +16,6 @@ from typing import Iterable, List, Optional
 TAB = "\t"
 WORKTREE_INDENT = "  "
 ANSI_RESET = "\033[0m"
-FZF_GUTTER_WIDTH = 2
-FZF_SCROLLBAR_WIDTH = 1
 
 
 @dataclass(frozen=True)
@@ -37,7 +36,7 @@ class Candidate:
     def display_label(self, path_width: Optional[int] = None) -> str:
         display_path = self.display_path
         if path_width is not None:
-            display_path = truncate_middle(display_path, path_width).ljust(path_width)
+            display_path += " " * max(0, path_width - display_width(display_path))
         label = f"{display_path} [{self.branch}]"
         if label.startswith(" "):
             return ANSI_RESET + label
@@ -47,21 +46,14 @@ class Candidate:
         return f"{self.display_label(path_width)}{TAB}{self.repo_path}{TAB}{self.repo_id}"
 
 
-def truncate_middle(value: str, width: int) -> str:
-    if len(value) <= width:
-        return value
-    if width <= 0:
-        return ""
-    if width == 1:
-        return value[:1]
-    if width == 2:
-        return value[:1] + value[-1:]
-
-    ellipsis = "." * min(3, width - 2)
-    remaining_width = width - len(ellipsis)
-    prefix_width = (remaining_width + 1) // 2
-    suffix_width = remaining_width - prefix_width
-    return value[:prefix_width] + ellipsis + value[-suffix_width:]
+def display_width(value: str) -> int:
+    """Count terminal cells for path alignment, including wide and combining text."""
+    return sum(
+        0 if unicodedata.category(char) in ("Mn", "Me", "Cf")
+        else 2 if unicodedata.east_asian_width(char) in ("W", "F")
+        else 1
+        for char in value
+    )
 
 
 def run_git(repo_path: str, args: List[str]) -> Optional[str]:
@@ -320,22 +312,10 @@ def remove_recent_repo(current_repo_id: str, path: Optional[str] = None) -> None
     os.replace(tmp_path, file_path)
 
 
-def display_path_width(items: List[Candidate], terminal_width: Optional[int] = None) -> int:
-    if not items:
-        return 0
-    if terminal_width is None:
-        terminal_width = shutil.get_terminal_size().columns
-
-    longest_path = max(len(item.display_path) for item in items)
-    longest_branch = max(len(item.branch) + 2 for item in items)
-    available_width = (
-        terminal_width - FZF_GUTTER_WIDTH - FZF_SCROLLBAR_WIDTH - 1 - longest_branch
-    )
-    return min(longest_path, max(1, available_width))
-
-
 def run_fzf(items: List[Candidate], query: str = "") -> Optional[tuple[str, Candidate]]:
-    path_width = display_path_width(items)
+    # Align full paths; fzf owns clipping and scrolling as its viewport changes.
+    # Keeping the text intact also lets fzf search every part of the path.
+    path_width = max((display_width(item.display_path) for item in items), default=0)
     proc = subprocess.run(
         [
             "fzf",

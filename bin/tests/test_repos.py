@@ -51,21 +51,16 @@ class ReposTests(unittest.TestCase):
             ["/src/project", "/src/project-feature", "/src/project-fix"],
         )
 
-    def test_fzf_line_truncates_path_middle_and_aligns_branch(self) -> None:
+    def test_fzf_line_preserves_full_path_and_worktree_indent(self) -> None:
         candidate = repos.Candidate(
-            repo_path="/src/project-feature",
-            repo_id="/src/project/.git",
-            display_path="  ~/src/project-feature",
-            branch="feature",
+            "/src/project-feature", "/src/project/.git",
+            "  ~/src/project-feature", "feature",
         )
 
         self.assertEqual(
-            candidate.fzf_line(18),
-            "\033[0m  ~/src/...feature [feature]\t/src/project-feature\t/src/project/.git",
+            candidate.fzf_line(10),
+            "\033[0m  ~/src/project-feature [feature]\t/src/project-feature\t/src/project/.git",
         )
-
-    def test_truncate_middle_preserves_both_ends(self) -> None:
-        self.assertEqual(repos.truncate_middle("abcdefghij", 7), "ab...ij")
 
     def test_display_labels_align_branches_after_path_column(self) -> None:
         short = repos.Candidate("/src/a", "/src/a/.git", "~/a", "main")
@@ -74,23 +69,33 @@ class ReposTests(unittest.TestCase):
         self.assertEqual(short.display_label(10), "~/a        [main]")
         self.assertEqual(long.display_label(10), "~/src/long [feature]")
 
-    def test_display_path_width_reserves_longest_branch(self) -> None:
-        items = [
-            repos.Candidate("/src/a", "/src/a/.git", "~/src/a", "main"),
-            repos.Candidate(
-                "/src/long-project", "/src/a/.git", "  ~/src/long-project", "long-branch"
-            ),
-        ]
-        branch_width = len("[long-branch]")
+    def test_display_labels_align_wide_and_combining_characters(self) -> None:
+        wide = repos.Candidate("/src/a", "/src/a/.git", "~/\u9879\u76ee", "main")
+        combining = repos.Candidate("/src/b", "/src/b/.git", "~/cafe\u0301", "main")
 
-        self.assertEqual(
-            repos.display_path_width(items, terminal_width=30),
-            30 - repos.FZF_GUTTER_WIDTH - repos.FZF_SCROLLBAR_WIDTH - 1 - branch_width,
-        )
-        self.assertEqual(
-            repos.display_path_width(items, terminal_width=80),
-            len("  ~/src/long-project"),
-        )
+        self.assertEqual(wide.display_label(8), "~/\u9879\u76ee   [main]")
+        self.assertEqual(combining.display_label(8), "~/cafe\u0301   [main]")
+
+    def test_run_fzf_preserves_paths_with_long_branch_and_piped_stdout(self) -> None:
+        items = [
+            repos.Candidate(
+                "/src/project", "/src/project/.git",
+                "~/src/project-with-long-name", "main",
+            ),
+            repos.Candidate("/src/other", "/src/other/.git", "~/src/other", "x" * 100),
+        ]
+        completed = repos.subprocess.CompletedProcess(args=[], returncode=130, stdout="")
+        with mock.patch.dict(os.environ, {"COLUMNS": "20"}), mock.patch.object(
+            repos.subprocess, "run", return_value=completed
+        ) as run:
+            repos.run_fzf(items)
+
+        lines = run.call_args.kwargs["input"].splitlines()
+        labels = [line.split("\t")[0] for line in lines]
+        self.assertEqual(labels[0], "~/src/project-with-long-name [main]")
+        self.assertEqual(labels[0].index("["), labels[1].index("["))
+        self.assertIn("[" + "x" * 100 + "]", labels[1])
+        self.assertEqual(lines[0].split("\t")[1:], [items[0].repo_path, items[0].repo_id])
 
     def test_run_fzf_uses_reverse_layout(self) -> None:
         candidate = repos.Candidate(
