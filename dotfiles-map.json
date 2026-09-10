@@ -105,6 +105,15 @@
       ]
     },
     {
+      "name": "screenshot-region",
+      "source": "bin/screenshot-region",
+      "target": "~/.local/bin/screenshot-region",
+      "mode": "symlink",
+      "platforms": [
+        "linux"
+      ]
+    },
+    {
       "name": "uwsm-niri-env",
       "source": "niri/uwsm-env",
       "target": "~/.config/uwsm/env-niri",
