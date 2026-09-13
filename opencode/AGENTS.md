@@ -118,6 +118,8 @@ Favor removing abstractions that do not improve reuse, readability, or domain cl
 
 # Communication
 
+- When you need to ask the user a question, prefer the `question` tool or similar structured interaction tools whenever available and suitable.
+
 - For Feishu/Lark related tasks, use `lark-cli` by default instead of `bytedcli` unless the user explicitly requests `bytedcli` or `lark-cli` cannot satisfy the task.
 
 - When sending a Lark message on the user's behalf, always prefix the message body with an `@` mention of the user's own Lark account.
