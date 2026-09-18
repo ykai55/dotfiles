@@ -3,7 +3,7 @@
   "model": "openai/gpt-5.6-sol",
   "snapshot": false,
   "shell": "bash",
-  "plugin": [],
+  "plugin": ["./provider-loader.ts"],
   "mcp": {
     "tmux": {
       "type": "local",

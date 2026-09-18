@@ -1,5 +1,8 @@
 # OpenCode Serve
 
+For standalone provider configuration generation from an OpenAI-compatible API,
+see [OpenCode provider generator](provider-gen.md).
+
 Portable Docker Compose setup for running `opencode serve` while using the host user's filesystem and configuration.
 
 The image is built locally so Debian packages and npm packages are cached in the image instead of being installed on every container start.

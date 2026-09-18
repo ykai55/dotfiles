@@ -1,0 +1,393 @@
+#!/usr/bin/env python3
+"""Generate and install an OpenCode provider from an OpenAI-compatible API."""
+
+from __future__ import annotations
+
+import argparse
+import fnmatch
+import http.client
+import ipaddress
+import json
+import math
+import os
+import pathlib
+import re
+import sys
+import tempfile
+import urllib.error
+import urllib.parse
+import urllib.request
+from typing import Any, Dict, List, Optional
+
+MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+RESERVED_KEYS = {"__proto__", "constructor", "prototype"}
+LOADER_SPEC = "./provider-loader.ts"
+DEFAULT_CONFIG_DIR = pathlib.Path(__file__).resolve().parents[1] / "opencode"
+HOST_ENV = "OPENAI_BASE_URL"
+TOKEN_ENV = "OPENAI_API_KEY"
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Never forward an API credential to a redirected endpoint."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def provider_id(value: str) -> str:
+    if (
+        not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", value)
+        or value in RESERVED_KEYS
+    ):
+        raise argparse.ArgumentTypeError("expected a safe provider name (letters, digits, ., _, -)")
+    return value
+
+
+def positive_timeout(value: str) -> float:
+    try:
+        number = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("timeout must be a positive finite number") from None
+    if not math.isfinite(number) or number <= 0:
+        raise argparse.ArgumentTypeError("timeout must be a positive finite number")
+    return number
+
+
+def parse_dotenv_value(raw_value: str, path: pathlib.Path, line_number: int) -> str:
+    value = raw_value.strip()
+    if not value:
+        return ""
+    if value[0] in ("'", '"'):
+        quote = value[0]
+        escaped = False
+        result = []
+        for index, char in enumerate(value[1:], 1):
+            if quote == '"' and escaped:
+                result.append({"n": "\n", "r": "\r", "t": "\t"}.get(char, char))
+                escaped = False
+                continue
+            if quote == '"' and char == "\\":
+                escaped = True
+                continue
+            if char == quote:
+                rest = value[index + 1 :].strip()
+                if rest and not rest.startswith("#"):
+                    raise RuntimeError(f"{path}:{line_number}: unexpected content after quoted value")
+                return "".join(result)
+            result.append(char)
+        raise RuntimeError(f"{path}:{line_number}: unterminated quoted value")
+    comment = re.search(r"\s+#", value)
+    if comment:
+        value = value[: comment.start()].rstrip()
+    if any(char.isspace() for char in value):
+        raise RuntimeError(f"{path}:{line_number}: unquoted whitespace is not supported")
+    return value
+
+
+def load_env_file(path: pathlib.Path) -> None:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return
+    except (OSError, UnicodeError):
+        raise RuntimeError(f"cannot read UTF-8 environment file: {path}") from None
+    for line_number, raw_line in enumerate(text.splitlines(), 1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:].lstrip()
+        if "=" not in line:
+            raise RuntimeError(f"{path}:{line_number}: expected NAME=VALUE")
+        name, raw_value = line.split("=", 1)
+        name = name.strip()
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+            raise RuntimeError(f"{path}:{line_number}: invalid environment variable name")
+        value = parse_dotenv_value(raw_value, path, line_number)
+        if name in (HOST_ENV, TOKEN_ENV):
+            os.environ.setdefault(name, value)
+
+
+def validate_model_id(value: Any) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or value != value.strip()
+        or any(ord(char) < 32 or ord(char) == 127 for char in value)
+        or "{env:" in value
+        or "{file:" in value
+        or value in RESERVED_KEYS
+    ):
+        raise RuntimeError("model IDs must be nonempty strings without controls or config substitutions")
+    return value
+
+
+def models_endpoint(host: str, token: Optional[str], allow_http: bool) -> str:
+    try:
+        parsed = urllib.parse.urlsplit(host)
+        port = parsed.port
+        if (
+            parsed.scheme not in ("http", "https")
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+            or "?" in host
+            or "#" in host
+            or any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in host)
+            or "\\" in host
+            or "{env:" in host
+            or "{file:" in host
+            or port == 0
+        ):
+            raise ValueError
+        host.encode("ascii")
+    except (ValueError, UnicodeError):
+        raise RuntimeError("host must be an HTTP(S) base URL without credentials, query or fragment") from None
+    if parsed.path.rstrip("/").endswith(("/models", "/chat/completions", "/responses")):
+        raise RuntimeError("host must be the API base URL, not a models or completion endpoint")
+    try:
+        loopback = ipaddress.ip_address(parsed.hostname).is_loopback
+    except ValueError:
+        loopback = parsed.hostname.lower() == "localhost"
+    if token and parsed.scheme == "http" and not loopback and not allow_http:
+        raise RuntimeError("refusing to send a token over non-loopback HTTP; use HTTPS or --allow-http")
+    return host.rstrip("/") + "/models"
+
+
+def discover_models(args: argparse.Namespace) -> List[str]:
+    host = os.environ.get(HOST_ENV, "")
+    if not host:
+        raise RuntimeError(f"set {HOST_ENV} in the environment or ~/.config/opencode/.env")
+    token = None if args.no_auth else os.environ.get(TOKEN_ENV)
+    if not args.no_auth and not token:
+        raise RuntimeError(f"set {TOKEN_ENV} in the environment or ~/.config/opencode/.env")
+    if token and any(ord(char) < 33 or ord(char) > 126 for char in token):
+        raise RuntimeError("token must contain only printable non-whitespace ASCII characters")
+    endpoint = models_endpoint(host, token, args.allow_http)
+    headers = {"Accept": "application/json", "User-Agent": "opencode-provider-gen/1"}
+    if token:
+        headers["Authorization"] = "Bearer " + token
+    request = urllib.request.Request(endpoint, headers=headers)
+    try:
+        with urllib.request.build_opener(NoRedirect()).open(request, timeout=args.timeout) as response:
+            raw = response.read(MAX_RESPONSE_BYTES + 1)
+    except urllib.error.HTTPError as exc:
+        status = exc.code
+        exc.close()
+        if 300 <= status < 400:
+            message = "redirect refused; configure the final API base URL directly"
+        elif status in (401, 403):
+            message = "authentication failed; check the token and model-list permission"
+        elif status in (404, 405):
+            message = "model listing unavailable; use --models with explicit model IDs"
+        else:
+            message = "model listing failed"
+        raise RuntimeError(f"HTTP {status}: {message}") from None
+    except (OSError, ValueError, OverflowError, http.client.HTTPException):
+        raise RuntimeError("model request failed; check connectivity, TLS, proxy and timeout") from None
+    if len(raw) > MAX_RESPONSE_BYTES:
+        raise RuntimeError("model response exceeds the 8 MiB safety limit")
+    try:
+        payload = json.loads(raw)
+    except (ValueError, UnicodeError, RecursionError):
+        raise RuntimeError("model endpoint did not return valid JSON") from None
+    if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+        raise RuntimeError("expected an OpenAI-compatible response with a data array")
+    if payload.get("has_more") or payload.get("next") or payload.get("next_page"):
+        raise RuntimeError("paginated model lists are not supported; use --models with explicit IDs")
+    models = []
+    for item in payload["data"]:
+        if not isinstance(item, dict):
+            raise RuntimeError("each model entry must be an object with an id")
+        models.append(validate_model_id(item.get("id")))
+    if not models:
+        raise RuntimeError("the API returned no models")
+    return sorted(set(models))
+
+
+def select_models(models: List[str], args: argparse.Namespace) -> List[str]:
+    if args.include:
+        selected = set()
+        for pattern in args.include:
+            matches = [model for model in models if fnmatch.fnmatchcase(model, pattern)]
+            if not matches:
+                raise RuntimeError("an --include pattern matched no models; inspect --list output")
+            selected.update(matches)
+        return sorted(selected)
+    if args.select:
+        if not sys.stdin.isatty():
+            raise RuntimeError("--select requires a terminal; use --models or --include in scripts")
+        for index, model in enumerate(models, 1):
+            print(f"{index:4d}  {model}", file=sys.stderr)
+        print("Select numbers separated by spaces/commas (Enter = all): ", end="", file=sys.stderr, flush=True)
+        answer = sys.stdin.readline()
+        if not answer:
+            raise RuntimeError("selection cancelled (end of input)")
+        if not answer.strip():
+            return models
+        parts = re.split(r"[\s,]+", answer.strip())
+        if any(not re.fullmatch(r"[0-9]+", part) for part in parts):
+            raise RuntimeError("selection must contain model numbers only")
+        indices = [int(part) for part in parts]
+        if any(index < 1 or index > len(models) for index in indices):
+            raise RuntimeError("selection number is out of range")
+        return sorted({models[index - 1] for index in indices})
+    return models
+
+
+def build_config(models: List[str], args: argparse.Namespace) -> Dict[str, Any]:
+    options = {"baseURL": "{env:" + HOST_ENV + "}"}
+    if not args.no_auth:
+        options["apiKey"] = "{env:" + TOKEN_ENV + "}"
+    return {
+        "$schema": "https://opencode.ai/config.json",
+        "provider": {
+            args.name: {
+                "npm": "@ai-sdk/openai-compatible",
+                "name": args.name,
+                "options": options,
+                "models": {model: {"name": model} for model in models},
+            }
+        },
+    }
+
+
+def atomic_write(path: pathlib.Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    mode = path.stat().st_mode if path.exists() else 0o644
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as stream:
+            temporary = pathlib.Path(stream.name)
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+        temporary = None
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+
+
+def ensure_loader_registered(config_path: pathlib.Path) -> bool:
+    try:
+        text = config_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        raise RuntimeError(f"OpenCode config not found: {config_path}") from None
+    matches = list(re.finditer(r'(?ms)^(?P<indent>\s*)"plugin"\s*:\s*(?P<array>\[[^\]]*\])', text))
+    if len(matches) != 1:
+        raise RuntimeError("opencode.json must contain exactly one simple top-level plugin array")
+    match = matches[0]
+    try:
+        plugins = json.loads(match.group("array"))
+    except ValueError:
+        raise RuntimeError("the opencode.json plugin array must be strict JSON without comments") from None
+    if not isinstance(plugins, list) or any(not isinstance(item, str) for item in plugins):
+        raise RuntimeError("the opencode.json plugin field must be an array of strings")
+    if LOADER_SPEC in plugins:
+        return False
+    plugins.append(LOADER_SPEC)
+    replacement = json.dumps(plugins, ensure_ascii=True)
+    updated = text[: match.start("array")] + replacement + text[match.end("array") :]
+    atomic_write(config_path, updated)
+    return True
+
+
+def validate_existing_provider(path: pathlib.Path, name: str) -> None:
+    if not path.exists():
+        return
+    if path.is_symlink() or not path.is_file():
+        raise RuntimeError("refusing to replace a symlink or non-file provider path")
+    try:
+        current = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeError):
+        raise RuntimeError("existing provider file is not valid UTF-8 JSON") from None
+    providers = current.get("provider") if isinstance(current, dict) else None
+    if not isinstance(providers, dict) or set(providers) != {name}:
+        raise RuntimeError("existing provider file is not owned by this provider name")
+
+
+def install_config(config: Dict[str, Any], args: argparse.Namespace) -> pathlib.Path:
+    config_dir = args.config_dir.resolve()
+    config_path = config_dir / "opencode.json"
+    loader_path = config_dir / LOADER_SPEC.removeprefix("./")
+    if not loader_path.is_file():
+        raise RuntimeError(f"provider loader not found: {loader_path}")
+    output = config_dir / "providers" / f"{args.name}.json"
+    validate_existing_provider(output, args.name)
+    ensure_loader_registered(config_path)
+    atomic_write(output, json.dumps(config, ensure_ascii=True, indent=2) + "\n")
+    return output
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Generate and install an OpenCode provider without embedding host/token values.",
+        epilog="Default: update opencode/providers/<name>.json and register provider-loader.ts. "
+        "Use --stdout or -o for export-only mode. Chat Completions APIs only.",
+    )
+    parser.add_argument("--name", required=True, type=provider_id, help="unique provider ID and display name")
+    auth = parser.add_mutually_exclusive_group()
+    auth.add_argument("--no-auth", action="store_true", help="omit Authorization and options.apiKey")
+    selection = parser.add_mutually_exclusive_group()
+    selection.add_argument("--models", nargs="+", metavar="ID", help="explicit IDs; skip discovery (offline)")
+    selection.add_argument("--include", nargs="+", metavar="GLOB", help="discover and filter IDs; quote globs")
+    selection.add_argument("--select", action="store_true", help="discover and select interactively")
+    selection.add_argument("--list", action="store_true", help="list discovered IDs without installing")
+    destination = parser.add_mutually_exclusive_group()
+    destination.add_argument("--stdout", action="store_true", help="write JSON to stdout without installing")
+    destination.add_argument("-o", "--output", type=pathlib.Path, help="create a new JSON file without installing")
+    parser.add_argument("--config-dir", type=pathlib.Path, default=DEFAULT_CONFIG_DIR, help=argparse.SUPPRESS)
+    parser.add_argument("--timeout", type=positive_timeout, default=30.0, metavar="SECONDS")
+    parser.add_argument("--allow-http", action="store_true", help="allow sending a token over non-loopback HTTP")
+    args = parser.parse_args(argv)
+    if args.list and (args.stdout or args.output):
+        parser.error("--list cannot be combined with --stdout or --output")
+    try:
+        load_env_file(pathlib.Path.home() / ".config/opencode/.env")
+        if args.output and os.path.lexists(args.output):
+            raise RuntimeError("output already exists; choose a new file")
+        if args.models:
+            models = sorted({validate_model_id(model) for model in args.models})
+        else:
+            models = select_models(discover_models(args), args)
+        if args.list:
+            print("\n".join(models))
+            return 0
+        config = build_config(models, args)
+        text = json.dumps(config, ensure_ascii=True, indent=2) + "\n"
+        if args.stdout:
+            sys.stdout.write(text)
+        elif args.output:
+            try:
+                with args.output.open("x", encoding="utf-8") as stream:
+                    stream.write(text)
+            except OSError:
+                raise RuntimeError("cannot create output; check that its parent exists and the path is writable and unused") from None
+            print(f"Wrote {len(models)} model(s) to {args.output} (export only).", file=sys.stderr)
+        else:
+            output = install_config(config, args)
+            print(
+                f"Installed {len(models)} model(s) in {output}. Restart OpenCode to reload providers.",
+                file=sys.stderr,
+            )
+        return 0
+    except RuntimeError as exc:
+        print(f"opencode-provider-gen: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except KeyboardInterrupt:
+        print("opencode-provider-gen: cancelled", file=sys.stderr)
+        raise SystemExit(130)
+    except BrokenPipeError:
+        raise SystemExit(1)
