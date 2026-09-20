@@ -1,5 +1,13 @@
 {
   "private": true,
+  "scripts": {
+    "test:rename-self": "node --experimental-default-type=module --test tests/rename-self.test.mjs",
+    "typecheck:rename-self": "tsc --noEmit --strict --skipLibCheck --target es2022 --lib es2022,es2022.intl --module esnext --moduleResolution bundler --types node plugins/rename-self.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.0",
+    "typescript": "^5.9.3"
+  },
   "dependencies": {
     "@opencode-ai/plugin": "1.2.27",
     "@larksuiteoapi/node-sdk": "^1.71.1"
