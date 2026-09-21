@@ -18,6 +18,12 @@ under a common category, and only blend a new topic after it has persisted for
   Child sessions and titles that already start with an emoji are left unchanged.
   The plugin rereads the title before writing so a queued event cannot overwrite a
   newer rename; failures log a warning and can retry once when the session idles.
+- Fork sessions are detected on `session.created` through OpenCode's stable
+  `<source title> (fork #N)` format. The plugin removes any inherited leading
+  emoji, allocates a fresh one, and preserves the title body and fork number.
+  Only creation events are eligible, so later manual titles that resemble a fork
+  are not rewritten. A final session read prevents stale events from overwriting
+  a newer title; malformed suffixes and child sessions are ignored.
 - The reminder is appended as a synthetic text part on the triggering user
   message through `experimental.chat.messages.transform`; it is not a persisted
   chat message and does not change the system-prompt prefix. This follows
@@ -36,7 +42,7 @@ under a common category, and only blend a new topic after it has persisted for
   `topic_shift` always adds a plugin-selected prefix. Existing emoji prefixes are
   retained on every rename, including manual renames.
 - First/explicit assignment randomly excludes prefixes in the 50 most recently
-  updated other root sessions in the current project directory. The 32-symbol pool
+  updated other root sessions in the current project directory. The 96-symbol pool
   falls back to its least-recently-used symbol when exhausted. Writes are
   serialized within one plugin instance; separate OpenCode processes may still
   race.

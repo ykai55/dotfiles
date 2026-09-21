@@ -6,14 +6,18 @@ const REMIND_EVERY = 3
 const RECENT_SESSIONS = 50
 const MAX_TITLE_LENGTH = 30
 const EMOJIS = [
-  "\u{1f331}", "\u{1f332}", "\u{1f335}", "\u{1f340}",
-  "\u{1f341}", "\u{1f343}", "\u{1f33b}", "\u{1f337}",
-  "\u{1f34e}", "\u{1f34b}", "\u{1f34a}", "\u{1f347}",
-  "\u{1f349}", "\u{1f352}", "\u{1f353}", "\u{1f95d}",
-  "\u{1f98a}", "\u{1f43c}", "\u{1f428}", "\u{1f438}",
-  "\u{1f419}", "\u{1f433}", "\u{1f42c}", "\u{1f98b}",
-  "\u{1f680}", "\u{1f6f6}", "\u{1f3a8}", "\u{1f3af}",
-  "\u{1f9ed}", "\u{1f48e}", "\u{1f514}", "\u{1f511}",
+  "\u{1f331}", "\u{1f332}", "\u{1f333}", "\u{1f334}", "\u{1f335}", "\u{1f33f}", "\u{1f340}", "\u{1f341}",
+  "\u{1f342}", "\u{1f343}", "\u{1f33b}", "\u{1f337}", "\u{1f339}", "\u{1f33a}", "\u{1f33c}", "\u{1f338}",
+  "\u{1f34e}", "\u{1f34f}", "\u{1f34b}", "\u{1f34a}", "\u{1f347}", "\u{1f349}", "\u{1f352}", "\u{1f353}",
+  "\u{1fad0}", "\u{1f95d}", "\u{1f96d}", "\u{1f351}", "\u{1f34d}", "\u{1f965}", "\u{1f951}", "\u{1f345}",
+  "\u{1f98a}", "\u{1f43c}", "\u{1f428}", "\u{1f438}", "\u{1f419}", "\u{1f433}", "\u{1f42c}", "\u{1f98b}",
+  "\u{1f989}", "\u{1f99c}", "\u{1f422}", "\u{1f41d}", "\u{1f41e}", "\u{1f40b}", "\u{1f418}", "\u{1f992}",
+  "\u{1f680}", "\u{1f6f6}", "\u{1f6f8}", "\u{1f3a8}", "\u{1f3af}", "\u{1f3b2}", "\u{1f3b5}", "\u{1f3ac}",
+  "\u{1f9ed}", "\u{1f48e}", "\u{1f514}", "\u{1f511}", "\u{1f4a1}", "\u{1f52d}", "\u{1f52c}", "\u{1f9ea}",
+  "\u{1f4da}", "\u{1f4cc}", "\u{1f4ce}", "\u{1f4d0}", "\u{1f527}", "\u{1f6e0}\ufe0f", "\u2699\ufe0f", "\u{1f9f0}",
+  "\u{1f9e9}", "\u{1fa84}", "\u{1f392}", "\u{1f5c2}\ufe0f", "\u{1f6f0}\ufe0f", "\u{1f9e0}", "\u{1fae7}", "\u{1f6df}",
+  "\u26a1", "\u{1f525}", "\u2728", "\u{1f31f}", "\u{1f319}", "\u2600\ufe0f", "\u{1f308}", "\u2744\ufe0f",
+  "\u{1f30a}", "\u{1f30b}", "\u{1f3d4}\ufe0f", "\u{1f3dd}\ufe0f", "\u{1f9ca}", "\u{1faa8}", "\u{1fab5}", "\u{1fab6}",
 ]
 const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" })
 const leadingEmoji = (title: string) => {
@@ -34,6 +38,18 @@ const isUserTurn = (message: ChatMessage["message"], parts: ChatMessage["parts"]
 const isDefaultTitle = (title: string) =>
   /^New session - \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(title)
 
+// OpenCode currently derives fork titles as "<source title> (fork #N)".
+const parseForkTitle = (title: string) => {
+  const match = title.match(/^(.*?)( \(fork #\d+\))$/)
+  if (!match) return
+  const body = match[1].trim()
+  const emoji = leadingEmoji(body)
+  return {
+    sourceEmoji: emoji,
+    title: (emoji ? body.slice(emoji.length).trimStart() : body) + match[2],
+  }
+}
+
 type SessionState = {
   turns: Set<string>
   title: string
@@ -43,10 +59,11 @@ type SessionState = {
 export default (async ({ client, directory }) => {
   const sessions = new Map<string, Promise<SessionState | null>>()
   const initialTitles = new Map<string, { title?: string; running: boolean }>()
+  const processedForks = new Set<string>()
   // Serialize allocation and writes in this plugin instance, including failures.
   let renameQueue: Promise<unknown> = Promise.resolve()
 
-  const chooseEmoji = async (sessionID: string) => {
+  const chooseEmoji = async (sessionID: string, excluded: string[] = []) => {
     // The v1 client types omit filters supported by the server in 1.2.27.
     const query = { directory, roots: true, limit: RECENT_SESSIONS + 1 }
     const recent = await client.session.list({ query })
@@ -58,12 +75,37 @@ export default (async ({ client, directory }) => {
       const prefix = leadingEmoji(session.title)
       if (prefix && !lastUsed.has(prefix)) lastUsed.set(prefix, session.time.updated)
     }
-    let candidates = EMOJIS.filter((candidate) => !lastUsed.has(candidate))
+    const excludedSet = new Set(excluded)
+    let candidates = EMOJIS.filter((candidate) => !lastUsed.has(candidate) && !excludedSet.has(candidate))
     if (!candidates.length) {
-      const oldest = Math.min(...EMOJIS.map((candidate) => lastUsed.get(candidate)!))
-      candidates = EMOJIS.filter((candidate) => lastUsed.get(candidate) === oldest)
+      const oldest = Math.min(...EMOJIS.filter((candidate) => !excludedSet.has(candidate))
+        .map((candidate) => lastUsed.get(candidate) ?? Number.NEGATIVE_INFINITY))
+      candidates = EMOJIS.filter((candidate) => !excludedSet.has(candidate) &&
+        (lastUsed.get(candidate) ?? Number.NEGATIVE_INFINITY) === oldest)
     }
     return candidates[randomInt(candidates.length)]
+  }
+
+  const prefixForkTitle = async (info: { id: string; title: string; directory: string; parentID?: string }) => {
+    const fork = parseForkTitle(info.title)
+    if (!fork || info.parentID || info.directory !== directory || processedForks.has(info.id)) return
+    processedForks.add(info.id)
+    const operation = renameQueue.then(async () => {
+      const current = await client.session.get({ path: { id: info.id }, query: { directory } })
+      if (current.error || !current.data) throw new Error("Could not read the fork session title")
+      if (current.data.parentID || current.data.directory !== directory || current.data.title !== info.title) return
+      const emoji = await chooseEmoji(info.id, fork.sourceEmoji ? [fork.sourceEmoji] : [])
+      const title = `${emoji} ${fork.title}`
+      if (title === current.data.title) return
+      const result = await client.session.update({ path: { id: info.id }, query: { directory }, body: { title } })
+      if (result.error || result.data?.title !== title) throw new Error("Fork title emoji update failed")
+    })
+    renameQueue = operation.catch(() => undefined)
+    try {
+      await operation
+    } catch (error) {
+      console.warn("[rename-self] Fork emoji skipped:", error instanceof Error ? error.message : "update failed")
+    }
   }
 
   const sessionState = (id: string) => {
@@ -189,11 +231,16 @@ export default (async ({ client, directory }) => {
       if (event.type === "session.deleted") {
         sessions.delete(event.properties.info.id)
         initialTitles.delete(event.properties.info.id)
+        processedForks.delete(event.properties.info.id)
         return
       }
       if (event.type === "message.removed") sessions.delete(event.properties.sessionID)
       if (event.type === "session.created" || event.type === "session.updated") {
         const info = event.properties.info
+        if (event.type === "session.created" && parseForkTitle(info.title)) {
+          await prefixForkTitle(info)
+          return
+        }
         if (event.type === "session.updated") {
           const state = await sessions.get(info.id)?.catch(() => null)
           if (state) state.title = info.title

@@ -87,6 +87,66 @@ const userHistory = (count, id = "main") => Array.from({ length: count }, (_, in
   parts: [{ type: "text", text: "A real turn" }],
 }))
 
+test("fork creation replaces the inherited emoji and preserves its title suffix", async () => {
+  const f = await fixture([
+    { id: "parent", title: `${seedling} Parent topic`, time: { updated: 10 } },
+    { id: "fork", title: `${seedling} Parent topic (fork #1)`, time: { updated: 11 } },
+  ])
+  await f.event(sessionEvent("session.created", f.records.get("fork")))
+  const title = f.records.get("fork").title
+  const prefix = graphemes(title)[0].segment
+  assert.notEqual(prefix, seedling)
+  assert.equal(title, `${prefix} Parent topic (fork #1)`)
+  assert.equal(f.writes.length, 1)
+
+  await f.event(sessionEvent("session.updated", f.records.get("fork")))
+  assert.equal(f.writes.length, 1)
+})
+
+test("fork detection also assigns an emoji when the source title had none", async () => {
+  const f = await fixture([{ id: "fork", title: "Plain topic (fork #2)" }])
+  await f.event(sessionEvent("session.created", f.records.get("fork")))
+  assert.match(f.records.get("fork").title, / Plain topic \(fork #2\)$/)
+  assert.equal(f.writes.length, 1)
+})
+
+test("fork-shaped updates, malformed suffixes and child sessions are not rewritten", async () => {
+  const f = await fixture([
+    { id: "update", title: `${seedling} Topic (fork #1)` },
+    { id: "malformed", title: `${seedling} Topic (fork #x)` },
+    { id: "child", title: `${seedling} Topic (fork #1)`, parentID: "update" },
+  ])
+  await f.event(sessionEvent("session.updated", f.records.get("update")))
+  await f.event(sessionEvent("session.created", f.records.get("malformed")))
+  await f.event(sessionEvent("session.created", f.records.get("child")))
+  assert.equal(f.writes.length, 0)
+})
+
+test("stale and duplicate fork events never overwrite a newer title", async () => {
+  const f = await fixture([{ id: "fork", title: `${seedling} Topic (fork #1)` }])
+  const stale = { ...f.records.get("fork") }
+  f.records.set("fork", { ...stale, title: "Newer title" })
+  await f.event(sessionEvent("session.created", stale))
+  assert.equal(f.records.get("fork").title, "Newer title")
+  assert.equal(f.writes.length, 0)
+
+  f.records.set("fork", stale)
+  await f.event(sessionEvent("session.created", stale))
+  assert.equal(f.records.get("fork").title, stale.title)
+  assert.equal(f.writes.length, 0)
+})
+
+test("fork update failures warn without repeated writes", async (t) => {
+  const warning = t.mock.method(console, "warn", () => {})
+  const f = await fixture([{ id: "fork", title: `${seedling} Topic (fork #1)` }])
+  f.failures.add("PATCH /session/fork")
+  await f.event(sessionEvent("session.created", f.records.get("fork")))
+  assert.equal(f.records.get("fork").title, `${seedling} Topic (fork #1)`)
+  assert.equal(warning.mock.callCount(), 1)
+  await f.event(sessionEvent("session.created", f.records.get("fork")))
+  assert.equal(warning.mock.callCount(), 1)
+})
+
 test("first native title receives one stable emoji without altering or truncating its text", async () => {
   const longTitle = "Native generated title ".repeat(4).trim()
   const f = await fixture([{ id: "main", title: defaultTitle }])
@@ -378,37 +438,24 @@ test("concurrent allocations in one instance receive distinct prefixes", async (
   assert.notEqual(graphemes(f.records.get("main").title)[0].segment, graphemes(f.records.get("other").title)[0].segment)
 })
 
-test("exhausted emoji pool reuses the least recently used prefix", async () => {
-  const f = await fixture()
-  const allocated = new Set()
-  for (let i = 0; i < 32; i++) {
-    const id = `session-${i}`
-    f.records.set(id, { id, title: "Unnamed", time: { updated: i } })
-    await f.rename({ name: `Topic ${i}`, emoji: true }, id)
-    const record = f.records.get(id)
-    record.time.updated = i + 1
-    allocated.add(graphemes(record.title)[0].segment)
-  }
-  assert.equal(allocated.size, 32)
-  await f.rename({ name: "Overflow", emoji: true })
-  assert.equal(graphemes(f.records.get("main").title)[0].segment, graphemes(f.records.get("session-0").title)[0].segment)
+test("expanded emoji pool contains 96 distinct prefixes", async () => {
+  const source = await import("node:fs/promises").then((fs) => fs.readFile(new URL("../plugins/rename-self.ts", import.meta.url), "utf8"))
+  const literals = source.split("const EMOJIS = [", 2)[1].split("]", 1)[0].match(/"[^"]+"/g)
+  assert.equal(literals.length, 96)
+  assert.equal(new Set(literals).size, 96)
 })
 
 test("only the latest 50 non-child sessions participate in emoji exclusion", async () => {
   const f = await fixture()
-  for (let i = 0; i < 32; i++) {
-    const id = `session-${i}`
-    f.records.set(id, { id, title: "Unnamed", time: { updated: i } })
-    await f.rename({ name: `Topic ${i}`, emoji: true }, id)
-    f.records.get(id).time.updated = i + 10
+  for (let i = 0; i < 51; i++) {
+    f.records.set(`recent-${i}`, {
+      id: `recent-${i}`,
+      title: `${seedling} Recent ${i}`,
+      time: { updated: i + 1 },
+    })
   }
-  const reusable = graphemes(f.records.get("session-0").title)[0].segment
-  f.records.get("session-0").time.updated = -1
-  // 31 recent prefixed roots + 19 unprefixed roots fill the exclusion window.
-  for (let i = 0; i < 19; i++) {
-    f.records.set(`plain-${i}`, { id: `plain-${i}`, title: "Plain", time: { updated: 100 + i } })
-  }
-  f.records.set("child", { id: "child", parentID: "main", title: `${reusable} Child`, time: { updated: 1000 } })
   await f.rename({ name: "Allocated", emoji: true })
-  assert.equal(graphemes(f.records.get("main").title)[0].segment, reusable)
+  const allocated = graphemes(f.records.get("main").title)[0].segment
+  assert.notEqual(allocated, seedling)
+  assert.equal(f.requests.filter((request) => request === "GET /session").length, 1)
 })
