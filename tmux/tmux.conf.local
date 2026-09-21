@@ -439,6 +439,7 @@ set -g status-format[1] "#{E:@status_detail_line}"
 if -F '#{e|>|:#{client_width},130}' 'set status on' 'set status 2'
 set-hook -g client-attached "if -F '#{e|>|:#{client_width},130}' 'set status on' 'set status 2'"
 set-hook -g client-resized "if -F '#{e|>|:#{client_width},130}' 'set status on' 'set status 2'"
+set-hook -g client-detached[1] "if -F '#{e|>|:#{client_width},130}' 'set status on' 'set status 2'"
 
 # -- tpm -----------------------------------------------------------------------
 
