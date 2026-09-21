@@ -71,7 +71,7 @@ set -gx ANDROID_HOME (if is_mac; echo ~/Library/Android/sdk; else; echo ~/Androi
 set -gx ANDROID_SDK_ROOT (if is_mac; echo ~/Library/Android/sdk; else; echo ~/Android/Sdk; end)
 set -gx PAGER 'less --mouse --wheel-lines=3'
 set -gx HOMEBREW_NO_AUTO_UPDATE 1
-if test -x
+if command -q nvim
   set -gx MANPAGER "nvim +Man!"
 end
 
@@ -135,3 +135,10 @@ end
 if type rbenv -q && status --is-interactive
   rbenv init - --no-rehash fish | source
 end
+
+# Deduplicate PATH, keeping the first occurrence of each entry.
+set -l __deduped_path
+for __path_entry in $PATH
+  contains -- $__path_entry $__deduped_path; or set -a __deduped_path $__path_entry
+end
+set -gx PATH $__deduped_path
