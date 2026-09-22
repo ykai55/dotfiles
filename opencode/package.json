@@ -1,7 +1,9 @@
 {
   "private": true,
   "scripts": {
+    "test:current-time": "node --experimental-default-type=module --test tests/current-time.test.mjs",
     "test:rename-self": "node --experimental-default-type=module --test tests/rename-self.test.mjs",
+    "typecheck:current-time": "tsc --noEmit --strict --skipLibCheck --target es2022 --lib es2022,es2022.intl,dom --module esnext --moduleResolution bundler --types node plugins/current-time.ts",
     "typecheck:rename-self": "tsc --noEmit --strict --skipLibCheck --target es2022 --lib es2022,es2022.intl --module esnext --moduleResolution bundler --types node plugins/rename-self.ts"
   },
   "devDependencies": {

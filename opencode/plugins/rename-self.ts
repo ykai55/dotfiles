@@ -272,8 +272,9 @@ export default (async ({ client, directory }) => {
           "then blend it with a recognizable part of the earlier topic; avoid an ever-growing list of keywords.",
           "Clarifications and corrections alone are not topic shifts. Tool calls and retries are not extra user turns.",
           "Use reason=topic_shift for a sustained shift (emoji is mandatory), refinement for broader coverage, or manual for an explicit rename.",
-          "Supply a plain title without an emoji prefix. Set emoji=true to request one on other updates; the plugin selects it",
-          "and retains any existing prefix. The FINAL title, including emoji, space and punctuation, must fit 30 grapheme clusters",
+          "Supply a plain title without an emoji prefix. The first rename from OpenCode's default placeholder always receives",
+          "a plugin-selected prefix. Set emoji=true to request one on other updates; topic shifts also require one, and the plugin",
+          "retains any existing prefix. The FINAL title, including emoji, space and punctuation, must fit 30 grapheme clusters",
           "(at most 28 for the plain title when prefixed). Do not rename speculatively when context is insufficient.",
         ].join(" "),
         args: {
@@ -281,7 +282,7 @@ export default (async ({ client, directory }) => {
           reason: tool.schema.enum(["refinement", "topic_shift", "manual"]).optional()
             .describe("Why the title needs updating; defaults to refinement"),
           emoji: tool.schema.boolean().optional()
-            .describe("Request a plugin-chosen prefix; mandatory for topic_shift, existing prefixes are always retained"),
+            .describe("Request a plugin-chosen prefix; default-placeholder renames and topic_shift always receive one; existing prefixes are retained"),
         },
         async execute(args, context) {
           const rename = renameQueue.then(async () => {
@@ -295,7 +296,7 @@ export default (async ({ client, directory }) => {
             const current = await client.session.get({ path: { id: context.sessionID }, query: { directory } })
             if (current.error || !current.data) throw new Error("rename_session: could not read the current session")
             let emoji = leadingEmoji(current.data.title)
-            const needsEmoji = !!emoji || args.emoji === true || args.reason === "topic_shift"
+            const needsEmoji = !!emoji || isDefaultTitle(current.data.title) || args.emoji === true || args.reason === "topic_shift"
             const length = [...segmenter.segment(name)].length + (needsEmoji ? 2 : 0)
             if (length > MAX_TITLE_LENGTH) {
               throw new Error(`rename_session: final title would be ${length} characters; shorten it to at most ${MAX_TITLE_LENGTH - (needsEmoji ? 2 : 0)} before retrying`)

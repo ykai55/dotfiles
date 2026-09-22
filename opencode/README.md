@@ -1,5 +1,29 @@
 # OpenCode Serve
 
+## Current time reminders
+
+`plugins/current-time.ts` adds a request-local current-time reminder after a tool
+result when more than one minute has elapsed since that session's previous
+reminder. The first completed tool in a plugin process is eligible immediately;
+the one-minute interval starts only when the reminder is actually inserted into
+a model request.
+
+The plugin observes `tool.execute.after`, then uses
+`experimental.chat.messages.transform` to append one synthetic text part after
+the matching completed or failed tool part. It does not persist a chat message,
+change the system prompt, or start an extra model request. A later completed tool
+supersedes an unconsumed pending reminder, sessions are throttled independently,
+and deleting a session clears its in-memory state. Both the displayed time and
+the one-minute interval use the system wall clock.
+
+Restart OpenCode to load the plugin. Development checks:
+
+```bash
+cd ~/dotfiles/opencode
+npm run test:current-time
+npm run typecheck:current-time
+```
+
 ## Session title maintenance
 
 `plugins/rename-self.ts` adds one stable emoji after OpenCode generates a root
@@ -39,8 +63,10 @@ under a common category, and only blend a new topic after it has persisted for
   writing a sidecar state file. Child sessions do not receive periodic reminders.
 - `rename_session({ name, reason?, emoji? })` accepts a plain title. `reason` is
   `refinement` (default), `topic_shift`, or `manual`; `emoji` defaults to false.
-  `topic_shift` always adds a plugin-selected prefix. Existing emoji prefixes are
-  retained on every rename, including manual renames.
+  A rename made while the current title is still OpenCode's default placeholder
+  always adds a plugin-selected prefix, including `refinement` with `emoji=false`.
+  `topic_shift` also always adds a prefix. Existing emoji prefixes are retained
+  on every rename, including manual renames.
 - First/explicit assignment randomly excludes prefixes in the 50 most recently
   updated other root sessions in the current project directory. The 96-symbol pool
   falls back to its least-recently-used symbol when exhausted. Writes are

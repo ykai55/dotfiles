@@ -325,6 +325,15 @@ test("removal reloads history, and deletion clears cached session data", async (
   assert.equal(reminderParts(await f.prompt()).length, 0)
 })
 
+test("first plugin rename from the default placeholder always assigns an emoji", async () => {
+  const f = await fixture([{ id: "main", title: defaultTitle }])
+  await f.rename({ name: "dotfiles project structure", reason: "refinement", emoji: false })
+  const title = f.records.get("main").title
+  const prefix = graphemes(title)[0].segment
+  assert.equal(title, `${prefix} dotfiles project structure`)
+  assert.equal(f.requests.filter((request) => request === "GET /session").length, 1)
+})
+
 test("plain manual/refinement renames remain compatible and identical titles are no-ops", async () => {
   const f = await fixture()
   await f.rename({ name: "  Better\n title  " })
