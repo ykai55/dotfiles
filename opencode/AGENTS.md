@@ -116,6 +116,20 @@ Favor removing abstractions that do not improve reuse, readability, or domain cl
 
 - Prefer project-provided wrapper commands (e.g. make, just, task, mise, pnpm, uv, project scripts) over invoking language tools directly.
 
+# Shell Tool Usage
+
+- When a bash or shell tool exposes a `workdir` parameter, always pass the target directory through it instead of changing directories inside the command.
+- Never write `cd <dir> && <command>` when the tool can run the command in `<dir>` for you.
+
+Good:
+
+    workdir: /repo/api
+    command: npm test
+
+Bad:
+
+    command: cd /repo/api && npm test
+
 # Communication
 
 - When you need to ask the user a question, prefer the `question` tool or similar structured interaction tools whenever available and suitable.
