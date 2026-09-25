@@ -15,8 +15,13 @@ BREW_PREFIX="$(brew --prefix)"
 
 mkdir -p "$SRC" "$BUILD" "$PREFIX" "$ROOT/tmp" "$ROOT/tmux-tmp"
 
+if ! command -v cargo >/dev/null || ! command -v rustc >/dev/null; then
+  echo "Rust toolchain not found; install Rust with rustup before building." >&2
+  exit 1
+fi
+
 brew update
-brew install cmake pkg-config autoconf automake libtool rust libevent ncurses gettext
+brew install cmake pkg-config autoconf automake libtool libevent ncurses gettext
 
 fetch() {
   local url="$1"
