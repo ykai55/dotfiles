@@ -1,5 +1,6 @@
 import os
 import pathlib
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -191,6 +192,40 @@ class UseEnvTests(unittest.TestCase):
 
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(proc.stdout.splitlines(), ["<missing>", "loaded"])
+
+    def test_finds_repo_config_through_symlinks_and_path_lookup(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = pathlib.Path(tmpdir)
+            repo = tmp_path / "repo with spaces"
+            (repo / "bin").mkdir(parents=True)
+            (repo / "fish").mkdir()
+            script = repo / "bin" / "useenv"
+            shutil.copy2(USEENV, script)
+            self.write_config(
+                repo / "fish" / "config.fish",
+                "set -gx USEENV_TEST_RESOLVED yes\n",
+            )
+            links = tmp_path / "links"
+            links.mkdir()
+            (links / "absolute").symlink_to(script)
+            (links / "inner").symlink_to("../repo with spaces/bin/useenv")
+            (links / "useenv").symlink_to("inner")
+            (tmp_path / "linked-bin").symlink_to(repo / "bin", target_is_directory=True)
+            child_env = os.environ.copy()
+            child_env["PATH"] = str(links) + os.pathsep + child_env["PATH"]
+
+            for invocation in ("links/absolute", "links/useenv", "linked-bin/useenv", "useenv"):
+                with self.subTest(invocation=invocation):
+                    proc = subprocess.run(
+                        [invocation],
+                        cwd=tmp_path,
+                        env=child_env,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                    )
+                    self.assertEqual(proc.returncode, 0, proc.stderr)
+                    self.assertEqual(self.parse_env(proc.stdout)["USEENV_TEST_RESOLVED"], "yes")
 
 
 if __name__ == "__main__":

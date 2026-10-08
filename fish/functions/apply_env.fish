@@ -9,7 +9,7 @@ function apply_env --description "source a .sh script and apply its env changes 
         return 1
     end
 
-    set script_path $argv[1]
+    set -l script_path $argv[1]
 
     if not test -f "$script_path"
         echo "Error: File not found at '$script_path'" >&2
@@ -19,13 +19,12 @@ function apply_env --description "source a .sh script and apply its env changes 
     # Blacklist of special/read-only variables to ignore
     set -l ignored_vars _ SHLVL PWD PS1 FROM_FISH_APPLY_ENV
 
-    set before_file (mktemp)
-    set after_file (mktemp)
+    set -l env_bin (type -p env)
+    set -l before ($env_bin -0 | string split0)
+    set -l after_file (mktemp)
+    or return
 
-    # 1. Get environment snapshot before
-    env | sort > "$before_file"
-
-    # 2. Run the target script.
+    # Run the target script without capturing its stdout or stderr.
     if set -q _flag_verbose
         echo "--- Sourcing '$script_path'... ---"
     end
@@ -36,14 +35,15 @@ function apply_env --description "source a .sh script and apply its env changes 
     env FROM_FISH_APPLY_ENV=1 bash -c '
         script_path=$1
         after_file=$2
-        shift 2
+        env_bin=$3
+        shift 3
         source "$script_path" "$@"
         source_status=$?
         if [ "$source_status" -eq 0 ]; then
-            env > "$after_file"
+            "$env_bin" -0 > "$after_file"
         fi
         exit "$source_status"
-    ' _ "$script_path" "$after_file" $script_args
+    ' _ "$script_path" "$after_file" "$env_bin" $script_args
     set -l source_status $status
 
     if set -q _flag_verbose
@@ -52,31 +52,28 @@ function apply_env --description "source a .sh script and apply its env changes 
 
     if test "$source_status" -ne 0
         set -e FROM_FISH_APPLY_ENV
-        rm "$before_file" "$after_file"
+        rm "$after_file"
         return $source_status
     end
 
-    # Sort the captured environment file
-    sort -o "$after_file" "$after_file"
-
-    # 3. Calculate differences
-    set added_or_changed (comm -13 "$before_file" "$after_file")
-    set removed (comm -23 "$before_file" "$after_file")
-
-    rm "$before_file" "$after_file"
+    set -l after (string split0 < "$after_file")
+    rm "$after_file"
 
     if set -q _flag_verbose
         echo "Applying environment changes..."
     end
 
-    # 4. Apply added or changed variables while tracking keys that changed.
-    set changed_keys
-    for line in $added_or_changed
-        if test -z "$line"; continue; end
+    # Compare NUL-delimited records without sorting or losing embedded newlines.
+    set -l after_keys
+    for line in $after
         set -l parts (string split -m 1 '=' -- "$line")
         set -l key $parts[1]
         set -l value $parts[2]
-        set changed_keys $changed_keys $key
+        set -a after_keys "$key"
+
+        if contains -- "$line" $before
+            continue
+        end
 
         if contains -- "$key" $ignored_vars
             if set -q _flag_verbose
@@ -91,13 +88,11 @@ function apply_env --description "source a .sh script and apply its env changes 
         end
     end
 
-    # 5. Handle truly unset variables.
-    for line in $removed
-        if test -z "$line"; continue; end
+    # Remove only keys missing from the new environment.
+    for line in $before
         set -l key (string split -m 1 '=' -- "$line")[1]
 
-        # Ignore blacklisted vars and vars that were changed (not unset)
-        if contains -- "$key" $ignored_vars; or contains -- "$key" $changed_keys
+        if contains -- "$key" $ignored_vars; or contains -- "$key" $after_keys
             continue
         end
 

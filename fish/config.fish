@@ -1,9 +1,11 @@
-function is_mac
-  return (test (uname) = Darwin)
+set -l __platform (uname)
+
+function is_mac --inherit-variable __platform
+  test "$__platform" = Darwin
 end
 
-function is_linux
-  return (test (uname) = Linux)
+function is_linux --inherit-variable __platform
+  test "$__platform" = Linux
 end
 
 function llvmenv
@@ -38,7 +40,13 @@ end
 set fish_greeting
 
 if test -f ~/.bashrc
-  apply_env ~/.bashrc
+  begin
+    set -lx USEENV_SKIP_BREW ''
+    if is_mac; and test "$USEENV" = 1
+      set USEENV_SKIP_BREW 1
+    end
+    apply_env ~/.bashrc
+  end
 end
 
 # 放到最前面，后面有些命令会依赖
@@ -107,9 +115,21 @@ if is_mac
 end
 
 # pyenv
-# if type pyenv -q && test -z "$PYENV_SHELL"
 if type pyenv -q
-  pyenv init --no-rehash - fish | source
+  if status is-interactive
+    pyenv init --no-rehash - fish | source
+  else
+    set -l __pyenv_root "$HOME/.pyenv"
+    if set -q PYENV_ROOT; and test -n "$PYENV_ROOT"
+      set __pyenv_root "$PYENV_ROOT"
+    end
+    if test -d "$__pyenv_root/shims"
+      set -gx PATH "$__pyenv_root/shims" $PATH
+    else
+      pyenv init --path --no-rehash fish | source
+    end
+    set -gx PYENV_SHELL fish
+  end
 end
 
 # if test "$JENV_LOADED" != "1"

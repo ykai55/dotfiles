@@ -319,6 +319,65 @@ class ApplyEnvTests(unittest.TestCase):
         self.assertEqual(values["STATUS"], "0")
         self.assertEqual(values["PATH"], "/tmp/one:/tmp/two:/usr/bin:/bin")
 
+    def test_preserves_empty_and_multiline_values(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            script_path = pathlib.Path(tmpdir) / "values.sh"
+            self.write_script(
+                script_path,
+                """
+                export APPLY_ENV_EMPTY=''
+                export APPLY_ENV_MULTILINE=$'first\nsecond\n'
+                """,
+            )
+            proc = self.run_apply_env(
+                script_path,
+                report_commands="""
+                printf 'EMPTY=<%s>\\n' "$APPLY_ENV_EMPTY"
+                printf 'MULTILINE=<%s>\\n' "$APPLY_ENV_MULTILINE"
+                """,
+            )
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("EMPTY=<>\n", proc.stdout)
+        self.assertIn("MULTILINE=<first\nsecond\n>\n", proc.stdout)
+
+    def test_preserves_script_stdout_and_stderr(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            script_path = pathlib.Path(tmpdir) / "output.sh"
+            self.write_script(
+                script_path,
+                """
+                printf 'script output\\n'
+                printf 'script error\\n' >&2
+                export APPLY_ENV_TEST=ok
+                """,
+            )
+            proc = self.run_apply_env(script_path)
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout, "script output\nSTATUS=0\n")
+        self.assertEqual(proc.stderr, "script error\n")
+
+    def test_leaves_unchanged_variable_scope_alone(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            script_path = pathlib.Path(tmpdir) / "unchanged.sh"
+            self.write_script(script_path, ":\n")
+            proc = self.run_apply_env(
+                script_path,
+                before_commands="""
+                set -gx APPLY_ENV_UNCHANGED global
+                set -lx APPLY_ENV_UNCHANGED local
+                """,
+                report_commands="""
+                printf 'CURRENT=%s\\n' "$APPLY_ENV_UNCHANGED"
+                set -e -l APPLY_ENV_UNCHANGED
+                printf 'GLOBAL=%s\\n' "$APPLY_ENV_UNCHANGED"
+                """,
+            )
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("CURRENT=local\nGLOBAL=global\n", proc.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()
