@@ -39,6 +39,11 @@ The manifest is JSON and declares the source/target mapping for each config.
 should be linked in while local machine state such as `fish_variables` stays
 local.
 
+`copy` installs an independent file, suitable for applications such as
+OpenChamber that replace their settings files when saving. Identical content is
+left alone; conflicting destinations require `--force` and are backed up before
+replacement. Dry runs preview copies and backups without writing files.
+
 `dotfiles-map.json` now references `dotfiles-map.schema.json`, so editors that
 support JSON Schema can validate the manifest and offer completion.
 
@@ -47,7 +52,7 @@ Supported manifest fields:
 - `name`: display name used in output
 - `source`: repo-relative source path
 - `target`: destination path
-- `mode`: `symlink` or `link_children`
+- `mode`: `symlink`, `link_children`, or `copy` (single file)
 - `exclude`: glob patterns skipped under `link_children`
 - `platforms`: only apply on matching platforms such as `linux` or `macos`
 

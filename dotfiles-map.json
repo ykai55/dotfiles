@@ -86,6 +86,12 @@
       ]
     },
     {
+      "name": "openchamber-preferences",
+      "source": "opencode/openchamber/preferences.json",
+      "target": "~/.config/openchamber/preferences.json",
+      "mode": "copy"
+    },
+    {
       "name": "codex-agents",
       "source": "opencode/AGENTS.md",
       "target": "~/.codex/AGENTS.md",

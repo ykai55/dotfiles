@@ -2,8 +2,9 @@
 
 ## OpenChamber on macOS
 
-The complete OpenChamber preference snapshot and copy-based export/apply script
-are maintained in [openchamber/](openchamber/README.md).
+The complete OpenChamber preference snapshot and export script are maintained
+in [openchamber/](openchamber/README.md). `dotfiles-apply` restores the snapshot
+using a file copy.
 
 `openchamber.plist` runs the OpenChamber CLI/Web server in the background after
 login. `dotfiles-apply` links it to

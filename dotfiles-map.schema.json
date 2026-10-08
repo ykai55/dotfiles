@@ -48,6 +48,7 @@
           "type": "string",
           "enum": [
             "symlink",
+            "copy",
             "link_children"
           ]
         },

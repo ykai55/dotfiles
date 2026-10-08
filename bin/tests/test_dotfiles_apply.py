@@ -1098,6 +1098,12 @@ class DotfilesApplyTests(CapturingTestCase):
         self.assertIn("opencode.service", opencode_config.exclude)
         self.assertIn("opencode.plist", opencode_config.exclude)
         self.assertIn("openchamber.plist", opencode_config.exclude)
+        self.assertIn("openchamber", opencode_config.exclude)
+        preferences = mappings_by_name["openchamber-preferences"]
+        self.assertEqual(preferences.source, "opencode/openchamber/preferences.json")
+        self.assertEqual(preferences.target, "~/.config/openchamber/preferences.json")
+        self.assertEqual(preferences.mode, "copy")
+        self.assertIn("copy", schema["$defs"]["mapping"]["properties"]["mode"]["enum"])
 
         openchamber_agent = mappings_by_name["openchamber-launchagent"]
         self.assertEqual(openchamber_agent.source, "opencode/openchamber.plist")
@@ -1119,6 +1125,110 @@ class DotfilesApplyTests(CapturingTestCase):
         for name in ("niri", "uwsm-niri-env", "ironbar", "keyd"):
             if name in mappings_by_name:
                 self.assertEqual(mappings_by_name[name].platforms, ["linux"])
+
+    def test_copy_creates_independent_file_and_leaves_identical_file_alone(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source = pathlib.Path(tmpdir) / "source.json"
+            target = pathlib.Path(tmpdir) / "config" / "preferences.json"
+            source.write_text('{"version": 1}\n')
+            mapping = self.dotfiles_apply.Mapping("preferences", source.name, str(target), "copy")
+            stats = self.dotfiles_apply.Stats()
+
+            self.dotfiles_apply.apply_mapping(mapping, tmpdir, False, False, False, stats)
+            self.assertEqual(target.read_bytes(), source.read_bytes())
+            self.assertFalse(target.is_symlink())
+            self.assertFalse(os.path.samefile(source, target))
+            self.assertEqual(stats.copied, 1)
+
+            original_stat = target.stat()
+            self.dotfiles_apply.apply_mapping(mapping, tmpdir, False, False, False, stats)
+            self.assertEqual(stats.copied, 1)
+            self.assertEqual(target.stat().st_mtime_ns, original_stat.st_mtime_ns)
+            self.assertEqual(stats.backed_up, 0)
+
+    def test_copy_conflicts_require_force_and_preserve_backups(self):
+        for kind in ("file", "directory", "symlink", "dangling-symlink"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as tmpdir:
+                source = pathlib.Path(tmpdir) / "source"
+                target = pathlib.Path(tmpdir) / "target"
+                original = pathlib.Path(tmpdir) / "original"
+                source.write_text("new")
+                if kind == "file":
+                    target.write_text("old")
+                elif kind == "directory":
+                    target.mkdir()
+                    (target / "local").write_text("old")
+                else:
+                    if kind == "symlink":
+                        original.write_text("old")
+                    target.symlink_to(original)
+                mapping = self.dotfiles_apply.Mapping("copy", source.name, str(target), "copy")
+                stats = self.dotfiles_apply.Stats()
+
+                self.dotfiles_apply.apply_mapping(mapping, tmpdir, False, False, False, stats)
+                self.assertEqual(stats.skipped, 1)
+                self.assertEqual(stats.copied, 0)
+                self.dotfiles_apply.apply_mapping(mapping, tmpdir, True, False, False, stats)
+                self.assertEqual(target.read_text(), "new")
+                self.assertFalse(target.is_symlink())
+                backup = pathlib.Path(str(target) + ".bak")
+                self.assertTrue(os.path.lexists(backup))
+                if kind == "file":
+                    self.assertEqual(backup.read_text(), "old")
+                elif kind == "directory":
+                    self.assertEqual((backup / "local").read_text(), "old")
+                else:
+                    self.assertTrue(backup.is_symlink())
+                    if kind == "symlink":
+                        self.assertEqual(original.read_text(), "old")
+                self.assertEqual(stats.backed_up, 1)
+                self.assertEqual(stats.copied, 1)
+
+    def test_copy_dry_run_does_not_create_or_replace_paths(self):
+        for exists in (False, True):
+            with self.subTest(exists=exists), tempfile.TemporaryDirectory() as tmpdir:
+                source = pathlib.Path(tmpdir) / "source"
+                target = pathlib.Path(tmpdir) / "config" / "target"
+                source.write_text("new")
+                if exists:
+                    target.parent.mkdir()
+                    target.write_text("old")
+                mapping = self.dotfiles_apply.Mapping("copy", source.name, str(target), "copy")
+                stats = self.dotfiles_apply.Stats()
+                self.dotfiles_apply.apply_mapping(mapping, tmpdir, True, True, False, stats)
+                if exists:
+                    self.assertEqual(target.read_text(), "old")
+                else:
+                    self.assertFalse(target.parent.exists())
+                self.assertFalse(pathlib.Path(str(target) + ".bak").exists())
+                self.assertEqual(stats.copied, 1)
+
+    def test_copy_failure_preserves_target_and_cleans_temporary_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source = pathlib.Path(tmpdir) / "source"
+            target = pathlib.Path(tmpdir) / "target"
+            source.write_text("new")
+            target.write_text("old")
+            mapping = self.dotfiles_apply.Mapping("copy", source.name, str(target), "copy")
+            with mock.patch.object(self.dotfiles_apply.shutil, "copy2", side_effect=OSError("copy failed")):
+                with self.assertRaisesRegex(OSError, "copy failed"):
+                    self.dotfiles_apply.apply_mapping(
+                        mapping, tmpdir, True, False, False, self.dotfiles_apply.Stats()
+                    )
+            self.assertEqual(target.read_text(), "old")
+            self.assertEqual(sorted(os.listdir(tmpdir)), ["source", "target"])
+
+    def test_copy_rejects_directory_source(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source = pathlib.Path(tmpdir) / "source"
+            target = pathlib.Path(tmpdir) / "target"
+            source.mkdir()
+            mapping = self.dotfiles_apply.Mapping("copy", source.name, str(target), "copy")
+            with self.assertRaisesRegex(RuntimeError, "copy source must be a file"):
+                self.dotfiles_apply.apply_mapping(
+                    mapping, tmpdir, False, False, False, self.dotfiles_apply.Stats()
+                )
+            self.assertFalse(target.exists())
 
     def test_link_children_preserves_local_files_and_excludes(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import filecmp
 import fnmatch
 import hashlib
 import json
@@ -64,6 +65,7 @@ class DownloadsManifest:
 @dataclass
 class Stats:
     linked: int = 0
+    copied: int = 0
     backed_up: int = 0
     removed: int = 0
     skipped: int = 0
@@ -125,7 +127,7 @@ def load_manifest(path: str) -> list[Mapping]:
         if not isinstance(target, str) or not target:
             raise RuntimeError(f"Mapping #{index} is missing a valid 'target'")
         mode = item.get("mode", "symlink")
-        if mode not in {"symlink", "link_children"}:
+        if mode not in {"symlink", "link_children", "copy"}:
             raise RuntimeError(
                 f"Mapping #{index} has unsupported mode '{mode}'"
             )
@@ -314,7 +316,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--force",
         action="store_true",
-        help="Back up conflicting paths and replace them with managed symlinks.",
+        help="Back up conflicting paths and replace them with managed links or copies.",
     )
     parser.add_argument(
         "--prune",
@@ -828,6 +830,41 @@ def apply_mapping(
         ensure_symlink(compat_source, target, force, dry_run, stats)
         return
 
+    if mapping.mode == "copy":
+        if not os.path.isfile(actual_source):
+            raise RuntimeError(f"copy source must be a file: {actual_source}")
+        if (
+            not os.path.islink(target)
+            and os.path.isfile(target)
+            and filecmp.cmp(actual_source, target, shallow=False)
+        ):
+            print_info(f"[ok] {target}")
+            return
+        if path_exists(target) and not force:
+            print_warning(f"[skip] {target} exists and differs from the managed copy")
+            stats.skipped += 1
+            return
+        ensure_parent_dir(target, dry_run)
+        print_info(f"[copy] {actual_source} -> {target}")
+        if dry_run:
+            if path_exists(target):
+                backup_path(target, dry_run, stats)
+        else:
+            descriptor, temporary = tempfile.mkstemp(
+                prefix=os.path.basename(target) + ".tmp-", dir=os.path.dirname(target)
+            )
+            os.close(descriptor)
+            try:
+                shutil.copy2(actual_source, temporary)
+                if path_exists(target):
+                    backup_path(target, dry_run, stats)
+                os.replace(temporary, target)
+            finally:
+                if path_exists(temporary):
+                    os.remove(temporary)
+        stats.copied += 1
+        return
+
     if not os.path.isdir(actual_source):
         raise RuntimeError(f"link_children source must be a directory: {actual_source}")
     apply_link_children(
@@ -892,7 +929,7 @@ def main() -> int:
         return 1
     print_info(
         "Summary: "
-        f"linked={stats.linked} backed_up={stats.backed_up} removed={stats.removed} "
+        f"linked={stats.linked} copied={stats.copied} backed_up={stats.backed_up} removed={stats.removed} "
         f"skipped={stats.skipped} errors={stats.errors}"
     )
     if dry_run:

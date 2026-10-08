@@ -14,15 +14,19 @@ git diff -- opencode/openchamber/preferences.json
 To restore the snapshot, close OpenChamber (including any background server), run:
 
 ```bash
-opencode/openchamber/sync.sh apply
+bin/dotfiles-apply --apply
 ```
 
-Then reopen OpenChamber. Apply replaces the complete preferences file and saves
-an existing, different file as `preferences.json.backup.*` beside the local file.
-Other local configuration and data are preserved.
+Then reopen OpenChamber. The `openchamber-preferences` mapping uses `copy` mode.
+Identical files are left alone; existing, different files are skipped. To restore
+over local changes, use `bin/dotfiles-apply --apply --force`, which backs up
+conflicting paths as `.bak`, `.bak.1`, etc. This flag affects all mappings;
+preview with `bin/dotfiles-apply --force` first. Other OpenChamber configuration
+and data are preserved.
 
-The default local directory is `~/.config/openchamber`; set
-`OPENCHAMBER_DATA_DIR` to use another instance. The script requires `jq` and
-`realpath`. Both commands copy files rather than link them because OpenChamber
-atomically replaces its preferences file when saving. `dotfiles-apply` excludes
-this directory; run `sync.sh apply` explicitly when restoring a machine.
+The mapping restores to `~/.config/openchamber/preferences.json`. For a custom
+instance, change its target in `dotfiles-map.json` and set `OPENCHAMBER_DATA_DIR`
+when exporting. The export script requires `jq` and `realpath`; its `export`
+argument is optional. Files are copied because OpenChamber atomically replaces
+its preferences file when saving. This directory is excluded from the OpenCode
+configuration links.
