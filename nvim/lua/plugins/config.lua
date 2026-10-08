@@ -12,9 +12,18 @@ return {
 
   {
     "nvim-neo-tree/neo-tree.nvim",
+    keys = {
+      { "<leader>e", "<leader>fE", desc = "Explorer NeoTree (cwd)", remap = true },
+      { "<leader>E", "<leader>fe", desc = "Explorer NeoTree (Root Dir)", remap = true },
+    },
     opts = {
       enable_git_status = false,
       filesystem = {
+        window = {
+          mappings = {
+            ["/"] = "none", -- Use native search over the rendered tree.
+          },
+        },
         filtered_items = {
           visible = true, -- This is what you want: If you set this to `true`, all "hide" just mean "dimmed out"
           hide_dotfiles = false,
