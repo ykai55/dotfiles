@@ -1,102 +1,111 @@
 # OpenCode Serve
 
-## Current time reminders
+## OpenCode V2 plugins
 
-`plugins/current-time.ts` adds a request-local current-time reminder after a tool
-result when more than one minute has elapsed since that session's previous
-reminder. The first completed tool in a plugin process is eligible immediately;
-the one-minute interval starts only when the reminder is actually inserted into
-a model request.
+These plugins target OpenCode **2.0.16**, with matching `@opencode/plugin` and
+`@opencode/client` dependencies. Each plugin is a directory with a `package.json`
+entrypoint and a default `Plugin.define({ id, setup })` export.
 
-The plugin observes `tool.execute.after`, then uses
-`experimental.chat.messages.transform` to append one synthetic text part after
-the matching completed or failed tool part. It does not persist a chat message,
-change the system prompt, or start an extra model request. A later completed tool
-supersedes an unconsumed pending reminder, sessions are throttled independently,
-and deleting a session clears its in-memory state. Both the displayed time and
-the one-minute interval use the system wall clock.
-
-Restart OpenCode to load the plugin. Development checks:
+Install dependencies, then apply the dotfiles mappings from the repository root:
 
 ```bash
 cd ~/dotfiles/opencode
-npm run test:current-time
-npm run typecheck:current-time
+npm install --no-package-lock
+cd ..
+bin/dotfiles-apply --apply
 ```
 
-## Session title maintenance
+The global `plugins/` directory discovers `current-time`, `rename-self`, and
+`chat-notify`. The `plugins` entry in `opencode.json` loads `./provider-loader`.
+OpenCode 2.0.16 requires directory paths for explicitly configured local plugins.
+Configuration-directory changes reload automatically; use `opencode service
+restart` when a changed shared dependency needs a full reload. Inspect loading
+with `opencode plugin list`.
 
-`plugins/rename-self.ts` adds one stable emoji after OpenCode generates a root
-session's first non-placeholder title, provides `rename_session`, and adds a small
-request-local reminder on every third real user message. It does not replace the
-native title agent, start another agent, or generate an extra model request. The
-agent decides whether later titles need changing: summarize related discussions
-under a common category, and only blend a new topic after it has persisted for
-2-3 user turns. No separate skill is needed.
+Some 2.0.16 operations (message history and forms) are available only through the
+HTTP client. `lib/service-client.ts` discovers the authenticated managed service,
+or uses the current `serve --hostname ... --port ...` listener. An embedded server
+or a dynamically assigned port can supply a `serverURL` option on `rename-self`
+and `chat-notify`. Explicit-listener authentication uses
+`OPENCODE_SERVER_USERNAME` (default `opencode`) and `OPENCODE_SERVER_PASSWORD`.
 
-- Initial emoji assignment is event-driven. The plugin must first observe the
-  exact `New session - <ISO timestamp>` placeholder, so existing/custom sessions
-  are not backfilled. When that root session receives its first native title, the
-  plugin preserves the title text verbatim and only adds a selected prefix. The
-  native title may therefore temporarily exceed the later 30-character rule.
-  Child sessions and titles that already start with an emoji are left unchanged.
-  The plugin rereads the title before writing so a queued event cannot overwrite a
-  newer rename; failures log a warning and can retry once when the session idles.
-- Fork sessions are detected on `session.created` through OpenCode's stable
-  `<source title> (fork #N)` format. The plugin removes any inherited leading
-  emoji, allocates a fresh one, and preserves the title body and fork number.
-  Only creation events are eligible, so later manual titles that resemble a fork
-  are not rewritten. A final session read prevents stale events from overwriting
-  a newer title; malformed suffixes and child sessions are ignored.
-- The reminder is appended as a synthetic text part on the triggering user
-  message through `experimental.chat.messages.transform`; it is not a persisted
-  chat message and does not change the system-prompt prefix. This follows
-  OpenCode's own request-local reminder pattern and keeps prior prompt-cache
-  prefixes stable. During a check turn it appears once per model request
-  (including tool continuations and retries), until a rename succeeds, the
-  session becomes idle, or a new real user turn changes eligibility. The hook
-  infers the target session from the message and injects only when that message
-  ID matches the third-turn marker.
-- User message IDs deduplicate turn counting. Synthetic/ignored text, tool steps,
-  compaction markers and empty messages do not count; file-only input does.
-  Counting is restored from stored history on first use after a restart, without
-  writing a sidecar state file. Child sessions do not receive periodic reminders.
+### Current time reminders
+
+`plugins/current-time/index.ts` tracks successful and failed tools through
+`ctx.tool.hook("execute.after")`. The next `context` hook inserts a user-role time
+reminder immediately after the matching tool-result message, preserving tool
+call/result pairs. The reminder affects only that model request.
+
+Each session is throttled independently. The first result is eligible immediately;
+later reminders require more than one minute since the previous insertion. The
+latest completed tool supersedes an unconsumed reminder. Session deletion clears
+the state, and unloading aborts the event subscription. Display and throttling
+both use the system wall clock.
+
+### Session title maintenance
+
+`plugins/rename-self/index.ts` adds a stable emoji to a root session's first native
+title, exposes `rename_session`, and adds a request-local reminder on every third
+real user turn. OpenCode's native title agent continues to generate initial titles.
+
+- Initial naming starts from an observed untitled session. A `session.renamed`
+  event triggers prefix allocation; existing custom titles are not backfilled.
+  A final read avoids overwriting an intervening edit. Native title text is
+  preserved, including text longer than the later 30-character tool limit.
+- Fork naming uses `session.forked` and the structured `Session.Info.fork` field.
+  It replaces an inherited emoji while preserving the title body.
+- Reminders use delivered user-message history with pagination, including turns
+  before compaction. Message IDs deduplicate the count; file-only input counts,
+  while empty, synthetic, and assistant messages do not. The `context` hook appends
+  the reminder to the matching user message only in the outgoing request. Tool
+  continuations retain the reminder until a successful rename dismisses that turn.
 - `rename_session({ name, reason?, emoji? })` accepts a plain title. `reason` is
-  `refinement` (default), `topic_shift`, or `manual`; `emoji` defaults to false.
-  A rename made while the current title is still OpenCode's default placeholder
-  always adds a plugin-selected prefix, including `refinement` with `emoji=false`.
-  `topic_shift` also always adds a prefix. Existing emoji prefixes are retained
-  on every rename, including manual renames.
-- First/explicit assignment randomly excludes prefixes in the 50 most recently
-  updated other root sessions in the current project directory. The 96-symbol pool
-  falls back to its least-recently-used symbol when exhausted. Writes are
-  serialized within one plugin instance; separate OpenCode processes may still
-  race.
-- The final title is limited to 30 Unicode grapheme clusters, including emoji,
-  space and punctuation (28 for the plain title with a prefix). Overlong input is
-  rejected for the agent to shorten, never silently truncated. Identical titles
-  do not produce writes. Read failures skip reminders with a warning; rename
-  failures return an error.
+  `refinement`, `topic_shift`, or `manual`. Initial names, `topic_shift`, and
+  `emoji=true` receive a prefix; existing prefixes are preserved. The final title
+  must fit 30 grapheme clusters, including the emoji and space. Overlong input is
+  rejected rather than truncated, and identical titles do not produce writes.
+- Prefix allocation excludes emojis from the 50 most recently updated other root
+  sessions in the same directory. The 96-symbol pool falls back to the
+  least-recently-used emoji. Writes are serialized within each plugin instance.
+- Child sessions do not receive automatic naming or periodic reminders. Related
+  topics should be summarized together; sustained topic shifts should be blended
+  after 2-3 real user turns. These semantic decisions remain the agent's responsibility.
 
-Requires the messages-transform hook in the declared `@opencode-ai/plugin@1.2.27`
-API and a compatible OpenCode runtime. Restart OpenCode to reload the plugin.
-The semantics and 2-3-turn topic stability remain agent decisions, not a keyword
-classifier or a guarantee of renaming. Existing `rename_session({ name })` calls
-remain supported for plain titles.
+### Chat notifications
 
-Development checks (Node.js 22.18+ or 24+, independent of the Bun plugin runtime):
+`plugins/chat-notify/index.ts` reads the ignored `plugins/chat-notify.conf`; the
+example file documents connection settings. Existing Lark and Telegram SQLite
+state files retain their paths and tables.
+
+The dispatcher consumes V2 `session.*`, `permission.*`, and `form.*` events. It
+filters notifications to root sessions in the plugin's location. Channel replies
+submit V2 prompts with `delivery: "steer"`; permission buttons submit the selected
+decision. Questions use session forms: single-choice replies accept option labels
+or values, multi-select accepts a JSON array, and multi-field forms accept a JSON
+object keyed by field name. The notification includes these field names.
+
+Unload cancels event subscriptions, polls, delayed permission notifications and
+stream updates, releases poll locks, and closes SQLite connections. Lark WebSocket
+connections are shared by app ID and closed when their last plugin instance unloads.
+
+### Verification
+
+The project-local Bun development dependency runs tests, including `bun:sqlite`.
 
 ```bash
 cd ~/dotfiles/opencode
-npm install --ignore-scripts --no-package-lock
-npm run test:rename-self
-npm run typecheck:rename-self
-# Run one test by name:
-node --experimental-default-type=module --test --test-name-pattern="topic shifts" tests/rename-self.test.mjs
+npm test
+npm run typecheck
+npm run test:smoke
+npm run test:smoke -- --explicit
 ```
 
-Tests exercise exported hooks and the real SDK client with a fake HTTP transport;
-no real sessions are renamed and no provider credentials are used.
+Unit tests use the released HTTP client with a fake transport and mock channel
+requests. Smoke tests start an isolated OpenCode 2.0.16 service and a local fake
+model, verify all four plugins load, exercise three user turns and a rename tool
+call, check both reminders, and reload the plugins. The explicit mode also tests
+an authenticated `serve` listener. Notification channels are disabled in smoke
+tests; their outbound APIs are covered by the simulated channel tests.
 
 For standalone provider configuration generation from an OpenAI-compatible API,
 see [OpenCode provider generator](provider-gen.md).

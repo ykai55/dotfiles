@@ -110,9 +110,11 @@ class ProviderCliTests(unittest.TestCase):
     def make_config_dir(self, directory, plugins=None):
         config_dir = pathlib.Path(directory)
         (config_dir / "opencode.json").write_text(json.dumps({
-            "$schema": "https://opencode.ai/config.json", "plugin": [] if plugins is None else plugins,
+            "$schema": "https://opencode.ai/config.json", "plugins": [] if plugins is None else plugins,
         }, indent=2) + "\n")
-        (config_dir / "provider-loader.ts").write_text("export default async () => ({})\n")
+        (config_dir / "provider-loader").mkdir(exist_ok=True)
+        (config_dir / "provider-loader/index.ts").write_text("export default { id: 'provider-loader', setup() {} }\n")
+        (config_dir / "provider-loader/package.json").write_text('{"exports": {".": "./index.ts"}}\n')
         return config_dir
 
     def test_default_installs_all_models_and_registers_loader(self):
@@ -122,7 +124,7 @@ class ProviderCliTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout, "")
             config = json.loads((config_dir / "opencode.json").read_text())
-            self.assertEqual(config["plugin"], ["./provider-loader.ts"])
+            self.assertEqual(config["plugins"], ["./provider-loader"])
             generated = (config_dir / "providers/fixture.json").read_text()
             self.assertEqual(json.loads(generated), {
                 "$schema": "https://opencode.ai/config.json",
@@ -141,7 +143,7 @@ class ProviderCliTests(unittest.TestCase):
 
     def test_install_updates_owned_provider_and_does_not_duplicate_loader(self):
         with tempfile.TemporaryDirectory() as directory:
-            config_dir = self.make_config_dir(directory, ["existing", "./provider-loader.ts"])
+            config_dir = self.make_config_dir(directory, ["existing", "./provider-loader"])
             provider_dir = config_dir / "providers"
             provider_dir.mkdir()
             target = provider_dir / "fixture.json"
@@ -149,8 +151,8 @@ class ProviderCliTests(unittest.TestCase):
             result = self.run_cli("--models", "new-model", "--config-dir", str(config_dir), env={})
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(list(json.loads(target.read_text())["provider"]["fixture"]["models"]), ["new-model"])
-            self.assertEqual(json.loads((config_dir / "opencode.json").read_text())["plugin"], [
-                "existing", "./provider-loader.ts",
+            self.assertEqual(json.loads((config_dir / "opencode.json").read_text())["plugins"], [
+                "existing", "./provider-loader",
             ])
 
     def test_install_rejects_foreign_or_invalid_existing_provider(self):
@@ -175,7 +177,9 @@ class ProviderCliTests(unittest.TestCase):
             self.assertEqual(result.returncode, 1)
             self.assertIn("loader not found", result.stderr)
             self.assertFalse((config_dir / "providers").exists())
-            (config_dir / "provider-loader.ts").write_text("loader")
+            (config_dir / "provider-loader").mkdir()
+            (config_dir / "provider-loader/index.ts").write_text("loader")
+            (config_dir / "provider-loader/package.json").write_text('{}')
             result = self.run_cli("--models", "a", "--config-dir", str(config_dir), env={})
             self.assertEqual(result.returncode, 1)
             self.assertIn("config not found", result.stderr)
@@ -288,7 +292,7 @@ class ProviderCliTests(unittest.TestCase):
                     self.assertEqual(result.returncode, 1)
                     self.assertIn(message, result.stderr)
                     self.assertFalse((config_dir / "providers/fixture.json").exists())
-                    self.assertEqual(json.loads((config_dir / "opencode.json").read_text())["plugin"], [])
+                    self.assertEqual(json.loads((config_dir / "opencode.json").read_text())["plugins"], [])
         self.env["OPENAI_BASE_URL"] = self.base + "/slow"
         result = self.run_cli("--timeout", "0.01", "--stdout")
         self.assertEqual(result.returncode, 1)

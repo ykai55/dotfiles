@@ -118,7 +118,7 @@ const inputPaths = (input: unknown) =>
   ].filter((item): item is string => typeof item === "string" && item.trim().length > 0)
 
 const patchPaths = (input: unknown) => {
-  const patch = prop(input, "patch")
+  const patch = prop(input, "patchText")
   if (typeof patch !== "string") return []
   return Array.from(patch.matchAll(/^\*\*\* (?:Add File|Update File|Delete File): (.+)$/gm), (match) => match[1])
 }
@@ -168,6 +168,11 @@ export class NotificationComposer {
     return this.stats(sessionID).muted
   }
 
+  delete(sessionID: string) {
+    this.activeSessions.delete(sessionID)
+    this.statsBySession.delete(sessionID)
+  }
+
   mute(sessionID: string) {
     this.stats(sessionID).muted = true
   }
@@ -185,7 +190,6 @@ export class NotificationComposer {
       this.mute(sessionID)
       return
     }
-    this.trackContext(sessionID, info)
     if (contextLimit !== undefined) this.stats(sessionID).contextLimit = contextLimit
     const title = textOption(prop(info, "title"))
     if (title) this.stats(sessionID).sessionTitle = title
@@ -198,6 +202,10 @@ export class NotificationComposer {
 
   stepEnded(sessionID: string, properties: unknown) {
     this.trackContext(sessionID, properties)
+    for (const file of stringList(prop(properties, "files"))) {
+      this.stats(sessionID).changedFiles.add(file)
+      this.stats(sessionID).writtenFiles.add(file)
+    }
   }
 
   compactionStarted(sessionID: string) {
@@ -381,7 +389,7 @@ export class NotificationComposer {
       for (const file of paths) current.readFiles.add(file)
       return { sessionID, kind: "tool", content: title } satisfies ProgressNotice
     }
-    if (["write", "edit", "apply_patch"].includes(tool)) {
+    if (["write", "edit", "patch"].includes(tool)) {
       for (const file of paths) {
         current.writtenFiles.add(file)
         current.changedFiles.add(file)

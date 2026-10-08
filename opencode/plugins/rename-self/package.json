@@ -1,0 +1,6 @@
+{
+  "name": "dotfiles-rename-self",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./index.ts" }
+}

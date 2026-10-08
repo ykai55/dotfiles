@@ -30,13 +30,16 @@ The command performs three steps:
 2. Creates or updates `opencode/providers/my-api.json` with all returned model
    IDs and fixed `{env:OPENAI_BASE_URL}` / `{env:OPENAI_API_KEY}` references,
    never their resolved values.
-3. Ensures `opencode/opencode.json` contains `"./provider-loader.ts"` in its
-   `plugin` array.
+3. Ensures `opencode/opencode.json` contains `"./provider-loader"` in its
+   `plugins` array.
 
-`opencode/provider-loader.ts` loads the same `.env` file, resolves the fixed
-references, and merges every sorted `providers/*.json` entry into
-`config.provider`. After generation, restart OpenCode; no `OPENCODE_CONFIG`
-wrapper or exported provider variables are required.
+`opencode/provider-loader/index.ts` loads the same `.env` file, resolves the
+fixed references, and registers the providers and models from sorted
+`providers/*.json` files through the V2 provider transform. The generated files
+use `provider/npm/options/models`; the loader converts these to V2 domain
+definitions with an `aisdk:` package. Reload the location after generation, or
+restart the OpenCode service. The loader accepts `providersDirectory` and
+`envFile` plugin options for installations with custom paths.
 
 Use a unique `--name` rather than a built-in provider ID such as `openai`. The
 name is both the provider ID and UI label. It must contain only letters, digits,

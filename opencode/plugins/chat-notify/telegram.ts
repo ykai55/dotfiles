@@ -2,7 +2,10 @@ import { Database } from "bun:sqlite"
 import { mkdirSync } from "node:fs"
 import { dirname } from "node:path"
 import { fileURLToPath } from "node:url"
-import type { Plugin } from "@opencode-ai/plugin"
+import type { Plugin } from "@opencode/plugin"
+import { setTimeout as delay } from "node:timers/promises"
+import { serviceClient } from "../../lib/service-client"
+import { answerForm } from "../../lib/form-reply"
 import { NotificationComposer, type CompactionNotice, type DoneNotice, type SessionNotice } from "./composer"
 import { createDispatcher } from "./dispatcher"
 
@@ -291,7 +294,11 @@ const estimateTextTokens = (value: unknown) =>
 
 let warnedMissingConfig = false
 
-export default (async (input, options) => {
+export default async function telegram(ctx: Plugin.Context, options?: Record<string, unknown>) {
+  const input = ctx.location
+  const controller = new AbortController()
+  const signal = controller.signal
+  const fetch = (url: Parameters<typeof globalThis.fetch>[0], init?: RequestInit) => globalThis.fetch(url, { ...init, signal })
   const config = await readPluginConfig()
   const token = textOption(options?.token, env(config, "TELEGRAM_BOT_TOKEN"))
   const chatID = textOption(options?.chatID, env(config, "TELEGRAM_CHAT_ID"))
@@ -473,36 +480,13 @@ export default (async (input, options) => {
   const statsBySession = new Map<string, SessionStats>()
   const telegramUpdateIDs = new Set<number>()
   const pollOwner = `${input.project.id}:${input.directory}:${Math.random().toString(36).slice(2)}`
-  let providerListPromise: Promise<unknown[] | undefined> | undefined
-
-  function providerList() {
-    providerListPromise ??= input.client.config
-      .providers({ directory: input.directory })
-      .then((response) => {
-        const providers = prop(prop(response, "data"), "providers")
-        if (Array.isArray(providers)) return providers
-      })
-      .catch((error) => {
-        console.warn("telegram-notify plugin: failed to load providers", error instanceof Error ? error.message : error)
-        return undefined
-      })
-    return providerListPromise
-  }
-
   async function modelContextLimit(model: unknown) {
     const direct = contextLimitFrom(model)
     if (direct !== undefined) return direct
     const ref = modelRef(model)
     if (!ref) return
-    const provider = (await providerList())?.find((item) => prop(item, "id") === ref.providerID)
-    const models = prop(provider, "models")
-    if (!record(models)) return
-    const found =
-      prop(models, ref.modelID) ??
-      Object.values(models).find(
-        (item) => prop(item, "id") === ref.modelID || prop(prop(item, "api"), "id") === ref.modelID,
-      )
-    return contextLimitFrom(found)
+    const models = await ctx.model.list()
+    return models.data.find((item) => item.providerID === ref.providerID && item.id === ref.modelID)?.limit.context
   }
 
   function estimateContextTokens(messages: unknown) {
@@ -530,12 +514,8 @@ export default (async (input, options) => {
   }
 
   async function activeContextTokens(sessionID: string) {
-    const session = prop(prop(input.client, "v2"), "session")
-    const context = prop(session, "context")
-    if (typeof context !== "function") return undefined
-    return context
-      .call(session, { sessionID, directory: input.directory })
-      .then((response) => estimateContextTokens(prop(response, "data")))
+    return ctx.session.context({ sessionID })
+      .then(estimateContextTokens)
       .catch((error) => {
         console.warn(
           "telegram-notify plugin: failed to load active context",
@@ -735,46 +715,19 @@ export default (async (input, options) => {
   }
 
   async function replyPermission(row: PermissionLookupRow, reply: "once" | "always" | "reject") {
-    const permission = prop(input.client, "permission")
-    const replyFn = prop(permission, "reply")
-    if (typeof replyFn === "function") {
-      const result = await replyFn.call(permission, {
-        requestID: row.request_id,
-        reply,
-        directory: row.directory ?? input.directory,
-      })
-      return !prop(result, "error")
-    }
-
-    const result = await input.client.postSessionIdPermissionsPermissionId({
-      path: { id: row.session_id, permissionID: row.request_id },
-      query: { directory: row.directory ?? input.directory },
-      body: { response: reply },
-    })
-    return !prop(result, "error")
+    await ctx.permission.reply({ sessionID: row.session_id, requestID: row.request_id, decision: reply })
+    return true
   }
 
   async function replyQuestion(row: QuestionLookupRow, answer: string) {
-    const question = prop(input.client, "question")
-    const replyFn = prop(question, "reply")
-    if (typeof replyFn !== "function") return false
-    const result = await replyFn.call(question, {
-      requestID: row.request_id,
-      answers: [[answer]],
-      directory: row.directory ?? input.directory,
-    })
-    return !prop(result, "error")
+    await answerForm(row.session_id, row.request_id, answer, signal, ctx.options)
+    return true
   }
 
   async function rejectQuestion(row: QuestionLookupRow) {
-    const question = prop(input.client, "question")
-    const rejectFn = prop(question, "reject")
-    if (typeof rejectFn !== "function") return false
-    const result = await rejectFn.call(question, {
-      requestID: row.request_id,
-      directory: row.directory ?? input.directory,
-    })
-    return !prop(result, "error")
+    const client = await serviceClient(ctx.options)
+    await client.session.form.cancel({ sessionID: row.session_id, formID: row.request_id }, { signal })
+    return true
   }
 
   async function restoreProcessing(row: PermissionLookupRow) {
@@ -961,13 +914,10 @@ export default (async (input, options) => {
       return
     }
 
-    const result = await input.client.session.promptAsync({
-      path: { id: target.sessionID },
-      query: { directory: target.directory },
-      body: { parts: [{ type: "text", text }] },
-    })
-    if (prop(result, "error")) {
-      console.warn("telegram-notify plugin: failed to forward Telegram message", prop(result, "error"))
+    try {
+      await ctx.session.prompt({ sessionID: target.sessionID, text, delivery: "steer" })
+    } catch (error) {
+      console.warn("telegram-notify plugin: failed to forward Telegram message", error)
       await send(html("failed to forward this message to opencode"), {
         threadID: numberOption(prop(message, "message_thread_id")),
       })
@@ -980,10 +930,10 @@ export default (async (input, options) => {
     if (!token || !chatID) return
     let offset = 0
     let initialized = false
-    while (true) {
+    while (!signal.aborted) {
       try {
         if (acquirePollLock().count !== 1) {
-          await new Promise((resolve) => setTimeout(resolve, 5000))
+          await delay(5000, undefined, { signal })
           continue
         }
         if (!initialized) {
@@ -997,13 +947,14 @@ export default (async (input, options) => {
           await handleTelegramUpdate(update)
         }
       } catch (error) {
+        if (signal.aborted) return
         console.warn(
           "telegram-notify plugin: Telegram input polling failed",
           error instanceof Error ? error.message : error,
         )
         releasePollLock.run(pollOwner)
         initialized = false
-        await new Promise((resolve) => setTimeout(resolve, 3000))
+        await delay(3000, undefined, { signal }).catch(() => undefined)
       }
     }
   }
@@ -1124,10 +1075,11 @@ export default (async (input, options) => {
     return { replyTo: await rootMessage(sessionID) }
   }
 
-  void pollTelegram()
+  const polling = pollTelegram()
 
-  return createDispatcher({
-    plugin: input,
+  const dispatcher = createDispatcher({
+    ctx,
+    signal,
     composer: new NotificationComposer({ directory: input.directory, maxOutputChars }),
     notifyDone,
     notifyPermission,
@@ -1230,4 +1182,15 @@ export default (async (input, options) => {
       },
     },
   })
-}) satisfies Plugin
+  return {
+    event: dispatcher.event,
+    async dispose() {
+      controller.abort()
+      await dispatcher.dispose()
+      await polling
+      await Promise.allSettled([...statsBySession.values()].flatMap((state) => [state.rootMessagePromise, state.statusMessagePromise, state.threadPromise].filter(Boolean)))
+      releasePollLock.run(pollOwner)
+      db.close()
+    },
+  }
+}

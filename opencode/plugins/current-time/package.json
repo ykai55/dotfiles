@@ -1,0 +1,6 @@
+{
+  "name": "dotfiles-current-time",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./index.ts" }
+}

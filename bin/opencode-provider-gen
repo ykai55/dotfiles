@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional
 
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 RESERVED_KEYS = {"__proto__", "constructor", "prototype"}
-LOADER_SPEC = "./provider-loader.ts"
+LOADER_SPEC = "./provider-loader"
 DEFAULT_CONFIG_DIR = pathlib.Path(__file__).resolve().parents[1] / "opencode"
 HOST_ENV = "OPENAI_BASE_URL"
 TOKEN_ENV = "OPENAI_API_KEY"
@@ -280,16 +280,16 @@ def ensure_loader_registered(config_path: pathlib.Path) -> bool:
         text = config_path.read_text(encoding="utf-8")
     except FileNotFoundError:
         raise RuntimeError(f"OpenCode config not found: {config_path}") from None
-    matches = list(re.finditer(r'(?ms)^(?P<indent>\s*)"plugin"\s*:\s*(?P<array>\[[^\]]*\])', text))
+    matches = list(re.finditer(r'(?ms)^(?P<indent>\s*)"plugins"\s*:\s*(?P<array>\[[^\]]*\])', text))
     if len(matches) != 1:
-        raise RuntimeError("opencode.json must contain exactly one simple top-level plugin array")
+        raise RuntimeError("opencode.json must contain exactly one simple top-level plugins array")
     match = matches[0]
     try:
         plugins = json.loads(match.group("array"))
     except ValueError:
-        raise RuntimeError("the opencode.json plugin array must be strict JSON without comments") from None
+        raise RuntimeError("the opencode.json plugins array must be strict JSON without comments") from None
     if not isinstance(plugins, list) or any(not isinstance(item, str) for item in plugins):
-        raise RuntimeError("the opencode.json plugin field must be an array of strings")
+        raise RuntimeError("the opencode.json plugins field must be an array of strings")
     if LOADER_SPEC in plugins:
         return False
     plugins.append(LOADER_SPEC)
@@ -317,7 +317,7 @@ def install_config(config: Dict[str, Any], args: argparse.Namespace) -> pathlib.
     config_dir = args.config_dir.resolve()
     config_path = config_dir / "opencode.json"
     loader_path = config_dir / LOADER_SPEC.removeprefix("./")
-    if not loader_path.is_file():
+    if not (loader_path / "index.ts").is_file() or not (loader_path / "package.json").is_file():
         raise RuntimeError(f"provider loader not found: {loader_path}")
     output = config_dir / "providers" / f"{args.name}.json"
     validate_existing_provider(output, args.name)
@@ -329,7 +329,7 @@ def install_config(config: Dict[str, Any], args: argparse.Namespace) -> pathlib.
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description="Generate and install an OpenCode provider without embedding host/token values.",
-        epilog="Default: update opencode/providers/<name>.json and register provider-loader.ts. "
+        epilog="Default: update opencode/providers/<name>.json and register ./provider-loader. "
         "Use --stdout or -o for export-only mode. Chat Completions APIs only.",
     )
     parser.add_argument("--name", required=True, type=provider_id, help="unique provider ID and display name")

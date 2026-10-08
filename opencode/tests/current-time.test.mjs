@@ -1,128 +1,59 @@
-import assert from "node:assert/strict"
-import { test } from "node:test"
-import currentTime from "../plugins/current-time.ts"
+import { afterEach, expect, spyOn, test } from "bun:test"
+import currentTime from "../plugins/current-time/index.ts"
+import { fixture } from "./fixture.mjs"
 
-async function fixture() {
-  const plugin = await currentTime({})
-  const messages = []
-  const addTool = (sessionID, callID, status = "completed") => {
-    const message = {
-      info: { id: `assistant-${callID}`, sessionID, role: "assistant", time: { created: 1 } },
-      parts: [{
-        id: `part-${callID}`, messageID: `assistant-${callID}`, sessionID, type: "tool", tool: "bash", callID,
-        state: status === "completed"
-          ? { status, input: {}, output: "done", title: "bash", metadata: {}, time: { start: 1, end: 2 } }
-          : { status, input: {}, error: "failed", time: { start: 1, end: 2 } },
-      }],
-    }
-    messages.push(message)
-    return message
-  }
-  return {
-    plugin,
-    messages,
-    addTool,
-    async finish(sessionID, callID) {
-      await plugin["tool.execute.after"]({ tool: "bash", sessionID, callID, args: {} }, {
-        title: "bash", output: "done", metadata: {},
-      })
-    },
-    async transform() {
-      const cloned = structuredClone(messages)
-      await plugin["experimental.chat.messages.transform"]({}, { messages: cloned })
-      return cloned
-    },
-  }
-}
+let f
+let clock
+afterEach(async () => { await f?.close(); clock?.mockRestore() })
+const messages = (id) => [{ role: "tool", content: [{ type: "tool-result", id, name: "shell", result: { type: "text", value: "done" } }] }]
+const reminders = (event) => event.messages.flatMap((message) => message.content).filter((part) => part.text?.includes('source="current-time"'))
 
-const reminders = (messages) => messages.flatMap(({ parts }) => parts)
-  .filter((part) => part.type === "text" && part.synthetic && part.text.includes('source="current-time"'))
-
-test("injects one request-local time reminder after the completed tool", async () => {
-  const f = await fixture()
-  const message = f.addTool("main", "call-1")
-  await f.finish("main", "call-1")
-  const transformed = await f.transform()
-  const injected = reminders(transformed)
-  assert.equal(injected.length, 1)
-  assert.equal(transformed[0].parts.at(-1), injected[0])
-  assert.equal(injected[0].messageID, message.info.id)
-  assert.match(injected[0].text, /Current local time:/)
-  assert.equal(reminders(f.messages).length, 0)
-  assert.equal(reminders(await f.transform()).length, 0)
+test("time reminder follows a matching result without persisting or changing the system prompt", async () => {
+  f = fixture()
+  f.cleanup = await currentTime.setup(f.ctx)
+  const original = messages("call_1")
+  await f.hooks.get("execute.after")({ sessionID: "ses_main", id: "call_1", status: "completed" })
+  const event = await f.context("ses_main", original)
+  expect(reminders(event)).toHaveLength(1)
+  expect(event.messages[0]).toEqual(original[0])
+  expect(event.messages[1].role).toBe("user")
+  expect(original).toHaveLength(1)
+  expect(event.system).toEqual([])
+  expect(reminders(await f.context("ses_main", original))).toHaveLength(0)
 })
 
-test("starts the one-minute interval when a reminder is actually inserted", async (t) => {
-  let wall = Date.UTC(2026, 8, 21, 6, 32, 18)
-  t.mock.method(Date, "now", () => wall)
-  const f = await fixture()
-
-  f.addTool("main", "call-1")
-  await f.finish("main", "call-1")
-  wall += 120_000
-  const first = reminders(await f.transform())
-  assert.equal(first.length, 1)
-  assert.match(first[0].text, /2026/)
-
-  f.addTool("main", "call-2")
-  wall += 59_999
-  await f.finish("main", "call-2")
-  assert.equal(reminders(await f.transform()).length, 0)
-
-  f.addTool("main", "call-3")
-  wall += 2
-  await f.finish("main", "call-3")
-  assert.equal(reminders(await f.transform()).length, 1)
+test("time throttling starts on consumption, is per session, and resets on deletion", async () => {
+  let now = 100000
+  clock = spyOn(Date, "now").mockImplementation(() => now)
+  f = fixture()
+  f.cleanup = await currentTime.setup(f.ctx)
+  const finish = (id, sessionID = "ses_main") => f.hooks.get("execute.after")({ sessionID, id })
+  await finish("old")
+  now += 120000
+  expect(reminders(await f.context("ses_main", messages("unrelated")))).toHaveLength(0)
+  await finish("new")
+  expect(reminders(await f.context("ses_main", messages("old")))).toHaveLength(0)
+  expect(reminders(await f.context("ses_main", messages("new")))).toHaveLength(1)
+  now += 60000
+  await finish("next")
+  expect(reminders(await f.context("ses_main", messages("next")))).toHaveLength(0)
+  await finish("child", "ses_child")
+  expect(reminders(await f.context("ses_child", messages("child")))).toHaveLength(1)
+  now += 1
+  await finish("next")
+  expect(reminders(await f.context("ses_main", messages("next")))).toHaveLength(1)
+  await f.emit("session.deleted", { sessionID: "ses_main" })
+  await finish("reset")
+  expect(reminders(await f.context("ses_main", messages("reset")))).toHaveLength(1)
 })
 
-test("tracks sessions independently and accepts failed tool results", async (t) => {
-  let wall = 10
-  t.mock.method(Date, "now", () => wall)
-  const f = await fixture()
-  f.addTool("one", "one-1")
-  f.addTool("two", "two-1", "error")
-  await f.finish("one", "one-1")
-  await f.finish("two", "two-1")
-  const first = reminders(await f.transform())
-  assert.deepEqual(new Set(first.map((part) => part.sessionID)), new Set(["one", "two"]))
-
-  wall += 1_000
-  f.addTool("one", "one-2")
-  f.addTool("three", "three-1")
-  await f.finish("one", "one-2")
-  await f.finish("three", "three-1")
-  const second = reminders(await f.transform())
-  assert.deepEqual(second.map((part) => part.sessionID), ["three"])
-})
-
-test("waits for the matching completed tool and uses the latest completion", async () => {
-  const f = await fixture()
-  const old = f.addTool("main", "call-old")
-  const latest = f.addTool("main", "call-latest", "running")
-  await f.finish("main", "call-old")
-  await f.finish("main", "call-latest")
-  assert.equal(reminders(await f.transform()).length, 0)
-  latest.parts[0].state = { status: "completed", input: {}, output: "done", title: "bash", metadata: {}, time: { start: 1, end: 2 } }
-  const transformed = await f.transform()
-  assert.equal(reminders(transformed).length, 1)
-  assert.equal(reminders(transformed)[0].messageID, latest.info.id)
-  assert.equal(reminders(transformed)[0].messageID === old.info.id, false)
-})
-
-test("deletion clears throttle and pending state", async (t) => {
-  let wall = 100
-  t.mock.method(Date, "now", () => wall)
-  const f = await fixture()
-  f.addTool("main", "call-1")
-  await f.finish("main", "call-1")
-  assert.equal(reminders(await f.transform()).length, 1)
-
-  f.addTool("main", "call-2")
-  await f.finish("main", "call-2")
-  await f.plugin.event({ event: { type: "session.deleted", properties: { info: { id: "main" } } } })
-  assert.equal(reminders(await f.transform()).length, 0)
-
-  f.addTool("main", "call-3")
-  await f.finish("main", "call-3")
-  assert.equal(reminders(await f.transform()).length, 1)
+test("failed tool results are eligible and unloading stops the subscription", async () => {
+  f = fixture()
+  f.cleanup = await currentTime.setup(f.ctx)
+  await f.hooks.get("execute.after")({ sessionID: "ses_main", id: "failed", status: "error" })
+  const input = messages("failed")
+  input[0].content[0].result = { type: "error", value: "failed" }
+  expect(reminders(await f.context("ses_main", input))).toHaveLength(1)
+  await f.cleanup()
+  expect(f.subscriptions.size).toBe(0)
 })

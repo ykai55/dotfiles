@@ -2,18 +2,17 @@ import { readdir, readFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { dirname, extname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
-import type { Config } from "@opencode-ai/sdk"
-import type { Plugin } from "@opencode-ai/plugin"
+import { Model, Plugin, Provider } from "@opencode/plugin"
 
-const providersDirectory = join(dirname(fileURLToPath(import.meta.url)), "providers")
-const envFile = join(homedir(), ".config", "opencode", ".env")
+const defaultProvidersDirectory = join(dirname(fileURLToPath(import.meta.url)), "..", "providers")
+const defaultEnvFile = join(homedir(), ".config", "opencode", ".env")
 const fixedEnvironmentNames = new Set(["OPENAI_BASE_URL", "OPENAI_API_KEY"])
 const reservedNames = new Set(["__proto__", "constructor", "prototype"])
 
 const object = (value: unknown): value is Record<string, unknown> =>
   !!value && typeof value === "object" && !Array.isArray(value)
 
-const parseEnvValue = (rawValue: string, lineNumber: number) => {
+const parseEnvValue = (rawValue: string, lineNumber: number, envFile: string) => {
   let value = rawValue.trim()
   if (!value) return ""
   if (value[0] === "'" || value[0] === '"') {
@@ -48,7 +47,7 @@ const parseEnvValue = (rawValue: string, lineNumber: number) => {
   return value
 }
 
-const parseEnv = (text: string) => {
+const parseEnv = (text: string, envFile: string) => {
   const values: Record<string, string> = Object.create(null)
   for (const [index, rawLine] of text.split(/\r?\n/).entries()) {
     let line = rawLine.trim()
@@ -61,15 +60,15 @@ const parseEnv = (text: string) => {
       throw new Error(`${envFile}:${index + 1}: invalid environment variable name`)
     }
     if (!fixedEnvironmentNames.has(name)) continue
-    values[name] = parseEnvValue(line.slice(separator + 1), index + 1)
+    values[name] = parseEnvValue(line.slice(separator + 1), index + 1, envFile)
   }
   return values
 }
 
-const loadEnvironment = async () => {
+const loadEnvironment = async (envFile: string) => {
   let fileValues: Record<string, string> = Object.create(null)
   try {
-    fileValues = parseEnv(await readFile(envFile, "utf8"))
+    fileValues = parseEnv(await readFile(envFile, "utf8"), envFile)
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
   }
@@ -107,9 +106,12 @@ const validateFile = (value: unknown, filename: string, environment: Record<stri
   return [name, substitute(provider, environment)] as const
 }
 
-export default (async () => ({
-  async config(config: Config) {
-    const environment = await loadEnvironment()
+export default Plugin.define({
+  id: "provider-loader",
+  async setup(ctx) {
+    const providersDirectory = typeof ctx.options.providersDirectory === "string" ? resolve(ctx.options.providersDirectory) : defaultProvidersDirectory
+    const envFile = typeof ctx.options.envFile === "string" ? resolve(ctx.options.envFile) : defaultEnvFile
+    const environment = await loadEnvironment(envFile)
     let files: string[]
     try {
       files = (await readdir(providersDirectory)).filter((file) => extname(file) === ".json").sort()
@@ -126,6 +128,25 @@ export default (async () => ({
       if (Object.hasOwn(loaded, name)) throw new Error(`duplicate provider: ${name}`)
       loaded[name] = provider
     }
-    config.provider = { ...(config.provider ?? {}), ...loaded } as Config["provider"]
+    const providers = Object.entries(loaded).map(([name, value]) => {
+      const provider = value as { npm: string; name?: string; options: Record<string, unknown>; models: Record<string, { name?: string }> }
+      const providerID = Provider.ID.make(name)
+      return {
+        info: {
+          ...Provider.Info.empty(providerID),
+          name: provider.name ?? name,
+          activation: "enabled" as const,
+          package: `aisdk:${provider.npm}`,
+          settings: provider.options,
+        },
+        models: Object.entries(provider.models).map(([id, model]) => ({
+          ...Model.Info.default(providerID, Model.ID.make(id)),
+          name: model.name ?? id,
+        })),
+      }
+    })
+    await ctx.provider.transform((editor) => {
+      for (const provider of providers) editor.add(provider)
+    })
   },
-})) satisfies Plugin
+})

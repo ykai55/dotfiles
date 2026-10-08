@@ -2,7 +2,10 @@ import { Database } from "bun:sqlite"
 import { mkdirSync } from "node:fs"
 import { dirname } from "node:path"
 import { fileURLToPath } from "node:url"
-import type { Plugin } from "@opencode-ai/plugin"
+import type { Plugin } from "@opencode/plugin"
+import { setTimeout as delay } from "node:timers/promises"
+import { serviceClient } from "../../lib/service-client"
+import { answerForm } from "../../lib/form-reply"
 import {
   NotificationComposer,
   contextLimitFrom,
@@ -90,17 +93,20 @@ type CardActionStore = {
 
 const cardActionRoutes = new Map<string, CardActionRoute>()
 const cardActionStores = new Set<CardActionStore>()
-const cardActionClients = new Map<string, Promise<void>>()
-const cardActionProcessorPaths = new Set<string>()
-const cardActionOwner = `${process.pid}:${crypto.randomUUID()}`
+const cardActionClients = new Map<string, { users: number; close?: () => void; start?: Promise<void> }>()
 
 const callbackToast = (type: "success" | "warning" | "error", content: string) => ({
   toast: { type, content },
 })
 
 function startCardActionClient(appID: string, appSecret: string) {
-  if (cardActionClients.has(appID)) return
-  const start = (async () => {
+  let connection = cardActionClients.get(appID)
+  if (connection) connection.users += 1
+  else {
+  connection = { users: 1 }
+  const owned = connection
+  cardActionClients.set(appID, owned)
+  owned.start = (async () => {
     const packageName = "@larksuiteoapi/node-sdk"
     const lark = await import(packageName)
     const eventDispatcher = new lark.EventDispatcher({}).register({
@@ -137,15 +143,26 @@ function startCardActionClient(appID: string, appSecret: string) {
       appSecret,
       loggerLevel: lark.LoggerLevel.warn,
     })
+    owned.close = () => wsClient.close({ force: true })
+    if (owned.users === 0) return
     await wsClient.start({ eventDispatcher })
+    if (owned.users === 0) owned.close()
   })().catch((error) => {
-    cardActionClients.delete(appID)
     console.warn(
       "lark-notify plugin: card action connection failed",
       error instanceof Error ? error.message : error,
     )
   })
-  cardActionClients.set(appID, start)
+  }
+  const owned = connection
+  return async () => {
+    owned.users -= 1
+    if (owned.users !== 0) return
+    cardActionClients.delete(appID)
+    owned.close?.()
+    await owned.start
+    owned.close?.()
+  }
 }
 
 const truncateEnd = (value: string, limit: number) => {
@@ -505,7 +522,12 @@ const larkMessageText = (message: unknown) => {
 let warnedMissingCredentials = false
 let warnedMissingChatID = false
 
-export default (async (input, options) => {
+export default async function lark(ctx: Plugin.Context, options?: Record<string, unknown>) {
+  const input = ctx.location
+  const controller = new AbortController()
+  const signal = controller.signal
+  const fetch = (url: Parameters<typeof globalThis.fetch>[0], init?: RequestInit) => globalThis.fetch(url, { ...init, signal })
+  const cardActionOwner = `${process.pid}:${crypto.randomUUID()}`
   const config = await readPluginConfig()
   const appID = textOption(options?.appID, conf(config, "LARK_APP_ID"))
   const appSecret = textOption(options?.appSecret, conf(config, "LARK_APP_SECRET"))
@@ -765,10 +787,8 @@ export default (async (input, options) => {
   }
   cardActionStores.add(cardActionStore)
 
-  if (cardActions && !cardActionProcessorPaths.has(dbPath)) {
-    cardActionProcessorPaths.add(dbPath)
-    void (async () => {
-      while (true) {
+  const actions = cardActions ? (async () => {
+      while (!signal.aborted) {
         const row = selectCardActionQueue.get(cardActionOwner) as {
           event_id: string
           token: string
@@ -794,18 +814,18 @@ export default (async (input, options) => {
             }
           }
         }
-        await new Promise((resolve) => setTimeout(resolve, row ? 25 : 250))
+        await delay(row ? 25 : 250, undefined, { signal })
       }
-    })()
-  }
-  if (cardActions && appID && appSecret) startCardActionClient(appID, appSecret)
+    })().catch((error) => {
+      if (!signal.aborted) console.warn("lark-notify plugin: card action processor failed", error)
+    }) : Promise.resolve()
+  const stopCardActionClient = cardActions && appID && appSecret ? startCardActionClient(appID, appSecret) : undefined
 
   const statsBySession = new Map<string, SessionStats>()
   const streamsBySession = new Map<string, StreamState>()
   const processedMessageIDs = new Set<string>()
   const pollOwner = `${input.project.id}:${input.directory}:${Math.random().toString(36).slice(2)}`
   const pollStartedAt = Date.now()
-  let providerListPromise: Promise<unknown[] | undefined> | undefined
   let streamReservationQueue = Promise.resolve()
   let token: { value: string; expiresAt: number } | undefined
 
@@ -833,27 +853,14 @@ export default (async (input, options) => {
   function reserveStreamRate() {
     const reservation = streamReservationQueue.then(async () => {
       while (true) {
+        signal.throwIfAborted()
         const wait = reserveStreamRateNow()
         if (wait <= 0) return
-        await new Promise((resolve) => setTimeout(resolve, wait))
+        await delay(wait, undefined, { signal })
       }
     })
     streamReservationQueue = reservation.catch(() => undefined)
     return reservation
-  }
-
-  function providerList() {
-    providerListPromise ??= input.client.config
-      .providers({ directory: input.directory })
-      .then((response) => {
-        const providers = prop(prop(response, "data"), "providers")
-        if (Array.isArray(providers)) return providers
-      })
-      .catch((error) => {
-        console.warn("lark-notify plugin: failed to load providers", error instanceof Error ? error.message : error)
-        return undefined
-      })
-    return providerListPromise
   }
 
   async function modelContextLimit(model: unknown) {
@@ -861,15 +868,8 @@ export default (async (input, options) => {
     if (direct !== undefined) return direct
     const ref = modelRef(model)
     if (!ref) return
-    const provider = (await providerList())?.find((item) => prop(item, "id") === ref.providerID)
-    const models = prop(provider, "models")
-    if (!record(models)) return
-    const found =
-      prop(models, ref.modelID) ??
-      Object.values(models).find(
-        (item) => prop(item, "id") === ref.modelID || prop(prop(item, "api"), "id") === ref.modelID,
-      )
-    return contextLimitFrom(found)
+    const models = await ctx.model.list()
+    return models.data.find((item) => item.providerID === ref.providerID && item.id === ref.modelID)?.limit.context
   }
 
   function stats(sessionID: string) {
@@ -1089,6 +1089,7 @@ export default (async (input, options) => {
 
   function scheduleStreamFlush(sessionID: string, state: StreamState) {
     if (
+      signal.aborted ||
       state.closing ||
       state.failed ||
       state.attention ||
@@ -1219,17 +1220,6 @@ export default (async (input, options) => {
     )
   }
 
-  async function callOpenCode(serviceName: "permission" | "question", method: "reply" | "reject", payload: object) {
-    const service = prop(input.client, serviceName)
-    const operation = prop(service, method)
-    if (!service || typeof operation !== "function") {
-      throw new Error(`OpenCode client does not support ${serviceName}.${method}`)
-    }
-    const result = await Reflect.apply(operation, service, [payload])
-    const error = prop(result, "error")
-    if (error) throw new Error(`${serviceName}.${method} failed: ${JSON.stringify(error)}`)
-  }
-
   function removeAttentionAction(token: string | undefined) {
     if (!token) return
     cardActionRoutes.delete(token)
@@ -1269,24 +1259,18 @@ export default (async (input, options) => {
                   ? "reject"
                   : undefined
           if (!reply) throw new Error(`unsupported permission action ${action}`)
-          await callOpenCode("permission", "reply", {
+          await ctx.permission.reply({
+            sessionID,
             requestID,
-            directory: input.directory,
-            reply,
+            decision: reply,
           })
         } else if (action === "question_reply") {
           const answer = textOption(prop(formValue, "answer"))
           if (!answer) throw new Error("question answer is empty")
-          await callOpenCode("question", "reply", {
-            requestID,
-            directory: input.directory,
-            answers: [[answer]],
-          })
+          await answerForm(sessionID, requestID, answer, signal, ctx.options)
         } else if (action === "question_reject") {
-          await callOpenCode("question", "reject", {
-            requestID,
-            directory: input.directory,
-          })
+          const client = await serviceClient(ctx.options)
+          await client.session.form.cancel({ sessionID, formID: requestID }, { signal })
         } else {
           throw new Error(`unsupported question action ${action}`)
         }
@@ -1436,12 +1420,11 @@ export default (async (input, options) => {
     if (!text) return
 
     insertSentMessage.run(messageID, Date.now())
-    const result = await input.client.session.promptAsync({
-      path: { id: target.sessionID },
-      query: { directory: target.directory },
-      body: { parts: [{ type: "text", text }] },
-    })
-    if (prop(result, "error")) console.warn("lark-notify plugin: failed to forward Lark message", prop(result, "error"))
+    const client = await serviceClient(ctx.options)
+    const forms = await client.session.form.list({ sessionID: target.sessionID }, { signal })
+    if (forms.length === 1) await answerForm(target.sessionID, forms[0].id, text, signal, ctx.options)
+    else if (forms.length > 1) throw new Error("Multiple forms are pending; answer using the matching card")
+    else await ctx.session.prompt({ sessionID: target.sessionID, text, delivery: "steer" })
   }
 
   async function handleOKReaction(row: LastMessageRow, reaction: unknown) {
@@ -1459,12 +1442,7 @@ export default (async (input, options) => {
 
     insertReactionInput.run(key, Date.now())
     if ((db.query("SELECT changes() AS count").get() as { count: number }).count !== 1) return
-    const result = await input.client.session.promptAsync({
-      path: { id: row.session_id },
-      query: { directory: row.directory ?? input.directory },
-      body: { parts: [{ type: "text", text: "OK" }] },
-    })
-    if (prop(result, "error")) console.warn("lark-notify plugin: failed to forward Lark OK reaction", prop(result, "error"))
+    await ctx.session.prompt({ sessionID: row.session_id, text: "OK", delivery: "steer" })
   }
 
   async function pollOKReactions(row: LastMessageRow) {
@@ -1521,10 +1499,10 @@ export default (async (input, options) => {
   async function pollLark() {
     if (!appID || !appSecret || !chatID) return
     let cursor = Math.floor(Date.now() / 1000)
-    while (true) {
+    while (!signal.aborted) {
       try {
         if (acquirePollLock().count !== 1) {
-          await new Promise((resolve) => setTimeout(resolve, pollInterval))
+          await delay(pollInterval, undefined, { signal })
           continue
         }
         const now = Math.floor(Date.now() / 1000)
@@ -1536,17 +1514,19 @@ export default (async (input, options) => {
           cursor = now
         }
       } catch (error) {
+        if (signal.aborted) return
         console.warn("lark-notify plugin: polling failed", error instanceof Error ? error.message : error)
         releasePollLock.run(pollOwner)
       }
-      await new Promise((resolve) => setTimeout(resolve, pollInterval))
+      await delay(pollInterval, undefined, { signal }).catch(() => undefined)
     }
   }
 
-  void pollLark()
+  const polling = pollLark()
 
-  return createDispatcher({
-    plugin: input,
+  const dispatcher = createDispatcher({
+    ctx,
+    signal,
     composer: new NotificationComposer({ directory: input.directory, maxOutputChars }),
     notifyDone,
     notifyPermission,
@@ -1598,4 +1578,28 @@ export default (async (input, options) => {
       },
     },
   })
-}) satisfies Plugin
+  return {
+    event: dispatcher.event,
+    async dispose() {
+      controller.abort()
+      cardActionStores.delete(cardActionStore)
+      for (const state of streamsBySession.values()) {
+        state.closing = true
+        if (state.timer) clearTimeout(state.timer)
+        removeAttentionAction(state.attention?.token)
+      }
+      await dispatcher.dispose()
+      for (const state of streamsBySession.values()) {
+        state.closing = true
+        if (state.timer) clearTimeout(state.timer)
+        removeAttentionAction(state.attention?.token)
+      }
+      await Promise.allSettled([polling, actions, stopCardActionClient?.(), streamReservationQueue,
+        ...[...streamsBySession.values()].flatMap((state) => [state.startPromise, state.flushPromise]),
+        ...[...statsBySession.values()].map((state) => state.rootMessagePromise),
+      ])
+      releasePollLock.run(pollOwner)
+      db.close()
+    },
+  }
+}
