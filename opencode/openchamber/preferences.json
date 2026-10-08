@@ -1,0 +1,474 @@
+{
+  "version": 1,
+  "fields": {
+    "lightThemeId": {
+      "updatedAt": 1789369352412,
+      "value": "ayu-light"
+    },
+    "darkThemeId": {
+      "updatedAt": 1789369352412,
+      "value": "jetbrains-dark"
+    },
+    "notifyOnSubtasks": {
+      "updatedAt": 1789631796547,
+      "value": false
+    },
+    "notifyOnCompletion": {
+      "updatedAt": 1789369352412,
+      "value": true
+    },
+    "notifyOnError": {
+      "updatedAt": 1789369352412,
+      "value": true
+    },
+    "notifyOnQuestion": {
+      "updatedAt": 1789369352412,
+      "value": true
+    },
+    "notificationTemplates": {
+      "updatedAt": 1789631829771,
+      "value": {
+        "completion": {
+          "title": "OpenCode: {session_name}",
+          "message": "{last_message}"
+        },
+        "error": {
+          "title": "Tool error",
+          "message": "{last_message}"
+        },
+        "question": {
+          "title": "Input needed",
+          "message": "{last_message}"
+        },
+        "subtask": {
+          "title": "{agent_name} is ready",
+          "message": "{model_name} completed the task"
+        }
+      }
+    },
+    "themeId": {
+      "updatedAt": 1789369352412,
+      "value": "jetbrains-dark"
+    },
+    "themeVariant": {
+      "updatedAt": 1789369352412,
+      "value": "dark"
+    },
+    "useSystemTheme": {
+      "updatedAt": 1789369352412,
+      "value": false
+    },
+    "showReasoningTraces": {
+      "updatedAt": 1789386685484,
+      "value": true
+    },
+    "nativeNotificationsEnabled": {
+      "updatedAt": 1789631795001,
+      "value": true
+    },
+    "uiFont": {
+      "updatedAt": 1789906877891,
+      "value": "system"
+    },
+    "monoFont": {
+      "updatedAt": 1789369352412,
+      "value": "system-mono"
+    },
+    "fontSize": {
+      "updatedAt": 1789369352412,
+      "value": 100
+    },
+    "padding": {
+      "updatedAt": 1789369352412,
+      "value": 90
+    },
+    "showDeletionDialog": {
+      "updatedAt": 1789369352412,
+      "value": false
+    },
+    "notificationMode": {
+      "updatedAt": 1789369352412,
+      "value": "hidden-only"
+    },
+    "showSplitAssistantMessageActions": {
+      "updatedAt": 1789369352412,
+      "value": true
+    },
+    "queueModeEnabled": {
+      "updatedAt": 1789369352412,
+      "value": false
+    },
+    "favoriteModels": {
+      "updatedAt": 1791431975680,
+      "value": [
+        {
+          "providerID": "openai",
+          "modelID": "gpt-6.1-sol"
+        },
+        {
+          "providerID": "deepseek",
+          "modelID": "deepseek-flash"
+        },
+        {
+          "providerID": "xiaomi",
+          "modelID": "mimo-v2.6-pro-ultraspeed"
+        },
+        {
+          "providerID": "xiaomi",
+          "modelID": "mimo-v2.6-flash"
+        },
+        {
+          "providerID": "xiaomi",
+          "modelID": "mimo-v2.6-pro"
+        },
+        {
+          "providerID": "openai",
+          "modelID": "gpt-6-astra-fast"
+        },
+        {
+          "providerID": "openai",
+          "modelID": "gpt-6-astra"
+        },
+        {
+          "providerID": "deepseek",
+          "modelID": "deepseek-v4-flash-vision-exp"
+        },
+        {
+          "providerID": "opencode-go",
+          "modelID": "kimi-k3"
+        },
+        {
+          "providerID": "deepseek",
+          "modelID": "deepseek-v4-flash"
+        },
+        {
+          "providerID": "openai",
+          "modelID": "gpt-5.6-sol-pro"
+        },
+        {
+          "providerID": "openai",
+          "modelID": "gpt-5.6-sol"
+        },
+        {
+          "providerID": "deepseek",
+          "modelID": "deepseek-v4-pro"
+        },
+        {
+          "providerID": "openai",
+          "modelID": "gpt-5.5-fast"
+        }
+      ]
+    },
+    "recentModels": {
+      "updatedAt": 1791455412166,
+      "value": [
+        {
+          "providerID": "openai",
+          "modelID": "gpt-6-astra"
+        },
+        {
+          "providerID": "openai",
+          "modelID": "gpt-6.1-sol"
+        },
+        {
+          "providerID": "xiaomi",
+          "modelID": "mimo-v2.6-pro"
+        },
+        {
+          "providerID": "openai",
+          "modelID": "gpt-5.6-sol"
+        },
+        {
+          "providerID": "openai",
+          "modelID": "gpt-5.6-sol-fast"
+        }
+      ]
+    },
+    "draftStarters": {
+      "updatedAt": 1789369352412,
+      "value": []
+    },
+    "defaultAgent": {
+      "updatedAt": 1789369352412,
+      "value": "build"
+    },
+    "chatRenderMode": {
+      "updatedAt": 1789369352412,
+      "value": "live"
+    },
+    "diffLayoutPreference": {
+      "updatedAt": 1789369352412,
+      "value": "side-by-side"
+    },
+    "usageDropdownProviders": {
+      "updatedAt": 1789386881155,
+      "value": [
+        "codex",
+        "github-copilot",
+        "kimi-for-coding",
+        "nano-gpt",
+        "zai-coding-plan",
+        "zhipuai-coding-plan",
+        "minimax-cn-coding-plan",
+        "minimax-coding-plan",
+        "ollama-cloud",
+        "wafer",
+        "claude"
+      ]
+    },
+    "shortcutOverrides": {
+      "updatedAt": 1789369352412,
+      "value": {
+        "toggle_services_menu": "__unassigned__",
+        "new_chat": "mod+shift+s",
+        "new_chat_worktree": "mod+shift+alt+˜",
+        "toggle_right_sidebar": "mod+shift+b",
+        "cycle_agent": "mod+tab",
+        "toggle_sidebar": "mod+shift+period"
+      }
+    },
+    "showTurnChangedFiles": {
+      "updatedAt": 1789369352412,
+      "value": true
+    },
+    "stickyUserHeader": {
+      "updatedAt": 1789369352412,
+      "value": false
+    },
+    "collapsibleThinkingBlocks": {
+      "updatedAt": 1789369352412,
+      "value": true
+    },
+    "gitmojiEnabled": {
+      "updatedAt": 1789369352412,
+      "value": true
+    },
+    "hiddenModels": {
+      "updatedAt": 1789725235716,
+      "value": [
+        {
+          "providerID": "opencode",
+          "modelID": "nemotron-3-ultra-free"
+        },
+        {
+          "providerID": "opencode",
+          "modelID": "muse-spark-1.3-contributor-free"
+        },
+        {
+          "providerID": "opencode",
+          "modelID": "muse-spark-1.2-contributor-free"
+        },
+        {
+          "providerID": "opencode",
+          "modelID": "nemotron-3.5-lightning-free"
+        },
+        {
+          "providerID": "opencode",
+          "modelID": "mimo-v2.5-free"
+        },
+        {
+          "providerID": "opencode",
+          "modelID": "big-pickle"
+        },
+        {
+          "providerID": "opencode",
+          "modelID": "ling-3.0-flash-fin-free"
+        }
+      ]
+    },
+    "collapsedModelProviders": {
+      "updatedAt": 1789369352412,
+      "value": []
+    },
+    "recentAgents": {
+      "updatedAt": 1789369352412,
+      "value": [
+        "build",
+        "plan"
+      ]
+    },
+    "recentEfforts": {
+      "updatedAt": 1791444868726,
+      "value": {
+        "openai/gpt-5.5-fast": [
+          "high",
+          "default"
+        ],
+        "openai/gpt-5.5": [
+          "high",
+          "default"
+        ],
+        "openai/gpt-5.4-fast": [
+          "default"
+        ],
+        "openrouter/openai/gpt-5.6-sol-pro": [
+          "default"
+        ],
+        "openai/gpt-5.6-pro": [
+          "default"
+        ],
+        "openai/gpt-5.6-sol": [
+          "xhigh",
+          "high",
+          "default"
+        ],
+        "openai/gpt-5.6-sol-fast": [
+          "xhigh",
+          "default"
+        ],
+        "openai/gpt-5.6-sol-pro": [
+          "default"
+        ],
+        "openai/gpt-5.6-fast": [
+          "xhigh"
+        ],
+        "opencode-go/kimi-k3": [
+          "default"
+        ],
+        "deepseek/deepseek-v4-pro": [
+          "high"
+        ],
+        "deepseek/deepseek-v4-flash": [
+          "default",
+          "high"
+        ],
+        "deepseek/deepseek-v4-flash-vision-exp": [
+          "default"
+        ],
+        "openrouter/openai/gpt-6-astra": [
+          "default"
+        ],
+        "openai/gpt-6-astra": [
+          "xhigh",
+          "default"
+        ],
+        "xiaomi/mimo-v2.6-pro-ultraspeed": [
+          "default"
+        ],
+        "xiaomi/mimo-v2.6-flash": [
+          "default"
+        ],
+        "xiaomi/mimo-v2.6-pro": [
+          "high",
+          "default"
+        ],
+        "openai/gpt-6.1-sol": [
+          "xhigh",
+          "default"
+        ]
+      }
+    },
+    "smallModelUseDefault": {
+      "updatedAt": 1789376246911,
+      "value": false
+    },
+    "smallModelOverride": {
+      "updatedAt": 1790233541154,
+      "value": "deepseek/deepseek-flash"
+    },
+    "showOpenCodeUpdateNotifications": {
+      "updatedAt": 1789369352412,
+      "value": false
+    },
+    "usageDisplayMode": {
+      "updatedAt": 1789369352412,
+      "value": "usage"
+    },
+    "promptNavigatorEnabled": {
+      "updatedAt": 1789369352412,
+      "value": true
+    },
+    "followUpBehavior": {
+      "updatedAt": 1789369352412,
+      "value": "queue"
+    },
+    "draftStartersCraftGoalAdded": {
+      "updatedAt": 1789369352412,
+      "value": true
+    },
+    "draftStartersScheduleTaskAdded": {
+      "updatedAt": 1789369352412,
+      "value": true
+    },
+    "sessionSuggestionEnabled": {
+      "updatedAt": 1789369352412,
+      "value": false
+    },
+    "defaultModel": {
+      "updatedAt": 1791446632043,
+      "value": "openai/gpt-6-astra"
+    },
+    "wideChatLayoutEnabled": {
+      "updatedAt": 1789369352412,
+      "value": false
+    },
+    "workStatusPanelEnabled": {
+      "updatedAt": 1790084114599,
+      "value": false
+    },
+    "sidebarProjectDisplayMode": {
+      "updatedAt": 1789369352412,
+      "value": "all"
+    },
+    "sidebarProjectSortOrder": {
+      "updatedAt": 1789984268804,
+      "value": "manual"
+    },
+    "sidebarShowRecentSection": {
+      "updatedAt": 1789370540813,
+      "value": true
+    },
+    "dictationEnabled": {
+      "updatedAt": 1789369352412,
+      "value": false
+    },
+    "sessionRecapEnabled": {
+      "updatedAt": 1789369352412,
+      "value": false
+    },
+    "enterToSend": {
+      "updatedAt": 1789386701035,
+      "value": true
+    },
+    "enterToSendConfigured": {
+      "updatedAt": 1789386698171,
+      "value": true
+    },
+    "activityRenderMode": {
+      "updatedAt": 1789386847789,
+      "value": "collapsed"
+    },
+    "draftStartersVisible": {
+      "updatedAt": 1789460030247,
+      "value": false
+    },
+    "responseStyleEnabled": {
+      "updatedAt": 1790233438960,
+      "value": false
+    },
+    "responseStylePreset": {
+      "updatedAt": 1790233433514,
+      "value": "concise"
+    },
+    "responseStyleCustomInstructions": {
+      "updatedAt": 1790233433514,
+      "value": ""
+    },
+    "fileEditorKeymap": {
+      "updatedAt": 1790233469557,
+      "value": "vim"
+    },
+    "sessionTabsEnabled": {
+      "updatedAt": 1790234761398,
+      "value": false
+    },
+    "customProviderIcons": {
+      "updatedAt": 1791431814985,
+      "value": {}
+    },
+    "sidebarWorktreeSortOrder": {
+      "updatedAt": 1791432387715,
+      "value": "recent"
+    }
+  }
+}
