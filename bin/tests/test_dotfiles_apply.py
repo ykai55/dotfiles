@@ -1097,6 +1097,16 @@ class DotfilesApplyTests(CapturingTestCase):
         opencode_config = mappings_by_name["opencode"]
         self.assertIn("opencode.service", opencode_config.exclude)
         self.assertIn("opencode.plist", opencode_config.exclude)
+        self.assertIn("openchamber.plist", opencode_config.exclude)
+
+        openchamber_agent = mappings_by_name["openchamber-launchagent"]
+        self.assertEqual(openchamber_agent.source, "opencode/openchamber.plist")
+        self.assertEqual(
+            openchamber_agent.target,
+            "~/Library/LaunchAgents/dev.openchamber.web.plist",
+        )
+        self.assertEqual(openchamber_agent.mode, "symlink")
+        self.assertEqual(openchamber_agent.platforms, ["macos"])
 
         codex_agents = mappings_by_name["codex-agents"]
         self.assertEqual(codex_agents.source, "opencode/AGENTS.md")

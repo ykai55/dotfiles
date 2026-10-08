@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.openchamber.web</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-c</string>
+    <string>set -euo pipefail
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+mkdir -p "$HOME/Library/Logs/OpenChamber"
+exec &gt;&gt; "$HOME/Library/Logs/OpenChamber/launchagent.log" 2&gt;&amp;1
+cd "$HOME"
+exec "$HOME/dotfiles/bin/useenv" fnm exec --using default openchamber serve --foreground</string>
+  </array>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+</dict>
+</plist>

@@ -69,9 +69,20 @@
         "Dockerfile",
         "docker-compose.yml",
         "entrypoint.sh",
+        "openchamber",
+        "openchamber.plist",
         "opencode.plist",
         "opencode.service",
         "server.sh"
+      ]
+    },
+    {
+      "name": "openchamber-launchagent",
+      "source": "opencode/openchamber.plist",
+      "target": "~/Library/LaunchAgents/dev.openchamber.web.plist",
+      "mode": "symlink",
+      "platforms": [
+        "macos"
       ]
     },
     {
