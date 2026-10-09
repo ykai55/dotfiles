@@ -42,12 +42,6 @@
       ]
     },
     {
-      "name": "git",
-      "source": "git/config",
-      "target": "~/.gitconfig",
-      "mode": "symlink"
-    },
-    {
       "name": "tmux",
       "source": "tmux/tmux.conf",
       "target": "~/.tmux.conf",

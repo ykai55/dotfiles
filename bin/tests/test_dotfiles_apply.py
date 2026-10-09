@@ -987,6 +987,50 @@ class DotfilesApplyTests(CapturingTestCase):
         self.assertEqual(default_args.downloads, "auto")
         self.assertEqual(never_args.downloads, "never")
 
+    def test_selected_mappings_skip_other_mappings_and_downloads(self):
+        with tempfile.TemporaryDirectory() as repo:
+            manifest = os.path.join(repo, "manifest.json")
+            self.write_json(manifest, {"mappings": [
+                {"name": name, "source": name, "target": "~/" + name}
+                for name in ("fish", "tmux", "nvim")
+            ]})
+            with mock.patch.object(self.dotfiles_apply, "ensure_home_dotfiles_link", return_value=True), mock.patch.object(
+                self.dotfiles_apply, "ensure_managed_downloads",
+            ) as downloads, mock.patch.object(self.dotfiles_apply, "apply_mapping") as apply:
+                self.dotfiles_apply.apply_manifest(repo, manifest, categories={"fish", "tmux"})
+                self.assertEqual([call.args[0].name for call in apply.call_args_list], ["fish", "tmux"])
+                downloads.assert_not_called()
+                apply.reset_mock()
+                self.dotfiles_apply.apply_manifest(repo, manifest, categories={"downloads"})
+                downloads.assert_called_once()
+                apply.assert_not_called()
+
+    def test_unknown_category_fails_before_filesystem_changes(self):
+        with tempfile.TemporaryDirectory() as repo:
+            manifest = self.write_empty_manifest(repo)
+            with mock.patch.object(self.dotfiles_apply, "ensure_home_dotfiles_link") as link:
+                with self.assertRaisesRegex(RuntimeError, "Unknown categories: typo"):
+                    self.dotfiles_apply.apply_manifest(repo, manifest, categories={"typo"})
+                link.assert_not_called()
+
+    def test_main_category_selection_controls_git_setup(self):
+        for selection, expected in ((" fish,tmux,fish ", {"fish", "tmux"}), ("git", {"git"}), ("fish,", None)):
+            with self.subTest(selection=selection), tempfile.TemporaryDirectory() as repo:
+                self.write_json(os.path.join(repo, "downloads.json"), {"tools": []})
+                with mock.patch.object(self.dotfiles_apply.sys, "argv", ["dotfiles-apply", "--only", selection]), mock.patch.object(
+                    self.dotfiles_apply, "repo_root", return_value=repo,
+                ), mock.patch.object(
+                    self.dotfiles_apply, "apply_manifest", return_value=self.dotfiles_apply.Stats(),
+                ) as apply, mock.patch.object(
+                    self.dotfiles_apply.subprocess, "run", return_value=subprocess.CompletedProcess([], 0),
+                ) as setup:
+                    self.assertEqual(self.dotfiles_apply.main(), int(expected is None))
+                    if expected is None:
+                        apply.assert_not_called()
+                    else:
+                        self.assertEqual(apply.call_args.kwargs["categories"], expected)
+                    self.assertEqual(setup.call_count, int(expected == {"git"}))
+
     def test_main_defaults_to_dry_run_and_prints_apply_hint(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             repo = os.path.join(tmpdir, "repo")
@@ -1007,11 +1051,12 @@ class DotfilesApplyTests(CapturingTestCase):
                 self.dotfiles_apply,
                 "apply_manifest",
                 side_effect=fake_apply_manifest,
-            ):
+            ), mock.patch.object(self.dotfiles_apply.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)) as setup:
                 exit_code = self.dotfiles_apply.main()
 
             self.assertEqual(exit_code, 0)
             self.assertTrue(captured["dry_run"])
+            self.assertEqual(setup.call_args.args[0], [sys.executable, os.path.join(repo, "scripts", "setup-gitconfig"), "--dry-run"])
             self.assertIn("DRY RUN: no changes were made", self._stdout_buffer.getvalue())
             self.assertIn("--apply", self._stdout_buffer.getvalue())
 
@@ -1035,12 +1080,25 @@ class DotfilesApplyTests(CapturingTestCase):
                 self.dotfiles_apply,
                 "apply_manifest",
                 side_effect=fake_apply_manifest,
-            ):
+            ), mock.patch.object(self.dotfiles_apply.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)) as setup:
                 exit_code = self.dotfiles_apply.main()
 
             self.assertEqual(exit_code, 0)
             self.assertFalse(captured["dry_run"])
+            self.assertEqual(setup.call_args.args[0], [sys.executable, os.path.join(repo, "scripts", "setup-gitconfig")])
             self.assertNotIn("DRY RUN: no changes were made", self._stdout_buffer.getvalue())
+
+    def test_main_reports_gitconfig_setup_failure(self):
+        with tempfile.TemporaryDirectory() as repo:
+            self.write_json(os.path.join(repo, "downloads.json"), {"tools": []})
+            with mock.patch.object(self.dotfiles_apply.sys, "argv", ["dotfiles-apply", "--apply"]), mock.patch.object(
+                self.dotfiles_apply, "repo_root", return_value=repo,
+            ), mock.patch.object(
+                self.dotfiles_apply, "apply_manifest", return_value=self.dotfiles_apply.Stats(),
+            ), mock.patch.object(
+                self.dotfiles_apply.subprocess, "run", return_value=subprocess.CompletedProcess([], 1),
+            ):
+                self.assertEqual(self.dotfiles_apply.main(), 1)
 
     def test_repo_downloads_manifest_targets_linux_and_macos_only(self):
         manifest_path = pathlib.Path(__file__).resolve().parents[2] / "downloads.json"

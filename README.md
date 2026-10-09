@@ -18,6 +18,18 @@ Apply the default user-level mappings from `dotfiles-map.json`:
 ~/dotfiles/bin/dotfiles-apply --apply
 ```
 
+Select categories by their mapping names with `--only`; use commas for multiple
+categories. `git` selects local Git configuration setup, and `downloads` selects
+managed downloads. Omitting `--only` selects everything. Unknown or empty names
+are rejected before changes are made. The shared `~/dotfiles` compatibility link
+is still prepared for selected categories.
+
+```bash
+~/dotfiles/bin/dotfiles-apply --only fish,git,tmux
+~/dotfiles/bin/dotfiles-apply --apply --only fish,git,tmux
+~/dotfiles/bin/dotfiles-apply --apply --only downloads --downloads always
+```
+
 `dotfiles-apply` also clones git downloads from `downloads.json`.
 Tide is managed this way and fish will prefer
 `~/dotfiles/.managed/tide` when it is present.
@@ -43,6 +55,16 @@ local.
 OpenChamber that replace their settings files when saving. Identical content is
 left alone; conflicting destinations require `--force` and are backed up before
 replacement. Dry runs preview copies and backups without writing files.
+
+After successful mapping, `dotfiles-apply` runs `scripts/setup-gitconfig`.
+It keeps `~/.gitconfig` as a local file and prepends an include of
+`~/dotfiles/git/config` when missing. Existing content is preserved, so local
+single-value settings after the include override shared defaults. Repeated
+runs leave an existing include alone. Before changing an existing file or
+converting a symlink, the script saves its contents in a regular `.gitconfig.bak`
+file (with a numeric suffix if needed). Symlink conversion preserves all current
+settings, including any duplicated shared defaults; those local copies can be
+removed manually when no longer needed. Dry runs make no changes.
 
 `dotfiles-map.json` now references `dotfiles-map.schema.json`, so editors that
 support JSON Schema can validate the manifest and offer completion.

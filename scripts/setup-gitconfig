@@ -1,0 +1,74 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import os
+from pathlib import Path
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Include shared Git defaults while preserving local configuration.")
+    parser.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args()
+    target = Path.home() / ".gitconfig"
+    source = Path.home() / "dotfiles" / "git" / "config"
+    try:
+        exists = target.exists() or target.is_symlink()
+        content = target.read_bytes() if exists else b""
+        included = False
+        if exists:
+            result = subprocess.run(
+                ["git", "config", "--file", str(target), "--no-includes", "--null", "--get-all", "include.path"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            )
+            if result.returncode not in (0, 1):
+                raise RuntimeError(result.stderr.strip())
+            for value in result.stdout.split("\0"):
+                if not value:
+                    continue
+                path = Path(value).expanduser()
+                if not path.is_absolute():
+                    path = target.parent / path
+                if path.resolve() == source.resolve():
+                    included = True
+        if included and not target.is_symlink():
+            print(f"[ok] {target} includes shared Git configuration")
+            return 0
+        if not included:
+            content = b'[include]\n\tpath = ~/dotfiles/git/config\n\n' + content
+        print(f"[gitconfig] Preserve local configuration and include {source}")
+        if args.dry_run:
+            return 0
+        if not source.is_file():
+            raise RuntimeError(f"Missing shared Git configuration: {source}")
+        mode = stat.S_IMODE(target.stat().st_mode) if exists else 0o600
+        if exists:
+            backup = target.with_name(target.name + ".bak")
+            index = 1
+            while backup.exists() or backup.is_symlink():
+                backup = target.with_name(target.name + f".bak.{index}")
+                index += 1
+            shutil.copy2(target, backup)
+            print(f"[backup] {target} -> {backup}")
+        descriptor, temporary = tempfile.mkstemp(prefix=".gitconfig.tmp-", dir=target.parent)
+        try:
+            with os.fdopen(descriptor, "wb") as output:
+                output.write(content)
+            os.chmod(temporary, mode)
+            os.replace(temporary, target)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+        return 0
+    except (OSError, RuntimeError) as exc:
+        print(f"[error] {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

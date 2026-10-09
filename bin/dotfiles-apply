@@ -324,6 +324,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Remove stale managed child links for link_children mappings.",
     )
     parser.add_argument(
+        "--only",
+        help="Comma-separated mapping names to apply, plus git and downloads. Defaults to all categories.",
+    )
+    parser.add_argument(
         "--downloads",
         choices=("auto", "always", "never"),
         default="auto",
@@ -886,14 +890,21 @@ def apply_manifest(
     dry_run: bool = False,
     prune: bool = False,
     download_mode: str = "auto",
+    categories: set[str] | None = None,
 ) -> Stats:
     stats = Stats()
     mappings = load_manifest(manifest_path)
+    if categories is not None:
+        unknown = categories - {mapping.name for mapping in mappings} - {"git", "downloads"}
+        if unknown:
+            raise RuntimeError(f"Unknown categories: {', '.join(sorted(unknown))}")
+        mappings = [mapping for mapping in mappings if mapping.name in categories]
 
     if not ensure_home_dotfiles_link(actual_repo_root, force, dry_run, stats):
         return stats
 
-    ensure_managed_downloads(actual_repo_root, dry_run, stats, download_mode)
+    if categories is None or "downloads" in categories:
+        ensure_managed_downloads(actual_repo_root, dry_run, stats, download_mode)
 
     for mapping in mappings:
         if not should_include_mapping(mapping):
@@ -916,6 +927,11 @@ def main() -> int:
     manifest_path = expand_target(args.manifest)
     try:
         dry_run = not args.apply
+        categories = None
+        if args.only is not None:
+            categories = {name.strip() for name in args.only.split(",")}
+            if "" in categories:
+                raise RuntimeError("--only requires non-empty comma-separated category names")
         stats = apply_manifest(
             actual_repo_root,
             manifest_path,
@@ -923,7 +939,16 @@ def main() -> int:
             dry_run=dry_run,
             prune=args.prune,
             download_mode=args.downloads,
+            categories=categories,
         )
+        if not stats.errors and (categories is None or "git" in categories):
+            command = [sys.executable, os.path.join(actual_repo_root, "scripts", "setup-gitconfig")]
+            if dry_run:
+                command.append("--dry-run")
+            result = subprocess.run(command, cwd=actual_repo_root)
+            if result.returncode:
+                print_warning("[error] Git configuration setup failed")
+                stats.errors += 1
     except (OSError, RuntimeError, json.JSONDecodeError) as exc:
         print_warning(f"[error] {exc}")
         return 1
