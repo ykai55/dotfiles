@@ -1,160 +1,169 @@
-# General
+# 通用原则
 
-- When the request is genuinely ambiguous, incomplete, or internally inconsistent, surface the issue early and clarify before proceeding.
+- 当请求确实存在歧义、信息不全或前后矛盾时，尽早指出问题，澄清后再继续。
 
-## Pre-Implementation Clarification
+## 实施前澄清
 
-Before formal implementation begins, you are explicitly encouraged to question and challenge the user freely. Do not treat the user's initial framing or proposed solution as authoritative.
+正式实施前，鼓励主动向用户提问、质疑其设想。不要把用户最初的问题定义或方案当作定论。
 
-- Proactively challenge requirements, assumptions, proposed solutions, and priorities when they appear incorrect, inconsistent, risky, or unnecessarily complex.
-- Ask direct clarification questions whenever the answer could materially affect scope, behavior, architecture, or implementation.
-- Prefer surfacing disagreements and uncertainties early over making speculative decisions.
-- Be candid and specific: explain what seems wrong or unclear and why, then propose alternatives when useful.
-- Do not agree merely to be accommodating. Respectfully push back when doing so can improve the outcome.
-- Once implementation has begun, avoid interrupting for minor uncertainties that can be resolved safely from repository context; ask only when the decision is consequential or difficult to reverse.
+- 当需求、假设、方案或优先级存在错误、矛盾、风险或不必要的复杂性时，主动提出质疑。
+- 如果某个问题的答案会显著影响范围、行为、架构或实现，直接向用户确认。
+- 尽早说清分歧和不确定之处，避免靠猜测做决定。
+- 坦诚、具体地说明哪里有问题或不清楚，以及原因；有必要时提出替代方案。
+- 不要为了迎合而赞同。当反对意见有助于改善结果时，应尊重用户并明确表达。
+- 开始实施后，可以根据仓库上下文稳妥解决的小问题，不必打断用户；只有决定影响重大或难以撤销时才询问。
 
-- Do not use git worktrees by default unless the user explicitly requests or mentions them.
+- 默认不使用 Git worktree，除非用户明确要求或提及。
 
-## Clean Final-State Revisions
+## 修改后直接呈现最终状态
 
-When revising code, documentation, or user-facing content after feedback, make the result read as though the corrected requirement had been known from the start. Do not preserve the rejected path merely to demonstrate that the correction was applied.
+根据反馈修改代码、文档或面向用户的内容时，最终结果应当像从一开始就按正确需求完成的一样。不要仅为证明已落实修改，就保留被否定的做法。
 
-- Rewrite the affected content coherently instead of appending negations, disclaimers, or phrases such as "but not A" to the original approach.
-- State the intended behavior directly and positively. Remove obsolete assumptions, branches, comments, names, tests, and examples that exist only because of the superseded direction.
-- Judge each affected section by its reader task: does the reader need to understand change over time? Do not classify the entire document.
-- Artifact types are signals, not verdicts. Implementations, API references, user guides, and current design descriptions often present current state; changelogs, migration guides, ADRs, deprecation sections, and compatibility contracts often require temporal context.
-- If time is irrelevant to the task, describe only the resulting system and omit superseded mechanisms.
-- If time matters, retain only the minimum history needed to complete a migration, understand a decision, or verify a compatibility boundary.
-- Do not preserve history merely because feedback mentions it, and do not erase necessary history merely to sound positive.
-- Still-supported deprecated behavior is part of the current contract and must be documented, including in API references or user guides.
-- After revising, reread the affected area as a standalone final artifact and remove any residue of the drafting or correction process.
+- 连贯地重写受影响的内容，不要在原方案后追加否定、免责声明或“但不是 A”之类的补充。
+- 直接、正面地描述预期行为。删除仅因旧方向而存在的过时假设、分支、注释、命名、测试和示例。
+- 根据读者的具体任务，逐节判断是否需要了解前后变化，不要对整篇文档一概而论。
+- 内容类型可供参考，但不能据此直接下结论。实现、API 参考、用户指南和当前设计说明通常描述现状；变更日志、迁移指南、架构决策记录（ADR）、弃用说明和兼容性约定通常需要交代时间背景。
+- 如果任务与时间无关，只描述最终系统，省略已被替代的机制。
+- 如果时间背景重要，只保留完成迁移、理解决策或确认兼容性边界所需的最少历史信息。
+- 不要仅因反馈提到历史就保留它，也不要只为措辞正面而删掉必要的历史。
+- 已弃用但仍受支持的行为属于当前约定，必须在文档中说明，API 参考和用户指南也不例外。
+- 修改后，将受影响的内容当作独立的最终成品重新通读，清除起草或纠正过程留下的痕迹。
 
-### Paired Example: One API Change
+### 对照示例：同一次 API 变更
 
-**Current API reference**
+**当前 API 参考**
 
-`contact.channels.email` contains the notification email address inside the `contact.channels` object.
+`contact.channels.email` 位于 `contact.channels` 对象中，用于存放接收通知的邮箱地址。
 
-**Bad current-state revision**
+**描述现状时的错误写法**
 
-Do not use `email_address`; use `contact.channels.email` instead.
+不要使用 `email_address`，改用 `contact.channels.email`。
 
-**Migration guide**
+**迁移指南**
 
-In v1, requests used top-level `email_address`. For v2, map `email_address` to `contact.channels.email`; v2 removes the top-level `email_address` field.
+v1 请求使用顶层字段 `email_address`。迁移到 v2 时，将 `email_address` 映射到 `contact.channels.email`；v2 已移除顶层字段 `email_address`。
 
-## Workspace Boundaries
+## 工作区边界
 
-- Treat the active workspace or Git worktree root as the default filesystem boundary for every task. Start discovery there and keep it there whenever the workspace contains enough information to proceed.
-- Avoid recursively listing, globbing, grepping, searching, or inspecting parent directories, the home directory, filesystem roots, sibling repositories, or broad temporary-directory scopes.
-- Expand outside the workspace only when the task genuinely requires external information and workspace-local evidence is insufficient, or when the user explicitly names an external path or resource. Start from the narrowest known relevant path instead of using an external directory as a broad discovery root.
-- Do not search outside the workspace merely to discover projects, dependencies, configuration, caches, or tool installations. Prefer workspace manifests, project-provided commands, and configured references; if the necessary external location is unknown or the expansion would be broad, ask the user first.
-- Apply these rules equally to shell commands, file tools, delegated subagents, and MCP tools. Give subagents the same workspace-first guidance.
+- 每项任务默认以当前工作区或 Git worktree 根目录为文件系统操作边界。从这里开始查找；只要工作区内的信息足够，就保持在此范围内。
+- 避免对父目录、用户主目录、文件系统根目录、同级仓库或大范围临时目录递归列举、执行 glob 或 grep、搜索或检查。
+- 只有任务确实需要外部信息且工作区内证据不足，或用户明确指定了外部路径或资源时，才扩展到工作区之外。从已知相关路径中范围最小的位置开始，不要把外部目录当作大范围搜索的起点。
+- 不要仅为发现项目、依赖、配置、缓存或工具安装位置而搜索工作区外部。优先使用工作区中的清单、项目提供的命令和已配置的引用；如果必要的外部位置未知，或需要扩大到很宽的范围，先询问用户。
+- 这些规则同样适用于 shell 命令、文件工具、受委派的子代理和 MCP 工具。向子代理传达相同的工作区优先原则。
 
-# Code Style
+# 代码风格
 
-## Minimal Abstraction Rule
+## 最小抽象原则
 
-Prefer direct, local code over introducing new abstractions. Every helper, wrapper, constant, or utility should justify its existence by improving clarity, expressing a stable domain concept, or eliminating meaningful duplication.
+优先在原处直接写清代码，谨慎引入新抽象。每个辅助函数、封装、常量或工具都应有明确价值：让代码更清楚、表达稳定的领域概念，或消除值得统一维护的重复逻辑。
 
-Before introducing an abstraction, ask:
+引入抽象前，先问：
 
-- Does it represent a business or domain concept rather than merely compressing syntax?
-- Does its name communicate intent more clearly than the implementation?
-- Is the logic reused enough that maintaining it in one place is beneficial?
-- Would inlining make the surrounding code easier to understand?
-- Does this abstraction hide important local behavior that readers should see?
+- 它是否表达了业务或领域概念，而非仅仅缩短语法？
+- 它的名称是否比实现本身更清楚地表达意图？
+- 这段逻辑是否有足够多的复用，值得集中维护？
+- 内联后，周围的代码是否更容易理解？
+- 这个抽象是否隐藏了读者应当看到的重要局部行为？
 
-If the answer to most of these questions is **no**, keep the code inline.
+如果大多数问题的答案是**否**，就将代码保留在原处。
 
-Prefer:
+优先选择：
 
-- Direct code over one-line wrappers.
-- Local literals unless a value represents a shared contract or domain concept.
-- Small, obvious duplication over premature abstraction.
-- Tests that express behavior directly rather than hiding setup behind helpers.
+- 直接写代码，避免只有一行的封装。
+- 在原处使用字面量，除非该值代表共享约定或领域概念。
+- 保留少量、直观的重复，避免过早抽象。
+- 让测试直接表达行为，避免用辅助函数隐藏准备步骤。
 
-Exceptions:
+例外：
 
-Introduce an abstraction when it materially improves readability by expressing business or domain intent, even if it is used only once.
+如果抽象能通过表达业务或领域意图显著改善可读性，即使只用一次，也可以引入。
 
-Examples include:
+例如：
 
 - `isExpired()`
 - `hasPermission()`
 - `RetryPolicy`
 - `CacheKey`
 
-These names communicate concepts that are more meaningful than their underlying implementation.
+这些名称比底层实现更能表达有意义的概念。
 
-During code review, treat an abstraction as a readability regression when it:
+代码审查时，如果抽象存在以下情况，应视为降低了可读性：
 
-- Only wraps one or two lines without adding semantic value.
-- Exists solely to reduce trivial duplication.
-- Hides important local behavior that readers should see.
-- Forces readers to jump elsewhere to understand straightforward logic.
+- 只封装一两行代码，没有增加语义价值。
+- 仅为减少无关紧要的重复而存在。
+- 隐藏了读者应当看到的重要局部行为。
+- 让读者必须跳转到别处，才能理解本来很直白的逻辑。
 
-Favor removing abstractions that do not improve reuse, readability, or domain clarity.
+对于无法改善复用、可读性或领域表达的抽象，优先移除。
 
-# Development Environment
+# 开发环境
 
-- Respect the project's existing development environment instead of assuming system defaults.
+- 遵循项目现有的开发环境，不要假定系统默认环境就是正确的。
 
-- Before running language-specific tools, check whether the project specifies an environment manager or version file, for example:
-  - `.sdkmanrc` (SDKMAN)
-  - `.python-version` (pyenv)
-  - `.nvmrc` (fnm / nvm)
-  - or other project-specific configuration files.
+- 运行特定语言的工具前，检查项目是否指定了环境管理器或版本文件，例如：
+  - `.sdkmanrc`（SDKMAN）
+  - `.python-version`（pyenv）
+  - `.nvmrc`（fnm / nvm）
+  - 其他项目专用配置文件。
 
-- Use the project's configured toolchain whenever possible rather than the system-wide installation.
+- 尽可能使用项目配置的工具链，而非系统全局安装的工具。
 
-- For Java, use the version and toolchain declared by the project when available. If the project does not declare one, use SDKMAN to select the JDK. Respect an existing `SDKMAN_DIR`; only default it to `$HOME/.sdkman` when unset. Do not search system directories for installed Java versions or choose a JDK by filesystem path.
+- 对于 Java，优先使用项目声明的版本和工具链。项目未声明时，使用 SDKMAN 选择 JDK。沿用已有的 `SDKMAN_DIR`，仅在未设置时默认使用 `$HOME/.sdkman`。不要搜索系统目录来查找已安装的 Java 版本，也不要通过文件系统路径选择 JDK。
 
-- In non-interactive shells, source `$SDKMAN_DIR/bin/sdkman-init.sh` before using SDKMAN.
+- 在非交互式 shell 中，使用 SDKMAN 前，先用 `source` 加载 `$SDKMAN_DIR/bin/sdkman-init.sh`。
 
-- Use a session-scoped Java switch by default. Never install a missing runtime or change SDKMAN's persistent default unless the user explicitly requests it. If a project-declared runtime is unavailable, report it and ask before installation.
+- 默认只在当前会话中切换 Java 版本。除非用户明确要求，否则不要安装缺失的运行时，也不要更改 SDKMAN 的持久默认版本。如果项目声明的运行时不可用，先说明情况，征得同意后再安装。
 
-- Prefer project-provided wrapper commands (e.g. make, just, task, mise, pnpm, uv, project scripts) over invoking language tools directly.
+- 优先使用项目提供的封装命令（如 make、just、task、mise、pnpm、uv 或项目脚本），避免直接调用语言工具。
 
-# Shell Tool Usage
+# Shell 工具使用
 
-- When a bash or shell tool exposes a `workdir` parameter, always pass the target directory through it instead of changing directories inside the command.
-- Never write `cd <dir> && <command>` when the tool can run the command in `<dir>` for you.
+- 当 bash 或 shell 工具提供 `workdir` 参数时，始终通过该参数传入目标目录，不要在命令内部切换目录。
+- 如果工具能直接在 `<dir>` 中执行命令，就不要写成 `cd <dir> && <command>`。
 
-Good:
+正确写法：
 
     workdir: /repo/api
     command: npm test
 
-Bad:
+错误写法：
 
     command: cd /repo/api && npm test
 
-# Communication
+# 沟通
 
-- When you need to ask the user a question, prefer the `question` tool or similar structured interaction tools whenever available and suitable.
+- 需要向用户提问时，如果有可用且合适的 `question` 工具或类似的结构化交互工具，优先使用。
 
-- For Feishu/Lark related tasks, use `lark-cli` by default instead of `bytedcli` unless the user explicitly requests `bytedcli` or `lark-cli` cannot satisfy the task.
+- 飞书 / Lark 相关任务默认使用 `lark-cli`。只有用户明确要求使用 `bytedcli`，或 `lark-cli` 无法完成任务时，才使用 `bytedcli`。
 
-- When sending a Lark message on the user's behalf, always prefix the message body with an `@` mention of the user's own Lark account.
+- 代用户发送飞书消息时，始终在消息正文开头 `@` 用户本人的飞书账号。
 
-# Workflow
+# 工作流程
 
-- Delegate clearly scoped procedural work only when it is long-running, parallelizable, or token-heavy enough to justify the handoff overhead. Do not delegate when the handoff would lose important context.
+## Git 提交信息
 
-- Keep a short single-command task in the primary agent.
+- 提交前可以先参考近期提交记录的风格，查看完整的多行提交信息（标题和正文），例如使用 `git log -5 --format=full`，不要只看 `--oneline`。
+- 提交标题和正文只描述实际改动：新增、修复或调整了什么功能或行为，以及有助于审查的改动原因。
+- 不写执行报告，包括跑了哪些测试、做了哪些检查、lint 或构建结果、验证命令、通过数量，以及代理工作过程总结。提交信息中不添加“测试”“验证”“检查”等章节。
+- 如果改动本身涉及测试或工具，描述改动提供的能力或覆盖的内容。
 
-- For delegated command execution, require:
-  - Working directory
-  - Exact commands
-  - Exit status
-  - Short result summary
-  - Paths to detailed logs, when applicable
+## 任务委派
 
-- Before relying on delegated results, independently verify at least one material log, artifact, or reported state when feasible.
+- 只有流程性工作范围明确，且耗时较长、适合并行或消耗大量 token，足以抵消交接成本时，才委派出去。如果交接会丢失重要上下文，就不要委派。
 
-# Language
+- 只需一条命令即可完成的短任务，由主代理执行。
 
-- Write reasoning, scratch notes, and intermediate artifacts in English.
+- 委派命令执行任务时，要求提供：
+  - 工作目录
+  - 确切的命令
+  - 退出状态
+  - 简短的结果摘要
+  - 详细日志路径（如适用）
 
-- Deliver all user-facing responses in Chinese unless the user explicitly requests another language.
+- 采用委派任务的结果前，在条件允许时，至少独立核实一项关键日志、产物或报告的状态。
+
+# 语言
+
+- 推理、草稿笔记和中间产物使用英文。
+
+- 除非用户明确要求其他语言，否则所有面向用户的回复都使用中文。
