@@ -34,6 +34,16 @@ is still prepared for selected categories.
 Tide is managed this way and fish will prefer
 `~/dotfiles/.managed/tide` when it is present.
 
+On macOS (Apple Silicon or Intel), managed downloads include `lookin` from
+the `ykai55/lookin-cli` fork's `lookin-latest` release. Applying downloads checks
+the remote SHA-256 and refreshes the binary when the release changes. Run it via
+`~/dotfiles/bin/lookin`; source builds remain in their separate repository.
+
+```bash
+~/dotfiles/bin/dotfiles-apply --apply --only downloads
+~/dotfiles/bin/lookin attach --device --pretty
+```
+
 Replace conflicting local files with backed-up copies:
 
 ```bash

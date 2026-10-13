@@ -49,6 +49,29 @@
       ]
     },
     {
+      "name": "lookin",
+      "type": "archive",
+      "version": "lookin-latest",
+      "targets": [
+        {
+          "target": "macos-aarch64",
+          "platform": "macos",
+          "arch": "aarch64",
+          "url": "https://github.com/ykai55/lookin-cli/releases/download/lookin-latest/lookin-macos-universal.tar.gz",
+          "archive": "tar.gz",
+          "executable": "lookin"
+        },
+        {
+          "target": "macos-x86_64",
+          "platform": "macos",
+          "arch": "x86_64",
+          "url": "https://github.com/ykai55/lookin-cli/releases/download/lookin-latest/lookin-macos-universal.tar.gz",
+          "archive": "tar.gz",
+          "executable": "lookin"
+        }
+      ]
+    },
+    {
       "name": "tide",
       "type": "git",
       "url": "git@github.com:ykai55/tide.git",

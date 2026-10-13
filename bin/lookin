@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+system="$(uname -s)"
+arch="$(uname -m)"
+
+case "$system/$arch" in
+  Darwin/arm64|Darwin/aarch64) target="macos-aarch64" ;;
+  Darwin/x86_64|Darwin/amd64) target="macos-x86_64" ;;
+  *)
+    echo "lookin wrapper: unsupported platform: $system/$arch (requires macOS)" >&2
+    exit 1
+    ;;
+esac
+
+binary="$script_dir/.downloads/lookin/current/$target/lookin"
+if [[ ! -x "$binary" ]]; then
+  echo "lookin wrapper: missing downloaded binary: $binary; run bin/dotfiles-apply" >&2
+  exit 1
+fi
+
+exec "$binary" "$@"
