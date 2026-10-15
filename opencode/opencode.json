@@ -4,7 +4,8 @@
   "snapshot": false,
   "shell": "bash",
   "plugins": [
-    "./provider-loader"
+    "/Users/bytedance/dotfiles/opencode/provider-loader",
+    "/Users/bytedance/dotfiles/opencode/plugins/gpt-imagegen"
   ],
   "mcp": {
     "tmux": {

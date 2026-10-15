@@ -55,9 +55,9 @@ before `bootstrap`.
 
 ## OpenCode V2 plugins
 
-These plugins target OpenCode **2.0.16**, with matching `@opencode/plugin` and
+These plugins target OpenCode **2.0.24**, with matching `@opencode/plugin` and
 `@opencode/client` dependencies. Each plugin is a directory with a `package.json`
-entrypoint and a default `Plugin.define({ id, setup })` export.
+entrypoint and a default V2 plugin definition (`id` and `setup`).
 
 Install dependencies, then apply the dotfiles mappings from the repository root:
 
@@ -68,8 +68,10 @@ cd ..
 bin/dotfiles-apply --apply
 ```
 
-The global `plugins/` directory discovers `current-time`, `rename-self`, and
-`chat-notify`. The `plugins` entry in `opencode.json` loads `./provider-loader`.
+The global `plugins/` directory discovers `current-time`, `rename-self`,
+`chat-notify`, and `gpt-imagegen`. The `plugins` entry in `opencode.json` explicitly
+loads `provider-loader` and `plugins/gpt-imagegen` by absolute path so OpenChamber's
+plugin validation resolves them independently of the selected project directory.
 OpenCode 2.0.16 requires directory paths for explicitly configured local plugins.
 Configuration-directory changes reload automatically; use `opencode service
 restart` when a changed shared dependency needs a full reload. Inspect loading
@@ -81,6 +83,20 @@ or uses the current `serve --hostname ... --port ...` listener. An embedded serv
 or a dynamically assigned port can supply a `serverURL` option on `rename-self`
 and `chat-notify`. Explicit-listener authentication uses
 `OPENCODE_SERVER_USERNAME` (default `opencode`) and `OPENCODE_SERVER_PASSWORD`.
+
+### GPT image generation
+
+`plugins/gpt-imagegen` exposes `gpt_imagegen` and `/gpt-imagegen`, paired with
+`skills/gpt-imagegen/SKILL.md`. It generates or edits PNG images through the
+experimental Codex Responses image tool using the active OpenAI OAuth connection.
+No additional API key is needed. Input images can be local PNG, JPEG, or WebP
+files (`images`) or pasted/uploaded chat images selected by name (`attachments`,
+for example `["image-1.png"]`). Attachment lookup uses the newest user message
+containing each name in the current session. Outputs receive unique filenames in the session's `output/gpt-imagegen/`
+directory, or an explicitly selected output directory. Source files are preserved.
+The optional `model` field selects the orchestrating model (default `gpt-6-astra`),
+not the underlying image model. The direct command accepts a prompt or a JSON
+object with `prompt`, `images`, `attachments`, `outputDirectory`, and `model` fields.
 
 ### Current time reminders
 

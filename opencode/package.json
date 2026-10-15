@@ -16,8 +16,8 @@
     "typescript": "^5.9.3"
   },
   "dependencies": {
-    "@opencode/client": "2.0.16",
-    "@opencode/plugin": "2.0.16",
+    "@opencode/client": "2.0.24",
+    "@opencode/plugin": "2.0.24",
     "@larksuiteoapi/node-sdk": "^1.71.1"
   }
 }

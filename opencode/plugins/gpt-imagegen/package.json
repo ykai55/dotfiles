@@ -1,0 +1,6 @@
+{
+  "name": "dotfiles-gpt-imagegen",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./index.ts" }
+}
