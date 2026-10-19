@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sqlite3
 from pathlib import Path
 import tempfile
 import sys
@@ -82,31 +83,43 @@ def write_cache(path: Path, contents: str) -> None:
             pass
 
 
-def load_auth(path: str) -> tuple[str, str] | None:
+def load_current_auth() -> tuple[str, str] | None:
+    data_dir = Path(env("XDG_DATA_HOME", os.path.expanduser("~/.local/share"))) / "opencode"
+    db_path = data_dir / env("OPENCODE_DB", "opencode.db")
+    if not db_path.exists():
+        return None
+
+    # OpenCode 2.x owns and refreshes these credentials. Never write to its DB
+    # or revive a removed credential from the legacy auth.json file.
     try:
-        data = json.loads(Path(path).read_text(encoding="utf-8"))
-    except (FileNotFoundError, OSError, json.JSONDecodeError):
-        return None
+        db = sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True, timeout=1)
+        try:
+            row = db.execute(
+                "SELECT value FROM credential WHERE integration_id = ? "
+                "ORDER BY active DESC, time_updated DESC LIMIT 1",
+                ("openai",),
+            ).fetchone()
+        finally:
+            db.close()
+    except sqlite3.Error:
+        raise RuntimeError("cannot read OpenCode credential database") from None
 
-    openai = data.get("openai")
-    if isinstance(openai, dict):
-        access_token = openai.get("access")
-        account_id = openai.get("accountId")
-        if isinstance(access_token, str) and access_token and isinstance(account_id, str) and account_id:
-            return access_token, account_id
-
-    tokens = data.get("tokens")
-    if not isinstance(tokens, dict):
+    if row is None:
         return None
-
-    access_token = tokens.get("access_token")
-    account_id = tokens.get("account_id")
-    if not isinstance(access_token, str) or not access_token:
+    try:
+        value = json.loads(row[0])
+    except (TypeError, json.JSONDecodeError):
         return None
-    if not isinstance(account_id, str) or not account_id:
+    if not isinstance(value, dict) or value.get("type") != "oauth":
         return None
-
-    return access_token, account_id
+    metadata = value.get("metadata")
+    if not isinstance(metadata, dict):
+        return None
+    access = value.get("access")
+    account_id = metadata.get("accountID")
+    if isinstance(access, str) and access and isinstance(account_id, str) and account_id:
+        return access, account_id
+    return None
 
 
 def fetch_usage(url: str, access_token: str, account_id: str) -> object | None:
@@ -302,16 +315,18 @@ def main(argv: list[str]) -> int:
             print(one_line, end="")
             return 0
 
-    auth_file = env(
-        "TMUX_CHATGPT_USAGE_AUTH_FILE",
-        os.path.expanduser("~/.local/share/opencode/auth.json"),
-    )
     usage_url = env("TMUX_CHATGPT_USAGE_URL", "https://chatgpt.com/backend-api/wham/usage")
 
-    auth = load_auth(auth_file)
+    try:
+        auth = load_current_auth()
+    except RuntimeError as exc:
+        if detail:
+            print(f"chatgpt usage: {exc}", file=sys.stderr)
+            return 1
+        return 0
     if auth is None:
         if detail:
-            print("chatgpt usage: auth file missing or invalid", file=sys.stderr)
+            print("chatgpt usage: auth missing or invalid", file=sys.stderr)
             return 1
         return 0
 

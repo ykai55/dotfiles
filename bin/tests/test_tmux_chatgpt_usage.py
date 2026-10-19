@@ -1,6 +1,7 @@
 import json
 import os
 import pathlib
+import sqlite3
 import subprocess
 import tempfile
 import threading
@@ -22,7 +23,7 @@ class TmuxChatgptUsageTests(unittest.TestCase):
             self.addCleanup(lambda: pathlib.Path(cache_file).unlink(missing_ok=True))
         env = {
             "PATH": os.environ.get("PATH", ""),
-            "TMUX_CHATGPT_USAGE_AUTH_FILE": str(auth_file),
+            "OPENCODE_DB": str(auth_file),
             "TMUX_CHATGPT_USAGE_CACHE_FILE": cache_file,
             "TMUX_CHATGPT_USAGE_URL": url,
         }
@@ -43,21 +44,12 @@ class TmuxChatgptUsageTests(unittest.TestCase):
     def make_auth_file(self):
         tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(tempdir.cleanup)
-        path = pathlib.Path(tempdir.name) / "auth.json"
-        path.write_text(
-            '{"tokens":{"access_token":"test-access","account_id":"acct-123"}}',
-            encoding="utf-8",
-        )
-        return path
-
-    def make_opencode_auth_file(self):
-        tempdir = tempfile.TemporaryDirectory()
-        self.addCleanup(tempdir.cleanup)
-        path = pathlib.Path(tempdir.name) / "auth.json"
-        path.write_text(
-            '{"openai":{"type":"oauth","access":"test-access","accountId":"acct-123"}}',
-            encoding="utf-8",
-        )
+        path = pathlib.Path(tempdir.name) / "opencode.db"
+        with sqlite3.connect(path) as db:
+            db.execute("CREATE TABLE credential (integration_id TEXT, value TEXT, active INTEGER, time_updated INTEGER)")
+            db.execute("INSERT INTO credential VALUES ('openai', ?, 1, 1)", (
+                json.dumps({"type": "oauth", "access": "test-access", "metadata": {"accountID": "acct-123"}}),
+            ))
         return path
 
     def start_server(self, status_code, body):
@@ -100,8 +92,8 @@ class TmuxChatgptUsageTests(unittest.TestCase):
         self.assertEqual(state["authorization"], "Bearer test-access")
         self.assertEqual(state["account_id"], "acct-123")
 
-    def test_reads_openai_oauth_from_opencode_auth_file(self):
-        auth_file = self.make_opencode_auth_file()
+    def test_reads_openai_oauth_from_opencode_database(self):
+        auth_file = self.make_auth_file()
         url, state = self.start_server(
             200,
             '{"rate_limit":{"primary_window":{"used_percent":14.0},"secondary_window":{"used_percent":22.25}}}',
@@ -115,8 +107,62 @@ class TmuxChatgptUsageTests(unittest.TestCase):
         self.assertEqual(state["authorization"], "Bearer test-access")
         self.assertEqual(state["account_id"], "acct-123")
 
-    def test_prints_nothing_when_auth_file_is_missing(self):
-        missing_auth = pathlib.Path(tempfile.gettempdir()) / "missing-auth.json"
+    def test_database_credential_selection(self):
+        auth_file = self.make_auth_file()
+        data_home = auth_file.parent
+        data_dir = data_home / "opencode"
+        data_dir.mkdir()
+        (data_dir / "auth.json").write_text('{"openai":{"access":"stale","accountId":"old"}}')
+        db_path = data_dir / "opencode.db"
+        url, state = self.start_server(200, '{"rate_limit":{"primary_window":{"used_percent":14}}}')
+        environment = {"OPENCODE_DB": "", "XDG_DATA_HOME": str(data_home), "HOME": str(data_home)}
+
+        # A legacy file is never used and a missing database is not created.
+        result = self.run_usage(auth_file, url, extra_env=environment)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(state["requests"], 0)
+        self.assertFalse(db_path.exists())
+
+        with sqlite3.connect(db_path) as db:
+            db.execute("CREATE TABLE credential (integration_id TEXT, value TEXT, active INTEGER, time_updated INTEGER)")
+            for token, active, updated in [("newest", 0, 20), ("selected", 1, 10)]:
+                value = json.dumps({"type": "oauth", "access": token, "metadata": {"accountID": "db-account"}})
+                db.execute("INSERT INTO credential VALUES (?, ?, ?, ?)", ("openai", value, active, updated))
+
+        result = self.run_usage(auth_file, url, extra_env=environment)
+        self.assertEqual(result.stdout, "14%\n")
+        self.assertEqual(state["authorization"], "Bearer selected")
+        self.assertEqual(state["account_id"], "db-account")
+
+        with sqlite3.connect(db_path) as db:
+            db.execute("UPDATE credential SET active = 0")
+        result = self.run_usage(auth_file, url, extra_env=environment)
+        self.assertEqual(state["authorization"], "Bearer newest")
+
+        # An absolute OPENCODE_DB path overrides the default database.
+        result = self.run_usage(auth_file, url, extra_env={"XDG_DATA_HOME": str(data_home)})
+        self.assertEqual(state["authorization"], "Bearer test-access")
+
+        # Relative OPENCODE_DB paths are resolved under the OpenCode data dir.
+        db_path.rename(data_dir / "custom.db")
+        environment["OPENCODE_DB"] = "custom.db"
+        result = self.run_usage(auth_file, url, extra_env=environment)
+        self.assertEqual(state["authorization"], "Bearer newest")
+
+        for value in [None, '{"type":"key","key":"fake"}', 'null', '{bad-json']:
+            with self.subTest(value=value):
+                with sqlite3.connect(data_dir / "custom.db") as db:
+                    db.execute("DELETE FROM credential")
+                    if value is not None:
+                        db.execute("INSERT INTO credential VALUES ('openai', ?, 1, 30)", (value,))
+                before = state["requests"]
+                result = self.run_usage(auth_file, url, extra_env=environment, extra_args=["--detail"])
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(state["requests"], before)
+                self.assertEqual(result.stdout, "")
+
+    def test_prints_nothing_when_database_is_missing(self):
+        missing_auth = pathlib.Path(tempfile.gettempdir()) / "missing-usage-auth.db"
         url, _ = self.start_server(200, '{}')
 
         result = self.run_usage(missing_auth, url)
@@ -125,10 +171,10 @@ class TmuxChatgptUsageTests(unittest.TestCase):
         self.assertEqual(result.stdout, "")
         self.assertEqual(result.stderr, "")
 
-    def test_prints_nothing_when_auth_file_is_malformed(self):
+    def test_prints_nothing_when_database_is_malformed(self):
         tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(tempdir.cleanup)
-        auth_file = pathlib.Path(tempdir.name) / "auth.json"
+        auth_file = pathlib.Path(tempdir.name) / "opencode.db"
         auth_file.write_text("{not-json", encoding="utf-8")
         url, state = self.start_server(200, '{}')
 
@@ -332,7 +378,7 @@ class TmuxChatgptUsageTests(unittest.TestCase):
         self.assertEqual(state["requests"], 1)
 
     def test_detail_reports_error_when_auth_missing(self):
-        missing_auth = pathlib.Path(tempfile.gettempdir()) / "missing-detail-auth.json"
+        missing_auth = pathlib.Path(tempfile.gettempdir()) / "missing-detail-auth.db"
         url, _ = self.start_server(200, '{}')
 
         cache = tempfile.NamedTemporaryFile(delete=False)
@@ -342,7 +388,7 @@ class TmuxChatgptUsageTests(unittest.TestCase):
 
         env = {
             "PATH": os.environ.get("PATH", ""),
-            "TMUX_CHATGPT_USAGE_AUTH_FILE": str(missing_auth),
+            "OPENCODE_DB": str(missing_auth),
             "TMUX_CHATGPT_USAGE_CACHE_FILE": cache.name,
             "TMUX_CHATGPT_USAGE_URL": url,
         }
