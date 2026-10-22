@@ -140,6 +140,10 @@ v1 请求使用顶层字段 `email_address`。迁移到 v2 时，将 `email_addr
 
 # 工作流程
 
+## GitHub 贡献身份
+
+- 向 GitHub 贡献代码时，优先使用 `ykai <me@ykai.cc>` 作为 Git 提交身份（`user.name=ykai`，`user.email=me@ykai.cc`）。
+
 ## Git 提交信息
 
 - 提交前可以先参考近期提交记录的风格，查看完整的多行提交信息（标题和正文），例如使用 `git log -5 --format=full`，不要只看 `--oneline`。
