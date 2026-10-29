@@ -18,6 +18,14 @@ const EMOJIS = [
   "\u{1f9e9}", "\u{1fa84}", "\u{1f392}", "\u{1f5c2}\ufe0f", "\u{1f6f0}\ufe0f", "\u{1f9e0}", "\u{1fae7}", "\u{1f6df}",
   "\u26a1", "\u{1f525}", "\u2728", "\u{1f31f}", "\u{1f319}", "\u2600\ufe0f", "\u{1f308}", "\u2744\ufe0f",
   "\u{1f30a}", "\u{1f30b}", "\u{1f3d4}\ufe0f", "\u{1f3dd}\ufe0f", "\u{1f9ca}", "\u{1faa8}", "\u{1fab5}", "\u{1fab6}",
+  "\u{1f436}", "\u{1f431}", "\u{1f42d}", "\u{1f439}", "\u{1f430}", "\u{1f43b}", "\u{1f42f}", "\u{1f981}",
+  "\u{1f42e}", "\u{1f437}", "\u{1f435}", "\u{1f427}", "\u{1f986}", "\u{1f985}", "\u{1f987}", "\u{1f984}",
+  "\u{1f993}", "\u{1f994}", "\u{1f995}", "\u{1f996}", "\u{1f980}", "\u{1f99e}", "\u{1f990}", "\u{1f420}",
+  "\u{1f33e}", "\u{1f344}", "\u{1f330}", "\u{1f955}", "\u{1f33d}", "\u{1f966}", "\u{1f952}", "\u{1f346}",
+  "\u{1f950}", "\u{1f35e}", "\u{1f9c0}", "\u{1f355}", "\u{1f354}", "\u{1f32e}", "\u{1f363}", "\u{1f371}",
+  "\u{1f366}", "\u{1f369}", "\u{1f36a}", "\u{1f382}", "\u{1f36d}", "\u{1f36f}", "\u{1f375}", "\u2615",
+  "\u{1f3b8}", "\u{1f3b9}", "\u{1f3ba}", "\u{1f3bb}", "\u{1f941}", "\u{1f3c0}", "\u26bd", "\u{1f3be}",
+  "\u{1f6b2}", "\u{1f682}", "\u{1f697}", "\u{1f3ce}\ufe0f", "\u26f5", "\u{1f3a1}", "\u{1f3f0}", "\u26fa",
 ]
 const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" })
 const leadingEmoji = (title: string) => {
@@ -40,7 +48,7 @@ export default Plugin.define({
       const sessions = []
       let cursor: string | undefined
       do {
-        const page = await client.session.list({ directory, parentID: null, limit: 100, cursor }, { signal: controller.signal })
+        const page = await client.session.list({ parentID: null, limit: 100, cursor }, { signal: controller.signal })
         sessions.push(...page.data)
         cursor = page.data.length ? page.cursor?.next ?? undefined : undefined
       } while (cursor)

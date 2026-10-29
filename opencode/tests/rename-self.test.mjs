@@ -78,9 +78,14 @@ test("rename preserves emoji, enforces grapheme limits and suppresses subsequent
   expect(f.writes).toHaveLength(1)
 })
 
-test("initial and topic-shift renames add emoji and exclude recent root prefixes", async () => {
+test("initial and topic-shift renames add emoji and exclude recent root prefixes across projects", async () => {
   await setup()
-  f.records.set("ses_other", { ...f.records.get("ses_main"), id: "ses_other", title: "🌱 Other" })
+  f.records.set("ses_other", { ...f.records.get("ses_main"), id: "ses_other", title: "🌱 Other", location: { directory: "/other" }, projectID: "other" })
+  f.route = (request, url) => {
+    if (url.pathname !== "/api/session") return
+    expect(url.searchParams.has("directory")).toBe(false)
+    return Response.json({ data: [...f.records.values()], cursor: {} })
+  }
   f.records.get("ses_main").title = undefined
   await f.rename({ name: "Initial", emoji: false })
   expect(f.records.get("ses_main").title).not.toStartWith("🌱")
