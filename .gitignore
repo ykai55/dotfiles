@@ -9,6 +9,7 @@ rproxy/management-token
 ha_helper/config.toml
 bin/.downloads/
 .managed/
+/certs/
 /docs/
 
 .DS_Store
