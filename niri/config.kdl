@@ -116,6 +116,12 @@ input {
     position x=1280 y=0
 }
 
+output "PNP(XMD) Mi TV 0x00000001" {
+  mode "3840x2160@120.000"
+  scale 2
+  position x=-1920 y=0
+}
+
 output "LG Electronics LG ULTRAGEAR+ 309NTZNEE349" {
   scale 2
   position x=0 y=0
