@@ -20,12 +20,30 @@ export default Plugin.define({
     await ctx.session.hook("context", (event) => {
       const id = pending.get(event.sessionID)
       if (!id) return
-      const index = event.messages.findLastIndex((message) =>
-        message.role === "tool" && message.content.some((part) => part.type === "tool-result" && part.id === id),
+      // Insert only after the owning turn's complete tool block. A user message
+      // between parallel tool results is invalid for strict providers.
+      const owner = event.messages.findLastIndex((message) =>
+        message.role === "assistant" &&
+        message.content.some((part) => part.type === "tool-call" && part.id === id),
       )
-      if (index < 0) return
+      if (owner < 0) return
+      const calls = event.messages[owner].content
+        .filter((part) => part.type === "tool-call")
+        .map((part) => part.id)
+      let end = owner + 1
+      const results = new Map<string, boolean>()
+      while (end < event.messages.length && event.messages[end].role === "tool") {
+        for (const part of event.messages[end].content) {
+          if (part.type !== "tool-result") continue
+          results.set(part.id, part.result.type !== "text" || part.result.value !== "Tool result missing")
+        }
+        end++
+      }
+      // A parallel run may still be settling (for example a synthetic missing
+      // result). Wait for the next context instead of splitting the block.
+      if (calls.some((call) => results.get(call) !== true)) return
       // Keep tool-call/result pairs intact and leave the persisted transcript untouched.
-      event.messages.splice(index + 1, 0, {
+      event.messages.splice(end, 0, {
         role: "user",
         content: [{ type: "text", text: [
           '<system-reminder source="current-time">',
