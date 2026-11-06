@@ -6,34 +6,23 @@ The complete OpenChamber preference snapshot and export script are maintained
 in [openchamber/](openchamber/README.md). `dotfiles-apply` restores the snapshot
 using a file copy.
 
-`openchamber.plist` runs the OpenChamber CLI/Web server in the background after
-login. `dotfiles-apply` links it to
-`~/Library/LaunchAgents/dev.openchamber.web.plist` on macOS and maintains the
-`~/dotfiles` compatibility path. Each start runs `bin/useenv` to load the current
-exported Fish environment, then executes
-`fnm exec --using default openchamber serve --foreground`. Install Fish, fnm,
-and the OpenChamber CLI in fnm's default Node version first. The explicit fnm
-selection works without an interactive shell or a temporary terminal PATH.
+OpenChamber's built-in `startup enable` command manages a local LaunchAgent at
+`~/Library/LaunchAgents/dev.openchamber.web.plist`. Keep this file outside Git as
+a regular file with mode `600`: generated configuration can contain passwords
+and an environment snapshot. `dotfiles-apply` leaves this path unmanaged.
 
-If OpenChamber's built-in startup service is enabled, run
-`openchamber startup disable` before applying this mapping. Stop any separately
-running CLI server with `openchamber stop`. Manage this LaunchAgent through
-dotfiles and `launchctl`; `openchamber startup enable` writes to the same plist
-path and would overwrite the managed configuration.
+`openchamber.plist` is a credential-free reference template only. The active
+LaunchAgent must be an independent local file, since startup commands overwrite
+it. Password storage depends on the CLI version: it can be in the plist's
+`EnvironmentVariables` or in the OpenChamber data directory's `startup.env`.
+Keep both generated files private and outside the repository.
 
-Install the mappings, then load the agent for the current login session
-(commands below use Bash/Zsh syntax):
+Use `useenv openchamber startup enable` with the desired host, port, and password
+options to configure startup. This captures the environment loaded by `useenv`;
+run it again when the saved environment needs updating. The service starts at
+user login.
 
-```bash
-bin/dotfiles-apply --apply
-launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/dev.openchamber.web.plist"
-```
-
-`dotfiles-apply` manages the file link; `launchctl bootstrap` loads and starts the
-service immediately. Subsequent logins start it automatically. This LaunchAgent
-requires a logged-in user session.
-
-After changing Fish environment settings, restart the service:
+Restart the service:
 
 ```bash
 launchctl kickstart -k "gui/$(id -u)/dev.openchamber.web"
@@ -47,7 +36,7 @@ launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/dev.openchamber.w
 ```
 
 Inspect status with `launchctl print "gui/$(id -u)/dev.openchamber.web"`.
-Output is appended to `~/Library/Logs/OpenChamber/launchagent.log`.
+Log paths are specified by `StandardOutPath` and `StandardErrorPath` in the local plist.
 To disable automatic startup, run
 `launchctl disable "gui/$(id -u)/dev.openchamber.web"`, then the `bootout` command
 above. To restore it, run `launchctl enable "gui/$(id -u)/dev.openchamber.web"`

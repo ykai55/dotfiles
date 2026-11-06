@@ -71,15 +71,6 @@
       ]
     },
     {
-      "name": "openchamber-launchagent",
-      "source": "opencode/openchamber.plist",
-      "target": "~/Library/LaunchAgents/dev.openchamber.web.plist",
-      "mode": "symlink",
-      "platforms": [
-        "macos"
-      ]
-    },
-    {
       "name": "openchamber-preferences",
       "source": "opencode/openchamber/preferences.json",
       "target": "~/.config/openchamber/preferences.json",
