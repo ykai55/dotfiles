@@ -1,6 +1,6 @@
 ---
 name: build123d
-description: Write and debug parametric CAD in Python with build123d — parts, assemblies, joints, 2D profiles and DXF cut files, materials and colours, and the measurements that prove the geometry matches the request. Use when creating or editing a build123d script, exporting STEP/STL/GLB/DXF, selecting faces or edges, placing or mating parts, or diagnosing a boolean, fillet, loft, placement or kernel failure.
+description: Write and debug parametric CAD in Python with build123d — parts, assemblies, joints, threads and printed fasteners, 2D profiles and DXF cut files, materials and colours, and the measurements that prove the geometry matches the request. Use when creating or editing a build123d script, exporting STEP/STL/GLB/DXF, selecting faces or edges, placing or mating parts, designing for FDM printing (overhangs, snap-fits, clearances), or diagnosing a boolean, fillet, loft, thread, placement or kernel failure.
 ---
 
 # Parametric CAD with build123d
@@ -165,6 +165,9 @@ In builder mode the same functions take no first argument — the context suppli
 | Placing and mating parts; build123d joints, ranges and `connect_to` | [assemblies-and-joints.md](references/assemblies-and-joints.md) |
 | Dimensions, clearances, interference, mass, geometry diagnostics | [measurement-and-checks.md](references/measurement-and-checks.md) |
 | 2D profiles, flat patterns, kerf, DXF export and validation | [profiles-and-dxf.md](references/profiles-and-dxf.md) |
+| Screw threads, threaded caps, printed fasteners, turning fits | [threads-and-fasteners.md](references/threads-and-fasteners.md) |
+| Print orientation, overhangs, walls and infill, readiness checklist | [printability.md](references/printability.md) |
+| Clearances, bayonets, snap tabs, clamps, assembly order | [fits-and-snap-fits.md](references/fits-and-snap-fits.md) |
 
 ## Attribution
 

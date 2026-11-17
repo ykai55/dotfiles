@@ -108,6 +108,10 @@ def overlap_volume(a, b):
 - **Check the poses that matter.** Parts clear as built can collide at a joint's other end:
   place the assembly at each extreme and measure again.
 
+**Carry a control group.** Move one part 200 mm away and measure the same pair: the answer
+must be exactly 0. Without it a non-zero reading is unattributable — a wrong result and a
+broken instrument look the same.
+
 ```python
 def collisions(tree, fits=()):
     parts = list(tree.leaves)
@@ -122,6 +126,33 @@ def collisions(tree, fits=()):
 
 `tree.leaves` returns the parts placed where they stand, each with its own `label` — which
 is why labelling every placement matters.
+
+### Coupled motion
+
+A threaded or geared joint moves in two axes at once. Test it the way it turns:
+
+```python
+for step in range(24):
+    angle = step * 15.0
+    moved = nut.rotate(bd.Axis.Z, angle).moved(
+        bd.Location((0, 0, angle / 360.0 * PITCH))
+    )
+    clash = moved & screw
+    print(angle, clash.volume if clash else 0.0)
+```
+
+- **Rotating without advancing always interferes**, and that is not a defect.
+- **Rotate the right way.** The same right-hand pair reads 0.037 cm³ in one direction and
+  0.00003 in the other.
+- **Test a full turn**, not a few positions: a phase error shows up somewhere in the 360°,
+  not necessarily at 0°.
+
+### Insertion depth and seating
+
+An interface that is clear in a straight duct may touch in a bend. Sweep the plug into the
+real cavity one step at a time and intersect at each step
+([fits](fits-and-snap-fits.md#measure-the-insertion-depth-dont-assume-it)). For seating, tilt
+one side by 0.5°: a face that is genuinely in contact shows a small finite clash, not 0.
 
 ## Mass properties
 
@@ -178,6 +209,23 @@ analyzer.IsValid()                     # same verdict as part.is_valid
   by the expected number of faces; a shell can be closed and still fail that.
 - **A face the mesher cannot triangulate** is usually a sliver a boolean left; it shows as
   a hole or a warning wherever the model is drawn. Fix the sliver, not the viewer.
+
+## Acceptance checklist
+
+Every solid that leaves the script, before it is exported:
+
+| Check | Reads |
+| --- | --- |
+| `len(part.solids()) == 1` | One body, not two that happen to share a bounding box |
+| `len(part.shells()) == 1` | No reversed or nested shell |
+| `part.is_valid` and `part.is_manifold` | Topology holds |
+| Export, then read the mesh back | Watertight, consistent normals — the slicer repairs silently |
+| `bounding_box().min.Z == 0` | The part is seated on the build plate |
+| Slice it | Return code 0, no warnings, support where you expect it |
+| Look at the sliced preview | The one check the numbers cannot make |
+
+Volume and bounding box alone miss a split solid and a part floating above the plate; both
+have shipped from projects whose numbers looked right.
 
 ## Write checks that can fail
 

@@ -207,6 +207,21 @@ placed = bd.Location((5, 0, 0)) * rotated      # keeps the rotation
   an interference check; exact solid-to-solid distance on vendor parts with thousands of
   faces takes seconds per pair.
 
+## Put fillets where the kernel can make them
+
+- **A 3D fillet on a tangent chain fails.** Where a boss meets a cylinder, or two faces meet
+  at a shallow angle, OCCT's fillet either refuses or leaves a crater. The same corner as a
+  **2D fillet in the profile** — before the extrude — is exact, cheap and predictable.
+- **Build the boss into the profile, not onto it.** An ear or lug that shares a flat face
+  with the body should be part of the same 2D outline, extruded to the same thickness, then
+  rounded in 2D. The joint is then a full-thickness contact with no seam.
+- **A lofted boss necks at the build plane.** A boss made as an elliptical section lofted
+  along the axis touches the body's flat face at a single point, so the root pinches to a
+  waist and then bulges — the "gourd" look. Loft only when the cross-section genuinely
+  changes along the axis, and make the first section a real face, not a tangent point.
+- **Round the outside, not just the inside.** An inner corner left sharp at a rib or ear is
+  where a printed part cracks; an outer corner left sharp is where it cuts a hand.
+
 ## Validity and visual artifacts
 
 - **`shape.is_valid`** (a property) runs BRepCheck: a topology gate, not a proof of orientation, of
