@@ -1,0 +1,5 @@
+# Extra patch layer for `bin/dsh-web`: applied after the profile layer, so the
+# stock `dsh web` profile and the desktop app keep token authentication.
+- insert:
+    - id: dsh-web-no-auth
+      name: ./no-auth.cjs

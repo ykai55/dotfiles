@@ -30,6 +30,7 @@ are missing.
 
 - `bin/`: executable scripts (bash, Python, perl). Most tooling lives here.
 - `bin/tests/`: unittest coverage for scripts and modules.
+- `dsh/`: personal DeepSeek Harness plugin overlay behind `bin/dsh-web`.
 - `.github/`: GitHub Actions workflows for releases and static tool builds.
 - `.managed/`: generated or downloaded content managed by `bin/dotfiles-apply`.
 - `clip/`: independent Rust workspace for the cross-platform clipboard CLI and
