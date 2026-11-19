@@ -7,6 +7,10 @@ import { fileURLToPath } from "node:url"
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..")
 const executable = Bun.which("opencode")
 assert(executable, "opencode must be on PATH")
+const versionOutput = Bun.spawnSync([executable, "--version"], { stdout: "pipe", stderr: "pipe" })
+assert.equal(versionOutput.exitCode, 0, versionOutput.stderr.toString())
+const cliVersion = versionOutput.stdout.toString().trim().replace(/^opencode\s+v?/i, "")
+assert.match(cliVersion, /^\d+\.\d+\.\d+/, `Could not determine opencode version from ${JSON.stringify(versionOutput.stdout.toString())}`)
 const directory = await mkdtemp(join(tmpdir(), "opencode-v2-smoke-"))
 console.log("Smoke directory:", directory)
 for (const [key, value] of Object.entries({
@@ -85,7 +89,7 @@ try {
   } else {
     const configured = Bun.spawnSync([executable, "service", "set", "port", String(port)], { stdout: "pipe", stderr: "pipe" })
     assert.equal(configured.exitCode, 0, configured.stderr.toString())
-    endpoint = await Service.ensure({ command: [executable, "serve", "--service"], version: "2.0.16" })
+    endpoint = await Service.ensure({ command: [executable, "serve", "--service"], version: cliVersion })
     started = true
   }
   const client = OpenCode.make({ baseUrl: endpoint.url, headers: Service.headers(endpoint) })

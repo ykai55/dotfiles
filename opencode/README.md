@@ -92,13 +92,32 @@ object with `prompt`, `images`, `attachments`, `outputDirectory`, and `model` fi
 `plugins/current-time/index.ts` tracks successful and failed tools through
 `ctx.tool.hook("execute.after")`. The next `context` hook inserts a user-role time
 reminder immediately after the matching tool-result message, preserving tool
-call/result pairs. The reminder affects only that model request.
+call/result pairs. The reminder includes the current wall clock and, when the
+current turn is known, how long that turn has been running. The reminder affects
+only that model request.
 
-Each session is throttled independently. The first result is eligible immediately;
-later reminders require more than one minute since the previous insertion. The
-latest completed tool supersedes an unconsumed reminder. Session deletion clears
-the state, and unloading aborts the event subscription. Display and throttling
-both use the system wall clock.
+A `prompt` hook records each new user message. On the first `context` for that
+message, the plugin reads `ctx.session.context` and finds the idle boundary before
+the message. If the previous turn ended at least five minutes earlier, or ended
+with a failure or interruption, the hook appends a request-local `turn-gap`
+reminder to the user message. It reports the previous outcome, interruption
+reason, failure summary, previous completion time, elapsed pause, and any
+compaction observed before the message. Steered messages that join a running
+turn do not receive a turn-gap reminder.
+
+The event subscription caches `session.execution.failed/interrupted` and
+`session.compaction.started/ended/failed` details. Interruption and compaction
+reasons are only available from events; the active context exposes the idle
+outcome but not the interruption reason. Failure and compaction errors are
+truncated before injection.
+
+Each session is throttled independently for tool reminders. The first result is
+eligible immediately; later reminders require more than one minute since the
+previous insertion. The latest completed tool supersedes an unconsumed reminder.
+Session deletion clears the state, and unloading aborts the event subscription.
+Display and throttling both use the system wall clock. Turn-gap reminders are
+deduplicated by the prompt message ID and only apply to normal user turns after
+an idle boundary.
 
 ### Session title maintenance
 
@@ -159,11 +178,12 @@ npm run test:smoke -- --explicit
 ```
 
 Unit tests use the released HTTP client with a fake transport and mock channel
-requests. Smoke tests start an isolated OpenCode 2.0.16 service and a local fake
-model, verify all four plugins load, exercise three user turns and a rename tool
-call, check both reminders, and reload the plugins. The explicit mode also tests
-an authenticated `serve` listener. Notification channels are disabled in smoke
-tests; their outbound APIs are covered by the simulated channel tests.
+requests. Smoke tests start an isolated service with the installed `opencode`
+CLI and a local fake model, verify all four plugins load, exercise three user
+turns and a rename tool call, check both reminders, and reload the plugins. The
+explicit mode also tests an authenticated `serve` listener. Notification channels
+are disabled in smoke tests; their outbound APIs are covered by the simulated
+channel tests.
 
 For standalone provider configuration generation from an OpenAI-compatible API,
 see [OpenCode provider generator](provider-gen.md).

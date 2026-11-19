@@ -99,7 +99,7 @@ export function fixture() {
     },
   }
   f.emit = (type, data, location = { directory: "/test" }) => Promise.all([...subscriptions].map((subscription) => new Promise((resolve) => {
-    subscription.queue.push({ event: { type, data, location }, resolve })
+    subscription.queue.push({ event: { type, data, location, created: Date.now() }, resolve })
     subscription.notify()
   })))
   f.turn = (text = "User input", sessionID = "ses_main", files) => {
