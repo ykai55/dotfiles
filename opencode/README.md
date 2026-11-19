@@ -134,8 +134,11 @@ real user turn. OpenCode's native title agent continues to generate initial titl
 - Reminders use delivered user-message history with pagination, including turns
   before compaction. Message IDs deduplicate the count; file-only input counts,
   while empty, synthetic, and assistant messages do not. The `context` hook appends
-  the reminder to the matching user message only in the outgoing request. Tool
-  continuations retain the reminder until a successful rename dismisses that turn.
+  the reminder to the matching user message only in the outgoing request. The
+  reminder is a short nudge: check the title, rename only when inaccurate, and do
+  not announce the check; the naming rules stay in the `rename_session` tool
+  description. Tool continuations retain the reminder until a successful rename
+  dismisses that turn.
 - `rename_session({ name, reason?, emoji? })` accepts a plain title. `reason` is
   `refinement`, `topic_shift`, or `manual`. Initial names, `topic_shift`, and
   `emoji=true` receive a prefix; existing prefixes are preserved. The final title
