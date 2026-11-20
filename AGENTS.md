@@ -14,6 +14,14 @@ state, or deployment notes that should not be public. When a sensitive local
 file or generated state may exist in this checkout, add it to `.gitignore` or
 the nearest appropriate ignore file whenever possible.
 
+## Local Machine Knowledge Base
+
+Local machine, home-network, and service inventory details belong in `local/`
+(that is, `~/dotfiles/local/`). The directory is gitignored except for
+`.gitkeep`, so internal IPs, hostnames, ports, and service inventories stay out
+of the public repository. Do not record credentials, tokens, or private keys
+there.
+
 ## Subdirectory Instructions
 
 - More specific `AGENTS.md` files exist under some subdirectories. Follow the
@@ -36,6 +44,8 @@ are missing.
 - `clip/`: independent Rust workspace for the cross-platform clipboard CLI and
   history tools.
 - `docs/`: design notes, plans, and other project documentation.
+- `local/`: local-only machine and network knowledge base. Gitignored except
+  for `.gitkeep`; never commit its contents.
 - `github-codebase-sync/`: Docker and shell helpers for syncing this repository
   into codebase-memory tooling.
 - `tbox/`: Python package backing the `bin/tbox` tmux workflow helper.
