@@ -98,6 +98,41 @@ test("initial and topic-shift renames add emoji and exclude recent root prefixes
   expect(f.records.get("ses_main").title).not.toBe("New direction")
 })
 
+test("renames from outside the tool keep the emoji the plugin assigned", async () => {
+  await setup()
+  f.records.get("ses_main").title = undefined
+  await f.emit("session.created", { sessionID: "ses_main", location: { directory: "/test" } })
+  f.records.get("ses_main").title = "Native title"
+  await f.emit("session.renamed", { sessionID: "ses_main", title: "Native title" })
+  const emoji = f.records.get("ses_main").title.split(" ")[0]
+  expect(emoji).toMatch(/^\p{Extended_Pictographic}/u)
+
+  // OpenChamber's work.name replaces the whole title, as the rename dialog does.
+  f.records.get("ses_main").title = "Task name"
+  await f.emit("session.renamed", { sessionID: "ses_main", title: "Task name" })
+  expect(f.records.get("ses_main").title).toBe(`${emoji} Task name`)
+
+  f.records.get("ses_main").title = "🌊 Chosen elsewhere"
+  await f.emit("session.renamed", { sessionID: "ses_main", title: "🌊 Chosen elsewhere" })
+  f.records.get("ses_main").title = "Task name again"
+  await f.emit("session.renamed", { sessionID: "ses_main", title: "Task name again" })
+  expect(f.records.get("ses_main").title).toBe("🌊 Task name again")
+})
+
+test("external renames keep the emoji across a plugin restart", async () => {
+  await setup()
+  f.records.get("ses_main").title = undefined
+  await f.emit("session.created", { sessionID: "ses_main", location: { directory: "/test" } })
+  f.records.get("ses_main").title = "Native title"
+  await f.emit("session.renamed", { sessionID: "ses_main", title: "Native title" })
+  const prefixed = f.records.get("ses_main").title
+  await f.cleanup()
+  f.cleanup = await renameSelf.setup(f.ctx)
+  f.records.get("ses_main").title = "Task name"
+  await f.emit("session.renamed", { sessionID: "ses_main", title: "Task name" })
+  expect(f.records.get("ses_main").title).toBe(prefixed.replace("Native title", "Task name"))
+})
+
 test("failed rename does not poison the queue", async () => {
   await setup()
   f.route = (request) => request.method === "PATCH" ? Response.json({ message: "failure" }, { status: 500 }) : undefined

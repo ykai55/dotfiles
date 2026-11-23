@@ -131,6 +131,11 @@ real user turn. OpenCode's native title agent continues to generate initial titl
   preserved, including text longer than the later 30-character tool limit.
 - Fork naming uses `session.forked` and the structured `Session.Info.fork` field.
   It replaces an inherited emoji while preserving the title body.
+- Renames from outside the tool, such as OpenChamber's `work.name` for a lead or
+  the session rename dialog, keep the session's emoji: the plugin remembers the
+  prefix it assigned and restores it when the new title has none. Starting up
+  seeds that memory from existing titles, so the behavior survives a restart. A
+  title renamed with a different leading emoji adopts the new one.
 - Reminders use delivered user-message history with pagination, including turns
   before compaction. Message IDs deduplicate the count; file-only input counts,
   while empty, synthetic, and assistant messages do not. The `context` hook appends

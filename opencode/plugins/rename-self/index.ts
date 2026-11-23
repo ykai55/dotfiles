@@ -39,11 +39,12 @@ export default Plugin.define({
   async setup(ctx) {
     const directory = ctx.location.directory
     const initialTitles = new Map<string, string | undefined>()
+    const keptEmoji = new Map<string, string>()
     const dismissedTurns = new Map<string, string>()
     const controller = new AbortController()
     let renameQueue: Promise<unknown> = Promise.resolve()
 
-    const chooseEmoji = async (sessionID: string, excluded?: string) => {
+    const rootSessions = async () => {
       const client = await serviceClient(ctx.options)
       const sessions = []
       let cursor: string | undefined
@@ -52,6 +53,23 @@ export default Plugin.define({
         sessions.push(...page.data)
         cursor = page.data.length ? page.cursor?.next ?? undefined : undefined
       } while (cursor)
+      return sessions
+    }
+
+    // Remember prefixes already on disk, so a rename from outside the tool
+    // (OpenChamber's work.name, the session title agent, the rename dialog)
+    // keeps the session's emoji instead of dropping it.
+    try {
+      for (const session of await rootSessions()) {
+        const emoji = leadingEmoji(session.title ?? "")
+        if (emoji && session.location.directory === directory) keptEmoji.set(session.id, emoji)
+      }
+    } catch (error) {
+      if (!controller.signal.aborted) console.warn("[rename-self] Emoji prefix seed skipped:", error)
+    }
+
+    const chooseEmoji = async (sessionID: string, excluded?: string) => {
+      const sessions = await rootSessions()
       const recent = sessions.filter((session) => session.id !== sessionID && !session.parentID)
         .sort((a, b) => b.time.updated - a.time.updated).slice(0, RECENT_SESSIONS)
       const lastUsed = new Map<string, number>()
@@ -75,6 +93,7 @@ export default Plugin.define({
         if (!fork && !initialTitles.has(sessionID)) return
         const previous = leadingEmoji(expected)
         if (previous && !fork) {
+          keptEmoji.set(sessionID, previous)
           initialTitles.delete(sessionID)
           return
         }
@@ -82,7 +101,21 @@ export default Plugin.define({
         const latest = await ctx.session.get({ sessionID })
         if (latest.title !== expected || latest.location.directory !== directory || controller.signal.aborted) return
         await ctx.session.update({ sessionID, title: `${emoji} ${previous ? expected.slice(previous.length).trimStart() : expected}` })
+        keptEmoji.set(sessionID, emoji)
         initialTitles.delete(sessionID)
+      })
+      renameQueue = operation.catch(() => undefined)
+      return operation
+    }
+
+    const keepEmoji = (sessionID: string, expected: string) => {
+      const operation = renameQueue.then(async () => {
+        const emoji = keptEmoji.get(sessionID)
+        if (!emoji || !expected.trim()) return
+        const current = await ctx.session.get({ sessionID })
+        if (current.parentID || current.location.directory !== directory || current.title !== expected) return
+        if (leadingEmoji(expected) || controller.signal.aborted) return
+        await ctx.session.update({ sessionID, title: `${emoji} ${expected}` })
       })
       renameQueue = operation.catch(() => undefined)
       return operation
@@ -155,6 +188,7 @@ export default Plugin.define({
             const title = emoji ? `${emoji} ${name}` : name
             context.signal.throwIfAborted()
             if (current.title !== title) await ctx.session.update({ sessionID: context.sessionID, title })
+            if (emoji) keptEmoji.set(context.sessionID, emoji)
             initialTitles.delete(context.sessionID)
             const messages = await ctx.session.context({ sessionID: context.sessionID })
             const latest = messages.findLast((message) => message.type === "user")
@@ -174,6 +208,7 @@ export default Plugin.define({
           const sessionID = event.data.sessionID
           if (event.type === "session.deleted") {
             initialTitles.delete(sessionID)
+            keptEmoji.delete(sessionID)
             dismissedTurns.delete(sessionID)
           } else if (event.type === "session.created") {
             if (event.data.location.directory === directory && !event.data.parentID && !event.data.title) initialTitles.set(sessionID, undefined)
@@ -184,6 +219,10 @@ export default Plugin.define({
               initialTitles.set(sessionID, event.data.title)
               await prefixTitle(sessionID, event.data.title)
             }
+          } else if (event.type === "session.renamed") {
+            const emoji = leadingEmoji(event.data.title)
+            if (emoji) keptEmoji.set(sessionID, emoji)
+            else if (keptEmoji.has(sessionID)) await keepEmoji(sessionID, event.data.title)
           } else if (event.type === "session.forked") {
             const session = await ctx.session.get({ sessionID })
             if (session.fork && session.title) await prefixTitle(sessionID, session.title, true)
