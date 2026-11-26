@@ -125,17 +125,28 @@ an idle boundary.
 title, exposes `rename_session`, and adds a request-local reminder on every third
 real user turn. OpenCode's native title agent continues to generate initial titles.
 
-- Initial naming starts from an observed untitled session. A `session.renamed`
-  event triggers prefix allocation; existing custom titles are not backfilled.
-  A final read avoids overwriting an intervening edit. Native title text is
-  preserved, including text longer than the later 30-character tool limit.
+- Initial naming starts from an observed untitled session. A native
+  `session.renamed` event triggers prefix allocation; existing custom titles are
+  not backfilled. A final read avoids overwriting an intervening edit. Native
+  title text is preserved, including text longer than the later 30-character
+  tool limit.
+- A title change not produced by this plugin and not recognized as the native
+  initial title generation belongs to the user. The plugin records that
+  ownership in plugin storage, stops periodic reminders, and rejects automatic
+  renames. The session keeps its emoji: a change from outside the tool, such as
+  OpenChamber's `work.name` for a lead or the session rename dialog, has the
+  remembered prefix restored when the new title has none, and a new leading
+  emoji replaces the remembered one. Startup seeds that memory from existing
+  titles, so it survives a restart. An exact user-supplied replacement uses
+  `reason: "manual"` and remains user-owned; a user request for the model to
+  choose a replacement uses `reason: "requested"` and returns the result to
+  model management. Native generation is recognized only after the `title` HTTP
+  response stream finishes, so a rename while that stream is still in progress
+  is not mistaken for a native one. Ownership survives plugin reloads and is
+  removed with the session.
 - Fork naming uses `session.forked` and the structured `Session.Info.fork` field.
-  It replaces an inherited emoji while preserving the title body.
-- Renames from outside the tool, such as OpenChamber's `work.name` for a lead or
-  the session rename dialog, keep the session's emoji: the plugin remembers the
-  prefix it assigned and restores it when the new title has none. Starting up
-  seeds that memory from existing titles, so the behavior survives a restart. A
-  title renamed with a different leading emoji adopts the new one.
+  It replaces an inherited emoji while preserving the title body. A fork of a
+  user-owned session keeps the inherited title and ownership.
 - Reminders use delivered user-message history with pagination, including turns
   before compaction. Message IDs deduplicate the count; file-only input counts,
   while empty, synthetic, and assistant messages do not. The `context` hook appends
@@ -145,10 +156,15 @@ real user turn. OpenCode's native title agent continues to generate initial titl
   description. Tool continuations retain the reminder until a successful rename
   dismisses that turn.
 - `rename_session({ name, reason?, emoji? })` accepts a plain title. `reason` is
-  `refinement`, `topic_shift`, or `manual`. Initial names, `topic_shift`, and
-  `emoji=true` receive a prefix; existing prefixes are preserved. The final title
-  must fit 30 grapheme clusters, including the emoji and space. Overlong input is
-  rejected rather than truncated, and identical titles do not produce writes.
+  `refinement`, `topic_shift`, `requested`, `temporary`, or `manual`. Initial
+  names, `topic_shift`, and `emoji=true` receive a prefix; existing prefixes are
+  preserved. A user-owned title is only changed after explicit user
+  authorization: `manual` records an exact user-supplied title as user-owned,
+  while `requested` applies a model-chosen title and removes ownership.
+  `temporary` applies a transient user-authorized change without altering
+  ownership. The final title must fit 30 grapheme clusters, including the emoji
+  and space. Overlong input is rejected rather than truncated, and identical
+  titles do not produce writes.
 - Prefix allocation excludes emojis from the 50 most recently updated other root
   sessions in the same directory. The 96-symbol pool falls back to the
   least-recently-used emoji. Writes are serialized within each plugin instance.

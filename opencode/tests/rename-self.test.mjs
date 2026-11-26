@@ -43,15 +43,129 @@ test("history pagination counts only real user input and never child sessions", 
 
 test("native initial titles receive one emoji; existing custom titles are not backfilled", async () => {
   await setup()
-  await f.emit("session.renamed", { sessionID: "ses_main", title: "Existing" })
+  f.records.get("ses_main").title = "Existing"
+  await f.emit("session.created", { sessionID: "ses_main", location: { directory: "/test" } })
   expect(f.writes).toHaveLength(0)
+  f.records.set("ses_new", { ...f.records.get("ses_main"), id: "ses_new", title: undefined })
+  await f.emit("session.created", { sessionID: "ses_new", location: { directory: "/test" } })
+  f.records.get("ses_new").title = "Native title"
+  await f.title("ses_new")
+  await f.emit("session.renamed", { sessionID: "ses_new", title: "Native title" })
+  expect(f.records.get("ses_new").title).toMatch(/^\p{Extended_Pictographic}.* Native title$/u)
+  expect(f.records.get("ses_main").title).toBe("Existing")
+  await f.emit("session.renamed", { sessionID: "ses_new", title: f.records.get("ses_new").title })
+  expect(f.writes).toHaveLength(1)
+})
+
+test("an external rename owns the title: no prefix, no reminders, and automatic renames are rejected", async () => {
+  await setup()
   f.records.get("ses_main").title = undefined
   await f.emit("session.created", { sessionID: "ses_main", location: { directory: "/test" } })
+  f.records.get("ses_main").title = "My title"
+  await f.emit("session.renamed", { sessionID: "ses_main", title: "My title" })
+  expect(f.writes).toHaveLength(0)
+  f.turn(); f.turn(); f.turn()
+  expect(reminders(await f.context())).toHaveLength(0)
+  await expect(f.rename({ name: "Automatic" })).rejects.toThrow("user set this session title")
+  await f.rename({ name: "Explicit", reason: "manual" })
+  expect(f.records.get("ses_main").title).toBe("Explicit")
+})
+
+test("a manual tool rename records ownership", async () => {
+  await setup()
+  await f.rename({ name: "Chosen", reason: "manual" })
+  expect(f.records.get("ses_main").title).toBe("Chosen")
+  await f.cleanup()
+  f.cleanup = await renameSelf.setup(f.ctx)
+  f.turn(); f.turn(); f.turn()
+  expect(reminders(await f.context())).toHaveLength(0)
+  await expect(f.rename({ name: "Automatic" })).rejects.toThrow("user set this session title")
+  await f.rename({ name: "Explicit", reason: "manual" })
+  expect(f.records.get("ses_main").title).toBe("Explicit")
+})
+
+test("a requested model-chosen rename replaces and unlocks a user-owned title", async () => {
+  await setup()
+  await f.rename({ name: "Exact user title", reason: "manual" })
+  await f.rename({ name: "Model suggestion", reason: "requested" })
+  expect(f.records.get("ses_main").title).toBe("Model suggestion")
+  await f.cleanup()
+  f.cleanup = await renameSelf.setup(f.ctx)
+  await f.rename({ name: "Automatic" })
+  expect(f.records.get("ses_main").title).toBe("Automatic")
+})
+
+test("temporary renames preserve the existing ownership state", async () => {
+  await setup()
+  await f.rename({ name: "Watch: Original", reason: "temporary" })
+  await f.rename({ name: "Original", reason: "temporary" })
+  await f.rename({ name: "Automatic" })
+  await f.rename({ name: "Exact user title", reason: "manual" })
+  await f.rename({ name: "Watch: Exact user title", reason: "temporary" })
+  await f.rename({ name: "Exact user title", reason: "temporary" })
+  await expect(f.rename({ name: "Blocked" })).rejects.toThrow("user set this session title")
+})
+
+test("a rename during native title generation is external; a completed native title is prefixed", async () => {
+  await setup()
+  f.records.set("ses_generating", { ...f.records.get("ses_main"), id: "ses_generating", title: undefined })
+  f.records.get("ses_main").title = undefined
+  await f.emit("session.created", { sessionID: "ses_generating", location: { directory: "/test" } })
+  await f.emit("session.created", { sessionID: "ses_main", location: { directory: "/test" } })
+  await f.title("ses_generating", false)
+  f.records.get("ses_generating").title = "Quick title"
+  await f.emit("session.renamed", { sessionID: "ses_generating", title: "Quick title" })
+  expect(f.records.get("ses_generating").title).toBe("Quick title")
   f.records.get("ses_main").title = "Native title"
+  await f.title("ses_main")
   await f.emit("session.renamed", { sessionID: "ses_main", title: "Native title" })
   expect(f.records.get("ses_main").title).toMatch(/^\p{Extended_Pictographic}.* Native title$/u)
-  await f.emit("session.renamed", { sessionID: "ses_main", title: f.records.get("ses_main").title })
   expect(f.writes).toHaveLength(1)
+})
+
+test("an unfinished title response does not make a later manual rename look native", async () => {
+  await setup()
+  f.records.get("ses_main").title = undefined
+  await f.emit("session.created", { sessionID: "ses_main", location: { directory: "/test" } })
+  await f.title("ses_main", false)
+  f.records.get("ses_main").title = "Manual during generation"
+  await f.emit("session.renamed", { sessionID: "ses_main", title: "Manual during generation" })
+  expect(f.records.get("ses_main").title).toBe("Manual during generation")
+  expect(f.writes).toHaveLength(0)
+  await expect(f.rename({ name: "Automatic" })).rejects.toThrow("user set this session title")
+})
+
+test("renames of child or foreign sessions are ignored", async () => {
+  await setup()
+  f.records.set("ses_child", { ...f.records.get("ses_main"), id: "ses_child", parentID: "ses_main", title: "Child title" })
+  f.records.set("ses_other", { ...f.records.get("ses_main"), id: "ses_other", title: "Other title", location: { directory: "/other" } })
+  await f.emit("session.renamed", { sessionID: "ses_child", title: "Child renamed" })
+  await f.emit("session.renamed", { sessionID: "ses_other", title: "Other renamed" })
+  expect(f.writes).toHaveLength(0)
+  expect([...f.storage.keys()]).toHaveLength(0)
+})
+
+test("the plugin's own title update is not mistaken for a user rename", async () => {
+  await setup()
+  f.records.get("ses_main").title = "🌱 Existing"
+  await f.rename({ name: "Managed", reason: "topic_shift" })
+  const title = f.records.get("ses_main").title
+  await f.emit("session.renamed", { sessionID: "ses_main", title })
+  await f.rename({ name: "Next", reason: "topic_shift" })
+  expect(f.records.get("ses_main").title).toContain("Next")
+})
+
+test("title ownership survives a plugin reload", async () => {
+  await setup()
+  f.records.get("ses_main").title = "My title"
+  await f.emit("session.renamed", { sessionID: "ses_main", title: "My title" })
+  await f.cleanup()
+  f.cleanup = await renameSelf.setup(f.ctx)
+  f.turn(); f.turn(); f.turn()
+  expect(reminders(await f.context())).toHaveLength(0)
+  await expect(f.rename({ name: "Automatic" })).rejects.toThrow("user set this session title")
+  await f.emit("session.deleted", { sessionID: "ses_main" })
+  expect([...f.storage.keys()]).toHaveLength(0)
 })
 
 test("structured fork events get a fresh prefix and stale title events cannot overwrite edits", async () => {
@@ -77,7 +191,7 @@ test("rename preserves emoji, enforces grapheme limits and suppresses subsequent
   const result = await f.rename({ name: "e\u0301".repeat(28), reason: "manual" })
   expect(result.content).toContain("🌱")
   expect(reminders(await f.context())).toHaveLength(0)
-  await f.rename({ name: "e\u0301".repeat(28) })
+  await f.rename({ name: "e\u0301".repeat(28), reason: "manual" })
   expect(f.writes).toHaveLength(1)
 })
 
@@ -103,6 +217,7 @@ test("renames from outside the tool keep the emoji the plugin assigned", async (
   f.records.get("ses_main").title = undefined
   await f.emit("session.created", { sessionID: "ses_main", location: { directory: "/test" } })
   f.records.get("ses_main").title = "Native title"
+  await f.title("ses_main")
   await f.emit("session.renamed", { sessionID: "ses_main", title: "Native title" })
   const emoji = f.records.get("ses_main").title.split(" ")[0]
   expect(emoji).toMatch(/^\p{Extended_Pictographic}/u)
@@ -124,6 +239,7 @@ test("external renames keep the emoji across a plugin restart", async () => {
   f.records.get("ses_main").title = undefined
   await f.emit("session.created", { sessionID: "ses_main", location: { directory: "/test" } })
   f.records.get("ses_main").title = "Native title"
+  await f.title("ses_main")
   await f.emit("session.renamed", { sessionID: "ses_main", title: "Native title" })
   const prefixed = f.records.get("ses_main").title
   await f.cleanup()
