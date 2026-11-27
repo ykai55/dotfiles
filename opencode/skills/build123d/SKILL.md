@@ -163,11 +163,11 @@ In builder mode the same functions take no first argument — the context suppli
 | --- | --- |
 | Selecting faces or edges; labels and assemblies; placement frames; boolean, loft and fillet failures; validity | [modeling-patterns.md](references/modeling-patterns.md) |
 | Placing and mating parts; build123d joints, ranges and `connect_to` | [assemblies-and-joints.md](references/assemblies-and-joints.md) |
-| Dimensions, clearances, interference, mass, geometry diagnostics | [measurement-and-checks.md](references/measurement-and-checks.md) |
+| Dimensions, interference, mass, mesh-reference sections and delivered 3MF checks | [measurement-and-checks.md](references/measurement-and-checks.md) |
 | 2D profiles, flat patterns, kerf, DXF export and validation | [profiles-and-dxf.md](references/profiles-and-dxf.md) |
 | Screw threads, threaded caps, printed fasteners, turning fits | [threads-and-fasteners.md](references/threads-and-fasteners.md) |
 | Print orientation, overhangs, walls and infill, readiness checklist | [printability.md](references/printability.md) |
-| Clearances, bayonets, snap tabs, clamps, assembly order | [fits-and-snap-fits.md](references/fits-and-snap-fits.md) |
+| Clearances, sliding rails and end latches, full insertion travel, bayonets, snap tabs and clamps | [fits-and-snap-fits.md](references/fits-and-snap-fits.md) |
 
 ## Attribution
 

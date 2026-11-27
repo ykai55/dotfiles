@@ -30,6 +30,21 @@ minimum diameter at the same time. In one build that forced the thread to be 2.5
 than the tube, and the resulting step became the hose's insertion stop. The constraint was
 never "the thread equals the tube" — that was an assumption.
 
+### Sliding guides with an end latch
+
+Sketch four poses: entry, first contact, tooth crossing the crest, and seated. Mark
+which surfaces guide, which part can flex, and what stops the motion. If a tooth is
+only needed at the end but needs a relief groove along most of the rail, try moving
+it to the side wall near the closed end. A local recess in the slider can then catch
+it without sacrificing the long bearing surface. Leave enough compliance there:
+a bump on a rigid end wall facing the insertion direction is a stop, not a latch.
+
+Derive both guides from one cross-section. Dimension **running clearance**, **interference
+at the crest**, and **clearance in the seated recess** separately: widening the whole
+guide to soften the click also increases play everywhere else. For a hidden pair,
+inspect both rails with the slider removed. Section each tooth and sight along the
+specified viewing direction to check that the retaining lip actually covers its tip.
+
 ## Bayonets only work on round ports
 
 A tang travels a circle around the axis; the slot it follows must be cut into a surface that
@@ -74,10 +89,10 @@ the print orientation, on one plate.
 "Push the plug in 10 mm" fails when the cavity bends. Measure it:
 
 ```python
-# plug: the part that goes in; cavity: the real inner volume of the port
+# Intersect with the housing material, not the empty space inside the port.
 for depth in (0.0, 0.1, 1.0, 3.0, 4.0, 5.0):
     moved = plug.moved(bd.Location((0, 0, -depth)))
-    clash = moved & cavity
+    clash = moved & housing
     print(depth, clash.volume if clash else 0.0)
 ```
 
@@ -89,7 +104,7 @@ that matters is the one measured against the real cavity.
 
 | Question | Measurement |
 | --- | --- |
-| Does it turn / slide freely? | Interference at the assembled pose and at both ends of the travel |
+| Does it turn / slide freely? | Sample the full travel from entry to seat; choose a step smaller than the shortest contact feature and refine around transitions. Record where contact begins, peaks and ends, and on which side. |
 | Does it come apart? | Interference after pulling out the nominal clearance, then after the hook's engagement |
 | Does it stop where it should? | Interference just past the end stop — it must be non-zero |
 | Does it droop? | Tilt one side by 0.5° and measure the contact; a face that is really seated shows a small, finite clash, not silence |
@@ -97,6 +112,9 @@ that matters is the one measured against the real cavity.
 
 - **A joint that is clear everywhere has no stop.** The end-stop clash is the feature.
 - **A joint that clears at every pose has no preload** either — something must press.
+- Rigid overlap locates nominal interference; it does not measure insertion force,
+  retention or wear. Test those on a print with the intended material, orientation
+  and flexing length.
 
 ## Clamps and seams
 

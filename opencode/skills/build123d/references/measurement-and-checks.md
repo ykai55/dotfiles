@@ -34,6 +34,30 @@ throwaway ones in a scratch folder.
 - **A number nothing asks for** needs no check. Measuring everything costs kernel time and
   buys nothing.
 
+## Reconstructing a reference mesh
+
+Pick a section that distinguishes the candidate features. A rounded silhouette in
+plan can still have a straight side wall with two chamfers through its thickness.
+Overlay mating parts at the **same height in the same assembly frame**; take a second
+section before interpreting an isolated thickness reading as a pocket or fitting a loft.
+
+For a whole-part comparison, sample by surface area and measure in both directions.
+New-to-reference alone can miss removed material; raw vertex averages overweight finely
+tessellated fillets. Report the sampled maximum as a sample, not a bound. Inspect small
+functional features directly even when the overall percentile looks excellent.
+
+## Checking a delivered print project
+
+Reopen the actual 3MF. A tray and a floating lip can be two individually watertight
+shells under one object name: check connectivity for every part intended to print
+as one piece. Use assembly transforms for travel checks and build-item transforms
+for bed contact, plate bounds and spacing between parts. Slice the delivered project
+at the intended layer height to see whether small teeth and thin walls survive.
+
+Render the exposed guide, the partially inserted slider and a close-up of both mating
+features from that file. Open the resulting images and check that the feature in
+question is visible; label section cuts so they cannot be mistaken for missing material.
+
 ## Single-shape numbers
 
 ```python
