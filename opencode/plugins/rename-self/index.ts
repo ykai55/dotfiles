@@ -33,6 +33,10 @@ const leadingEmoji = (title: string) => {
   return first && /\p{Extended_Pictographic}|\p{Regional_Indicator}|\u20e3/u.test(first) ? first : undefined
 }
 const REMINDER_MARKER = '<system-reminder source="rename-self">'
+const NATIVE_TITLE_WINDOW = 10_000
+const DEFAULT_TITLE = /^(?:New|Child) session - \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
+const titleOwnerKey = (sessionID: string) => `title-owner:${sessionID}`
+const isDefaultTitle = (title: string | undefined) => title === undefined || title === "" || DEFAULT_TITLE.test(title)
 
 export default Plugin.define({
   id: "rename-self",
@@ -41,6 +45,10 @@ export default Plugin.define({
     const initialTitles = new Map<string, string | undefined>()
     const keptEmoji = new Map<string, string>()
     const dismissedTurns = new Map<string, string>()
+    const lastTitles = new Map<string, string | undefined>()
+    const expectedTitles = new Map<string, string>()
+    const nativeTitles = new Map<string, number>()
+    const titleLocks = new Map<string, boolean>()
     const controller = new AbortController()
     let renameQueue: Promise<unknown> = Promise.resolve()
 
@@ -54,6 +62,42 @@ export default Plugin.define({
         cursor = page.data.length ? page.cursor?.next ?? undefined : undefined
       } while (cursor)
       return sessions
+    }
+
+    const isTitleLocked = async (sessionID: string) => {
+      const cached = titleLocks.get(sessionID)
+      if (cached !== undefined) return cached
+      try {
+        const locked = (await ctx.storage.get(titleOwnerKey(sessionID))) === true
+        titleLocks.set(sessionID, locked)
+        return locked
+      } catch (error) {
+        if (!controller.signal.aborted) console.warn("[rename-self] Title ownership read skipped:", error)
+        return false
+      }
+    }
+
+    const lockTitle = async (sessionID: string) => {
+      titleLocks.set(sessionID, true)
+      try {
+        await ctx.storage.set(titleOwnerKey(sessionID), true)
+      } catch (error) {
+        if (!controller.signal.aborted) console.warn("[rename-self] Title ownership write skipped:", error)
+      }
+    }
+
+    const unlockTitle = async (sessionID: string) => {
+      titleLocks.set(sessionID, false)
+      try {
+        await ctx.storage.remove(titleOwnerKey(sessionID))
+      } catch (error) {
+        if (!controller.signal.aborted) console.warn("[rename-self] Title ownership removal skipped:", error)
+      }
+    }
+
+    const isNativeTitle = (sessionID: string, previousKnown: boolean, previous: string | undefined, created: number) => {
+      const generatedAt = nativeTitles.get(sessionID)
+      return generatedAt !== undefined && created - generatedAt <= NATIVE_TITLE_WINDOW && (!previousKnown || isDefaultTitle(previous))
     }
 
     // Remember prefixes already on disk, so a rename from outside the tool
@@ -88,6 +132,10 @@ export default Plugin.define({
 
     const prefixTitle = (sessionID: string, expected: string, fork = false) => {
       const operation = renameQueue.then(async () => {
+        if (await isTitleLocked(sessionID)) {
+          initialTitles.delete(sessionID)
+          return
+        }
         const current = await ctx.session.get({ sessionID })
         if (current.parentID || current.location.directory !== directory || current.title !== expected) return
         if (!fork && !initialTitles.has(sessionID)) return
@@ -100,8 +148,16 @@ export default Plugin.define({
         const emoji = await chooseEmoji(sessionID, fork ? previous : undefined)
         const latest = await ctx.session.get({ sessionID })
         if (latest.title !== expected || latest.location.directory !== directory || controller.signal.aborted) return
-        await ctx.session.update({ sessionID, title: `${emoji} ${previous ? expected.slice(previous.length).trimStart() : expected}` })
-        keptEmoji.set(sessionID, emoji)
+        const title = `${emoji} ${previous ? expected.slice(previous.length).trimStart() : expected}`
+        expectedTitles.set(sessionID, title)
+        try {
+          await ctx.session.update({ sessionID, title })
+          keptEmoji.set(sessionID, emoji)
+          lastTitles.set(sessionID, title)
+        } catch (error) {
+          expectedTitles.delete(sessionID)
+          throw error
+        }
         initialTitles.delete(sessionID)
       })
       renameQueue = operation.catch(() => undefined)
@@ -115,17 +171,49 @@ export default Plugin.define({
         const current = await ctx.session.get({ sessionID })
         if (current.parentID || current.location.directory !== directory || current.title !== expected) return
         if (leadingEmoji(expected) || controller.signal.aborted) return
-        await ctx.session.update({ sessionID, title: `${emoji} ${expected}` })
+        const title = `${emoji} ${expected}`
+        expectedTitles.set(sessionID, title)
+        try {
+          await ctx.session.update({ sessionID, title })
+          lastTitles.set(sessionID, title)
+        } catch (error) {
+          expectedTitles.delete(sessionID)
+          throw error
+        }
       })
       renameQueue = operation.catch(() => undefined)
       return operation
     }
 
+    await ctx.session.hook("http.response", (response) => {
+      if (response.kind !== "title" || !response.response.ok || !response.response.body) return
+      const sessionID = response.sessionID
+      try {
+        const body = response.response.body.pipeThrough(new TransformStream({
+          transform(chunk, controller) {
+            controller.enqueue(chunk)
+          },
+          flush() {
+            nativeTitles.set(sessionID, Date.now())
+          },
+        }))
+        response.response = new Response(body, {
+          status: response.response.status,
+          statusText: response.response.statusText,
+          headers: response.response.headers,
+        })
+      } catch (error) {
+        if (!controller.signal.aborted) console.warn("[rename-self] Title response tracking skipped:", error)
+      }
+    })
+
     await ctx.session.hook("context", async (event) => {
       try {
         const session = await ctx.session.get({ sessionID: event.sessionID })
         if (session.parentID || session.location.directory !== directory) return
+        lastTitles.set(session.id, session.title)
         if (!session.title) initialTitles.set(session.id, undefined)
+        if (await isTitleLocked(session.id)) return
         // Read delivered user messages, including pre-compaction history. Admission hooks can retry.
         const client = await serviceClient(ctx.options)
         const turns = new Map<string, { id: string; time: { created: number } }>()
@@ -164,12 +252,16 @@ export default Plugin.define({
           "For a topic shift, wait for 2-3 real user turns, then blend it with a recognizable part of the earlier topic.",
           "Clarifications, tool calls and retries are not topic shifts. Supply a plain title without an emoji prefix.",
           "Existing emoji prefixes are retained; initial names, topic_shift and emoji=true receive a plugin-selected prefix.",
+          "A title changed outside this plugin, such as the user renaming the session, belongs to the user: no new prefix, its existing emoji is kept, and periodic rename reminders stop.",
+          "Use reason manual only when the user supplied the exact title; it records the title as the user's.",
+          "Use reason requested when the user asked you to choose a title; it may replace a user-set title but leaves the result model-managed.",
+          "Use reason temporary for an explicitly requested transient title change that must preserve the current ownership state.",
           "The final title must fit 30 grapheme clusters, or 28 for the plain title when prefixed. Do not rename speculatively.",
         ].join(" "),
         input: {
           type: "object", properties: {
             name: { type: "string", description: "Plain session title without an emoji prefix" },
-            reason: { type: "string", enum: ["refinement", "topic_shift", "manual"] },
+            reason: { type: "string", enum: ["refinement", "topic_shift", "requested", "temporary", "manual"], description: "Use manual for an exact user-supplied title, requested for a model-chosen title, or temporary to preserve ownership" },
             emoji: { type: "boolean" },
           }, required: ["name"], additionalProperties: false,
         },
@@ -180,6 +272,10 @@ export default Plugin.define({
             if (!name || /[\p{Cc}\u202a-\u202e\u2066-\u2069]/u.test(name)) throw new Error("rename_session: provide a non-empty title without control characters")
             if (leadingEmoji(name)) throw new Error("rename_session: omit the emoji prefix; the plugin selects and preserves it")
             const current = await ctx.session.get({ sessionID: context.sessionID })
+            const locked = await isTitleLocked(context.sessionID)
+            if (locked && args.reason !== "manual" && args.reason !== "requested" && args.reason !== "temporary") {
+              throw new Error(`rename_session: the user set this session title (${JSON.stringify(current.title ?? "")}); keep it unless the user explicitly asks to rename, then retry with reason manual for their exact title, requested for a model-chosen title, or temporary for a transient change`)
+            }
             let emoji = leadingEmoji(current.title ?? "")
             const needsEmoji = !!emoji || !current.title || args.emoji === true || args.reason === "topic_shift"
             const length = [...segmenter.segment(name)].length + (needsEmoji ? 2 : 0)
@@ -187,8 +283,19 @@ export default Plugin.define({
             if (needsEmoji && !emoji) emoji = await chooseEmoji(context.sessionID)
             const title = emoji ? `${emoji} ${name}` : name
             context.signal.throwIfAborted()
-            if (current.title !== title) await ctx.session.update({ sessionID: context.sessionID, title })
+            if (current.title !== title) {
+              expectedTitles.set(context.sessionID, title)
+              try {
+                await ctx.session.update({ sessionID: context.sessionID, title })
+                lastTitles.set(context.sessionID, title)
+              } catch (error) {
+                expectedTitles.delete(context.sessionID)
+                throw error
+              }
+            }
             if (emoji) keptEmoji.set(context.sessionID, emoji)
+            if (!locked && args.reason === "manual") await lockTitle(context.sessionID)
+            else if (locked && args.reason === "requested") await unlockTitle(context.sessionID)
             initialTitles.delete(context.sessionID)
             const messages = await ctx.session.context({ sessionID: context.sessionID })
             const latest = messages.findLast((message) => message.type === "user")
@@ -210,22 +317,55 @@ export default Plugin.define({
             initialTitles.delete(sessionID)
             keptEmoji.delete(sessionID)
             dismissedTurns.delete(sessionID)
-          } else if (event.type === "session.created") {
-            if (event.data.location.directory === directory && !event.data.parentID && !event.data.title) initialTitles.set(sessionID, undefined)
-          } else if (event.type === "session.renamed" && initialTitles.has(sessionID)) {
-            const expected = initialTitles.get(sessionID)
-            if (expected !== undefined && expected !== event.data.title) initialTitles.delete(sessionID)
-            else {
-              initialTitles.set(sessionID, event.data.title)
-              await prefixTitle(sessionID, event.data.title)
+            lastTitles.delete(sessionID)
+            expectedTitles.delete(sessionID)
+            nativeTitles.delete(sessionID)
+            titleLocks.delete(sessionID)
+            try {
+              await ctx.storage.remove(titleOwnerKey(sessionID))
+            } catch (error) {
+              if (!controller.signal.aborted) console.warn("[rename-self] Title ownership cleanup skipped:", error)
             }
+          } else if (event.type === "session.created") {
+            lastTitles.set(sessionID, event.data.title)
+            if (event.data.location.directory === directory && !event.data.parentID && !event.data.title) initialTitles.set(sessionID, undefined)
           } else if (event.type === "session.renamed") {
+            const session = await ctx.session.get({ sessionID })
+            if (session.parentID || session.location.directory !== directory) continue
+            const previousKnown = lastTitles.has(sessionID)
+            const previous = lastTitles.get(sessionID)
             const emoji = leadingEmoji(event.data.title)
+            lastTitles.set(sessionID, event.data.title)
             if (emoji) keptEmoji.set(sessionID, emoji)
-            else if (keptEmoji.has(sessionID)) await keepEmoji(sessionID, event.data.title)
+            if (expectedTitles.get(sessionID) === event.data.title) {
+              expectedTitles.delete(sessionID)
+            } else if (await isTitleLocked(sessionID)) {
+              initialTitles.delete(sessionID)
+              nativeTitles.delete(sessionID)
+              if (!emoji) await keepEmoji(sessionID, event.data.title)
+            } else if (isNativeTitle(sessionID, previousKnown, previous, event.created)) {
+              nativeTitles.delete(sessionID)
+              if (initialTitles.has(sessionID)) {
+                const expected = initialTitles.get(sessionID)
+                if (expected !== undefined && expected !== event.data.title) initialTitles.delete(sessionID)
+                else {
+                  initialTitles.set(sessionID, event.data.title)
+                  await prefixTitle(sessionID, event.data.title)
+                }
+              } else if (!emoji) await keepEmoji(sessionID, event.data.title)
+            } else {
+              await lockTitle(sessionID)
+              initialTitles.delete(sessionID)
+              nativeTitles.delete(sessionID)
+              if (!emoji) await keepEmoji(sessionID, event.data.title)
+            }
           } else if (event.type === "session.forked") {
             const session = await ctx.session.get({ sessionID })
-            if (session.fork && session.title) await prefixTitle(sessionID, session.title, true)
+            if (session.fork && session.title && session.location.directory === directory) {
+              lastTitles.set(sessionID, session.title)
+              if (await isTitleLocked(session.fork.sessionID)) await lockTitle(sessionID)
+              else await prefixTitle(sessionID, session.title, true)
+            }
           } else if (event.type === "session.status" && event.data.status.type === "idle") {
             const title = initialTitles.get(sessionID)
             if (title) await prefixTitle(sessionID, title)
@@ -242,7 +382,12 @@ export default Plugin.define({
       await events
       await renameQueue
       initialTitles.clear()
+      keptEmoji.clear()
       dismissedTurns.clear()
+      lastTitles.clear()
+      expectedTitles.clear()
+      nativeTitles.clear()
+      titleLocks.clear()
     }
   },
 })

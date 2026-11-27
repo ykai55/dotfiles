@@ -93,8 +93,8 @@ metadata:
 
 盯守期间给会话名加一个 `Watch: ` 前缀，让用户一眼看出这个会话有任务在跑、还不能关：
 
-- 开始：`rename_session({ name: "Watch: <原标题>", reason: "manual" })`
-- 结束（完成 / 报错 / 超时 / 放弃）：去掉前缀，恢复原标题。
+- 开始：`rename_session({ name: "Watch: <原标题>", reason: "temporary" })`
+- 结束（完成 / 报错 / 超时 / 放弃）：用 `reason: "temporary"` 去掉前缀，恢复原标题。
 
 约束：前缀加标题合计不超过 30 个字符，超长会被拒绝，此时先缩短标题主体。标题原有的 emoji 前缀由插件保留，不要自己再加。
 

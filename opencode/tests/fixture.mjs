@@ -10,6 +10,7 @@ export function fixture() {
   }]])
   const history = new Map([["ses_main", []]])
   const forms = new Map()
+  const storage = new Map()
   const writes = []
   const requests = []
   const prompts = []
@@ -17,7 +18,7 @@ export function fixture() {
   const hooks = new Map()
   const tools = new Map()
   const subscriptions = new Set()
-  const f = { records, history, forms, writes, requests, prompts, permissions, hooks, tools, subscriptions }
+  const f = { records, history, forms, storage, writes, requests, prompts, permissions, hooks, tools, subscriptions }
   const transport = async (url, init) => {
     const request = url instanceof Request ? url : new Request(url, init)
     const parsed = new URL(request.url)
@@ -71,6 +72,16 @@ export function fixture() {
     session: { ...client.session, async hook(name, callback) { hooks.set(name, callback) } },
     permission: client.permission,
     model: client.model,
+    storage: {
+      async get(key) { return storage.get(key) },
+      async set(key, value) { storage.set(key, value) },
+      async remove(key) { storage.delete(key) },
+      async scan({ prefix, after, limit = Infinity }) {
+        const keys = [...storage.keys()].filter((key) => key.startsWith(prefix) && (after === undefined || key > after)).sort()
+        const page = keys.slice(0, limit)
+        return { entries: page.map((key) => ({ key, value: storage.get(key) })), next: keys.length > page.length ? page.at(-1) : undefined }
+      },
+    },
     tool: {
       async hook(name, callback) { hooks.set(name, callback) },
       async transform(callback) { callback({ add(tool) { tools.set(tool.name, tool) } }) },
@@ -102,6 +113,12 @@ export function fixture() {
     subscription.queue.push({ event: { type, data, location, created: Date.now() }, resolve })
     subscription.notify()
   })))
+  f.title = async (sessionID = "ses_main", complete = true) => {
+    const response = { sessionID, kind: "title", response: new Response("Native title") }
+    await hooks.get("http.response")?.(response)
+    if (complete) await response.response.text()
+    return response
+  }
   f.turn = (text = "User input", sessionID = "ses_main", files) => {
     const messages = history.get(sessionID) ?? []
     const message = { id: `msg_${messages.length}`, type: "user", text, files, time: { created: messages.length + 1 } }
