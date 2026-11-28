@@ -26,8 +26,10 @@ function open --description "Open files in their default applications, using Bam
     for i in $argv
       # .3mf is a zip container, so xdg-mime reports application/zip or
       # application/octet-stream and xdg-open falls back to the browser.
+      # Bambu Studio chdirs before loading its arguments, so hand it an
+      # absolute path or a relative one stops resolving.
       if string match -qi '*.3mf' -- $i; and type -q -f bambu-studio
-        command bambu-studio "$i" >/dev/null 2>&1 &
+        command bambu-studio (path resolve -- "$i") >/dev/null 2>&1 &
         disown $last_pid
       else
         xdg-open $i
