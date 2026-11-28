@@ -12,6 +12,10 @@ bin/.downloads/
 /certs/
 /docs/
 
+# Local-only machine and network knowledge base.
+/local/*
+!/local/.gitkeep
+
 .DS_Store
 
 /void/*
