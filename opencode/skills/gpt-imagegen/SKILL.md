@@ -5,7 +5,9 @@ description: Generate or edit raster images through OpenCode's gpt_imagegen tool
 
 # GPT Image Generation
 
-Use the `gpt_imagegen` tool supplied by the matching OpenCode plugin. It reuses the active OpenAI ChatGPT/Codex OAuth connection; no additional API key is required.
+Use the `gpt_imagegen` tool supplied by the matching OpenCode plugin. It uses a Codex OAuth connection; no additional API key is required.
+
+With **Codex browser** or **Codex device code**, the active connection is used directly. With **Sign in with ChatGPT** (subscription sharing), keep that connection for chat. Authorize the same account separately through the Codex browser or device-code flow, label it exactly `<active chat label> (Codex images)`, then select the original chat connection again. For example, `Main` pairs with `Main (Codex images)`. The plugin resolves that specific connection for images without switching the active account. Missing or duplicate matches require setup; another account is never picked automatically.
 
 ## Workflow
 

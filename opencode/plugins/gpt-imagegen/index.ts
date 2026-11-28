@@ -48,10 +48,19 @@ export default {
       }
       const connection = await ctx.integration.connection.active("openai")
       if (!connection) throw new Error("Sign in to OpenAI with your ChatGPT/Codex account in OpenCode first")
-      const credential = await ctx.integration.connection.resolve(connection)
-      if (credential?.type !== "oauth") throw new Error("gpt-imagegen requires the active OpenAI ChatGPT/Codex OAuth connection")
+      let credential = await ctx.integration.connection.resolve(connection)
+      if (connection.type === "credential" && credential?.type === "oauth" && credential.methodID === "chatgpt-token-sharing") {
+        const label = `${connection.label} (Codex images)`
+        const { data } = await ctx.integration.get({ integrationID: "openai" })
+        const paired = data.connections.filter(c => c.type === "credential" && c.method === "oauth" && c.label === label)
+        if (paired.length !== 1) throw new Error(`ChatGPT subscription sharing does not support image_generation. Expected one Codex OAuth connection named "${label}", found ${paired.length}. Sign in to the same account with Codex browser or device code and use this label; keep your original connection active for chat.`)
+        credential = await ctx.integration.connection.resolve(paired[0])
+      }
+      if (credential?.type !== "oauth" || !["chatgpt-browser", "chatgpt-headless"].includes(credential.methodID)) {
+        throw new Error("gpt-imagegen needs a Codex browser or device-code OAuth connection for images")
+      }
       const headers: Record<string, string> = { Authorization: `Bearer ${credential.access}`, "Content-Type": "application/json" }
-      const account = credential.metadata?.accountId
+      const account = credential.metadata?.accountID ?? credential.metadata?.accountId
       if (typeof account === "string") headers["ChatGPT-Account-Id"] = account
       const model = args.model ?? "gpt-6-astra"
       const requestSignal = AbortSignal.any([signal, AbortSignal.timeout(300000)])
@@ -139,7 +148,7 @@ export default {
     await ctx.tool.transform(editor => {
       editor.add({
         name: "gpt_imagegen", options: { codemode: false },
-        description: "Generate or edit images using the active Codex OAuth connection. Accepts local image paths or chat attachment names (for example image-1.png); the plugin reads attachment data from the current session, so pasted images do not need a local path. Load the gpt-imagegen skill for guidance. Returns saved PNG paths. Optional model selects the orchestrating model, not the image model.",
+        description: "Generate or edit images using the active account's Codex image connection. Accepts local image paths or chat attachment names (for example image-1.png); the plugin reads attachment data from the current session, so pasted images do not need a local path. Load the gpt-imagegen skill for guidance. Returns saved PNG paths. Optional model selects the orchestrating model, not the image model.",
         input: {
           type: "object", properties: {
             prompt: { type: "string", description: "Describe the requested image or exact edits and preservation constraints" },
