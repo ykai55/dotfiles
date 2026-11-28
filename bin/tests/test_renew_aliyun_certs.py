@@ -218,9 +218,10 @@ class RenewAliyunCertsTests(unittest.TestCase):
         self.assertIn('--CertId "$cert_id"', script)
         self.assertIn('--CertRegion "$ALIYUN_CERT_REGION"', script)
 
-    def test_server_deploy_accepts_new_host_keys_noninteractively(self) -> None:
+    def test_server_deploy_requires_known_host_keys_noninteractively(self) -> None:
         script = SCRIPT.read_text()
-        self.assertIn("StrictHostKeyChecking=accept-new", script)
+        self.assertIn("StrictHostKeyChecking=yes", script)
+        self.assertNotIn("StrictHostKeyChecking=accept-new", script)
         self.assertIn("BatchMode=yes", script)
 
     def test_staging_uses_isolated_certificate_directory(self) -> None:

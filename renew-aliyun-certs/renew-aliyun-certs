@@ -16,7 +16,7 @@ CREATED_DNS_RECORD_IDS=()
 SENSITIVE_TMP_FILES=()
 SSH_OPTS=(
   -o BatchMode=yes
-  -o StrictHostKeyChecking=accept-new
+  -o StrictHostKeyChecking=yes
 )
 
 usage() {
